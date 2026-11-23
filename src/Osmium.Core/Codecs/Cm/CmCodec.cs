@@ -369,6 +369,11 @@ internal sealed class CmPredictor
     private int _sel2, _pMix;
     private readonly int _lr1, _lr2;
 
+    // learned final stage (per bit position) over the mixer output and the three APMs
+    private const int WarmupBytes = 16384;
+    private readonly int[] _wf = new int[8 * 5];
+    private readonly int[] _xf = new int[5];
+    private int _pf;
     // SSE
     private readonly Apm _a1, _a2, _a3;
     private int _pFinal;
@@ -399,7 +404,9 @@ internal sealed class CmPredictor
         _minLen = o.MatchMinLen;
         if (_useMatch) _mt = new int[1 << _matchBits];
 
-        _nIn = 2 + _ctx.Length + 2 + 1; // o0, o1, hashed..., match x2, bias
+        // inputs: o0, o1, (stretch + confidence) per hashed context, match ×2, bias
+        _nIn = 2 + _ctx.Length * 2 + 2 + 1;
+        Array.Fill(_wf, 65536 / 4);
         _x = new int[_nIn];
         _setCount = [256, (_ctx.Length + 1) * 8, 33 * 8, 256];
         _w = new int[MixerNeurons][];
@@ -592,7 +599,13 @@ internal sealed class CmPredictor
         uint[] t = _t;
         int nib = _nib;
         for (int k = 0; k < _bucket.Length; k++)
-            x[i++] = Logistic.Stretch(SlotP(t[_bucket[k] + nib]));
+        {
+            uint sv = t[_bucket[k] + nib];
+            int pp = SlotP(sv);
+            x[i++] = Logistic.Stretch(pp);
+            // confidence input: linear-domain deviation scaled by how often the context was seen
+            x[i++] = sv == 0 ? 0 : ((pp - 2048) * (int)Math.Min(sv & 1023, 31)) >> 5;
+        }
 
         int mstate = 0;
         _mIdx = -1;
@@ -639,7 +652,14 @@ internal sealed class CmPredictor
         int pa = _a1.P(_pMix, c0);
         int pb = _a2.P(_pMix, c0 | ((int)(_c4 & 0xFF) << 8));
         int pc = _a3.P(_pMix, (_mIdx + 1) * 256 + c0);
-        int p = (_pMix * 2 + pa + pb * 3 + pc * 2 + 4) >> 3;
+        _xf[0] = Logistic.Stretch(_pMix); _xf[1] = Logistic.Stretch(pa); _xf[2] = Logistic.Stretch(pb); _xf[3] = Logistic.Stretch(pc); _xf[4] = 256;
+        long d = 0;
+        int bb = _bitPos * 5;
+        for (int j = 0; j < 5; j++) d += (long)_xf[j] * _wf[bb + j];
+        int sd = (int)(d >> 16);
+        if (sd > 2047) sd = 2047; else if (sd < -2047) sd = -2047;
+        _pf = Logistic.Squash(sd);
+        int p = (_pf * 3 + pb + 2) >> 2;
         if (p < 1) p = 1; else if (p > 4095) p = 4095;
         _pFinal = p;
         return p;
@@ -666,7 +686,9 @@ internal sealed class CmPredictor
         int target = bit << 12;
         for (int k = 0; k < MixerNeurons; k++)
         {
-            int err = (target - _p1[k]) * _lr1;
+            // learning-rate warm-up: up to 4x during the first ~16 KiB, decaying to MixerRate
+            int lr = _lr1 + (int)((3L * _lr1 * WarmupBytes) / (WarmupBytes + _pos));
+            int err = (target - _p1[k]) * lr;
             int[] w = _w[k];
             int b = _sel[k] * _nIn;
             for (int j = 0; j < _nIn; j++)
@@ -686,6 +708,11 @@ internal sealed class CmPredictor
         _a1.Update(bit);
         _a2.Update(bit);
         _a3.Update(bit);
+        {
+            int errf = (target - _pf) * 6;
+            int bb = _bitPos * 5;
+            for (int j = 0; j < 5; j++) _wf[bb + j] += (_xf[j] * errf + 0x8000) >> 16;
+        }
 
         // advance bit state
         _c0 = (c0 << 1) | bit;
