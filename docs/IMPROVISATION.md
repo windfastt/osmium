@@ -1,0 +1,77 @@
+# Osmium — Critic Review, Improvisations and Decision Log
+
+This file records what the adversarial review (and the cross-checks between architects) found, what was changed
+because of it, what was deliberately not adopted, and the backlog of further ideas. Severity: **B** blocker,
+**M** major, **m** minor, **I** idea.
+
+## 1. Findings from cross-checking the architects' reports
+
+| # | Finding | Resolution |
+|---|---|---|
+| X1 | **B** — The engine architect's x86 E8/E9 rule advanced by 1 byte after a non-qualifying E8/E9. A later transform at `i+1..i+3` could then rewrite byte `i+4`, which the decoder re-reads at `i` → different decision → corrupted output. | Lead's rule kept: **skip 4** after a non-qualifying E8/E9. The critic independently reached the same conclusion. Covered by an exhaustive test over every 7-byte string of a hostile alphabet (78 125 cases) plus a randomized adversarial corpus. |
+| X2 | Both architects asked for a 1 GiB raw block limit; the first blueprint draft allowed 4 GiB "Insane" blocks, impossible with `byte[]`. | Hard limit `rawSize ≤ 2^30` in format and code; all profile caps ≤ 1 GiB. |
+| X3 | The UX architect showed `Osmium.exe` (GUI) and `osmium.exe` (CLI) collide on case-insensitive file systems. | GUI is `Osmium.App.exe`. |
+| X4 | Two single-file executables would each embed the ~70 MB runtime. | App + CLI are co-published self-contained into one folder; a separate single-file `osmium.exe` is still produced for headless workers / portable extraction. |
+| X5 | Encoder/decoder symmetry risk in CM. | CM is integer-only with constant tables; a single predictor class serves both directions; verified on edge sizes and corpora; golden-vector tests pin the output across platforms. |
+
+## 2. Critic review → changes adopted
+
+| # | Sev | Finding | Change made |
+|---|---|---|---|
+| 1 | B | Length-changing filters (Text) had no stored length; CM/PPMd/LZMA need the exact output length. | Pipeline descriptor stores every stage's input size; decoders assert exact sizes. |
+| 2 | B | Path validation missed `\`, `<>"\|?*`, trailing dot/space, device names with extensions, superscript `COM¹`, `CONIN$`, duplicates, case collisions. | `PathSafety` applies Windows rules on every OS; index rejects duplicate paths; case collisions are renamed on extraction. |
+| 3 | B | Extraction could destroy an existing file if verification then failed. | Write to a randomised `*.osmium-part-xxxx`, verify XXH128, then atomically replace. |
+| 4 | B | 4 GiB blocks impossible. | 1 GiB limit (X2). |
+| 5 | B | Third-party decoders allocate from the payload (LZMA dictionary, zstd window, PPMd/CM memory) → decompression bomb / OOM. | LZMA properties are rebuilt from the descriptor with the dictionary clamped to the block size; zstd `windowLogMax` is clamped to the block size (and the encoder clamps its window identically); CM tables are clamped to the block size on both sides; decode memory is checked against a configurable limit before decoding; every decoder exception becomes "block corrupt". |
+| 6 | B | Forward compatibility: index records not length-prefixed; params silently clamped on read. | Each block and entry record is length-prefixed (unknown trailing fields are skipped by older readers); header flags split into critical/informational; odd extension types critical; method ids frozen; out-of-range or unknown parameters are rejected on read, never clamped. |
+| 7 | M | Header (KDF iterations, flags) not authenticated; iteration count could be inflated to hang the opener. | Index AAD includes the full header bytes; readers refuse more than 20 M iterations. Each frame is encrypted exactly once (frame numbers are assigned at write time and never reused). |
+| 8 | M | Blocks should be self-describing in both modes. | Frame header (magic, flags, frame number, length, CRC) + body CRC + payload hash; GCM tag for encrypted bodies. |
+| 9 | M | Overlapping segments allow an expansion bomb. | Index validation (bounds, sums, duplicates) and an expansion check: extraction asks/refuses when output exceeds a configurable multiple of stored raw data or available disk space. |
+| 10 | M | Source may change between hashing and reading. | File hashes are computed from the bytes actually placed in blocks; size + mtime are rechecked after reading; changed files fail loudly. The scanner does not follow reparse points, skips cloud placeholders (`Offline`/`RecallOnDataAccess`) and lists locked files. |
+| 11 | M | Alignment-sensitive filters inside solid blocks. | Group builder pads member starts to the group alignment; PCM/Image files get their own block with region parameters. |
+| 12 | M | E8/E9 rule must be code, not prose. | Implemented exactly as specified, with exhaustive tests (X1). |
+| 13 | M | Text filter is risky. | **Not adopted as proposed** (escape-free variant). The escape-based design is kept because it also works when few bytes are free (UTF-8 text), and it passes 300 rounds of hostile fuzzing plus the exhaustive suite. It is always trial-gated: it is only used when it makes the final output smaller. |
+| 14 | M | Verification must be on at every level. | Every block is decoded and compared before it is written (opt-out only as an advanced setting); after writing, the archive is re-opened and every frame is structurally verified (CRCs, payload hashes, index) without a second full decode; a block that does not shrink is stored. |
+| 15 | M | Memory leases could deadlock (encode lease then verify lease). | One lease per block covering max(encode, decode) + raw + scratch for the whole lifecycle. |
+| 16 | M | Extraction order with dedup. | Extraction is block-by-block with positional writes; files are verified by hashing after completion; test mode reassembles in order. |
+| 17 | m | CM decoder silently pads past the end. | Decoder checks that the input was consumed exactly. |
+| 18 | m | CM memory estimate incomplete. | Includes APMs, mixers and history. |
+| 20 | m | 256 MiB CM tables for 4 KB trials. | Table and match sizes are clamped to the block size (identically in encoder and decoder). |
+| 22 | M | Mark-of-the-Web not propagated (7-Zip CVE-2025-0411 class). | On Windows, an archive's `Zone.Identifier` stream is copied to every extracted file. |
+| 23 | M | Distributed: passphrase mode allows offline dictionary attack; version skew; heartbeats; chunking; memory caps. | Pairing code (random 256-bit key) only; protocol + engine fingerprint check in the handshake; independent heartbeat task; chunked transfers; workers enforce their own memory cap; remote work disabled for encrypted jobs by default; documentation states plainly that workers see file *contents* (never names). |
+| 24 | m | Metadata could leak absolute paths. | Plan/explain metadata uses archive-relative paths only and can be switched off. |
+| 26 | m | Docs disagreed (footer size/magic). | FORMAT.md is authoritative and was rewritten after the merge. |
+| 27 | m | "Byte-identical" cluster test impossible with completion-order frames and random ids. | Frames are written in **logical order** (out-of-order completions are buffered), files are sorted by ordinal path before planning, and archive ids/salts come from an injectable RNG in tests — so archives are reproducible except for id/salt. |
+
+### Scope changes from the review
+- **Cut:** passphrase-based cluster keys (pairing code only); SHA-256 per raw block for remote verification (the coordinator keeps the raw bytes and compares hashes directly); Insane merge/split refinement (backlog); the 500-evaluation Exhaustive grid ("Exhaustive" = every seed candidate on the full data, plus hill-climbing); rule *specificity* (precedence is layer → priority → order, simpler to explain).
+- **Simplified:** dark theme uses WinForms' native colour mode plus custom-painted navigation and the DWM title bar instead of a fully custom renderer.
+- **Added (user-expected):** keep-awake during jobs, process priority, pause on battery, estimated decode time and RAM before compressing and in archive info, overwrite policies, extract single files.
+
+## 3. Improvisations (compression gains) — status
+
+| Idea | Expected | Status |
+|---|---|---|
+| CM record contexts from stride analysis (`stride` param) | 5–25 % on tables/BMP/structured | **Adopted** |
+| Measured CM tuning before freezing v1 (final-stage mixing, learning-rate warm-up, counter limits) | 1–3 % | Evaluated empirically; see §5 |
+| Alignment padding for stride-sensitive groups | free | **Adopted** |
+| Clamp dictionaries / windows / tables to block size | fewer OOMs, more parallel trials | **Adopted** |
+| Insane "race": top-2 candidates compressed on the full block, smaller kept | 0–3 % | **Adopted** |
+| LMS audio predictor | +5–8 % on WAV | **Adopted** (sign-sign LMS, order ≤ 32) |
+| E8/E9 restricted to PE code sections; ARM64 ADRP | +1–3 % on binaries | Backlog |
+| SIMD (integer, deterministic) CM inner loops; pipelined CM verify | 1.5–2× speed | Backlog |
+| Bit-history (state machine) counters, order-2 APM, 2-layer paq-style network | +3–8 % | Backlog |
+
+## 4. Backlog
+- Bit-exact deflate recompression (PNG/ZIP/DOCX/PDF) via a zlib-exact port or preflate-style diffs; lossless JPEG recompression.
+- GA parameter search; persistent analysis/plan/trial caches; crash-resume journal.
+- Intra-file segmentation (different pipelines per region of one file).
+- Out-of-process job host for the tray app; NativeAOT shell forwarder.
+- Windows 11 top-level context menu (signed sparse package + IExplorerCommand); toasts with actions.
+- PAKE for passphrase-based clusters; IPv6 discovery; cross-worker verification of symmetric-codec blocks.
+- Duplicate index copy, `osmium salvage`, recovery records, multi-volume, append/update (needs random nonces).
+- Recycle Bin removal of sources after verified compression.
+
+## 5. Measured decisions
+Filled in during implementation (CM tuning experiments, profile results on test corpora) — see the README
+"Results" section for the final numbers.

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Platform-neutral desktop logic (settings model, IPC, coalescing, shell registration plan,
+       tray text). No WinForms here so it is fully unit-testable on Linux CI. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Osmium.Desktop</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Osmium.Core\Osmium.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Osmium.Desktop.Tests" />
+  </ItemGroup>
+</Project>
