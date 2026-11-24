@@ -150,7 +150,11 @@ internal sealed class MainForm : Form
 
 internal interface IPage
 {
+    /// <summary>Called every time the page is shown.</summary>
     void Activated();
+
+    /// <summary>The page holds edits that are not saved yet (asked about before Osmium exits).</summary>
+    bool HasUnsavedChanges => false;
 }
 
 /// <summary>
@@ -165,7 +169,8 @@ internal sealed class SettingsRenderer : Panel
     private IReadOnlyList<SettingDescriptor> _all = [];
     private Func<bool> _experimentalEnabled = () => true;
 
-    public event Action? Changed;
+    /// <summary>Raised after the user changed a setting's value (the descriptor's setter has run).</summary>
+    public event Action<SettingDescriptor>? Changed;
 
     public SettingsRenderer()
     {
@@ -299,7 +304,7 @@ internal sealed class SettingsRenderer : Panel
         try { d.Set(value); }
         catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException) { _errors.SetError(editor, e.Message); return; }
         UpdateStates();
-        Changed?.Invoke();
+        Changed?.Invoke(d);
     }
 
     private void UpdateStates()

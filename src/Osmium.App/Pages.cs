@@ -667,11 +667,15 @@ internal sealed class ClusterPage : UserControl, IPage
     private readonly TextBox _key = new() { Width = 560, UseSystemPasswordChar = true };
     private readonly FastList _list = Ui.List(("Name", 180), ("Address", 200), ("Slots", 60), ("Status", 300));
     private readonly Label _local = Ui.Text("", muted: true, maxWidth: 900);
+    /// <summary>The key box holds text the user typed, pasted or generated and has not saved yet.</summary>
+    private bool _keyEdited;
+    private bool _loadingKey;
 
     public ClusterPage(TrayApp app)
     {
         _app = app;
-        _key.Text = app.Settings.Cluster.ClusterKey;
+        _key.TextChanged += (_, _) => { if (!_loadingKey) _keyEdited = true; };
+        LoadKey();
         var keyRow = Ui.Bar(new Label { Text = "Cluster key:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) }, _key,
             Ui.Button("Show", (_, _) => _key.UseSystemPasswordChar = !_key.UseSystemPasswordChar),
             Ui.Button("Generate", (_, _) =>
@@ -688,21 +692,50 @@ internal sealed class ClusterPage : UserControl, IPage
             "PCs that share the same key can split compression work. Workers receive file contents (never names or passwords). Workers are refused if they run a different engine version; every remote result is re-verified here.",
             _list, keyRow, tools, _local));
         UpdateLocal();
+        app.SettingsChanged += OnSettingsChanged;
+        Disposed += (_, _) => app.SettingsChanged -= OnSettingsChanged;
     }
 
-    public void Activated() => UpdateLocal();
+    public bool HasUnsavedChanges => _keyEdited && _key.Text != _app.Settings.Cluster.ClusterKey;
 
+    public void Activated()
+    {
+        LoadKey();
+        UpdateLocal();
+    }
+
+    private void OnSettingsChanged()
+    {
+        if (IsDisposed) return;
+        LoadKey();
+        UpdateLocal();
+    }
+
+    /// <summary>Shows the saved key, unless the box holds an unsaved one.</summary>
+    private void LoadKey()
+    {
+        if (_keyEdited) return;
+        _loadingKey = true;
+        try { _key.Text = _app.Settings.Cluster.ClusterKey; }
+        finally { _loadingKey = false; }
+    }
+
+    /// <summary>Saves the key in its canonical form (OSM1-XXXXX-…), however it was pasted; an empty box removes it.</summary>
     private void SaveKey()
     {
-        try
+        string key;
+        if (string.IsNullOrWhiteSpace(_key.Text)) key = "";
+        else
         {
-            if (_key.Text.Length > 0) ClusterKey.Parse(_key.Text);
-            var s = _app.Settings.Clone();
-            s.Cluster.ClusterKey = _key.Text.Trim();
-            _app.SaveSettings(s);
-            Ui.Info("Cluster key saved.");
+            try { key = ClusterKey.Parse(_key.Text).ToString(); }
+            catch (FormatException e) { Ui.Error(e.Message, "Cluster key not saved"); return; }
         }
-        catch (FormatException e) { Ui.Error(e.Message); }
+        var s = _app.Settings.Clone();
+        s.Cluster.ClusterKey = key;
+        _app.SaveSettings(s);
+        _keyEdited = false;
+        LoadKey();
+        Ui.Info(key.Length == 0 ? "Cluster key removed." : "Cluster key saved.");
     }
 
     private void UpdateLocal()
@@ -752,7 +785,11 @@ internal sealed class SettingsPage : UserControl, IPage
     private readonly TextBox _search = new() { Width = 260, PlaceholderText = "Search settings" };
     private readonly SettingsRenderer _renderer = new() { Dock = DockStyle.Fill };
     private readonly Panel _watchPanel = new() { Dock = DockStyle.Bottom, Height = 0 };
+    /// <summary>Copy of the settings being edited. Only the entries in <see cref="_edited"/> are saved.</summary>
     private OsmiumSettings _working;
+    /// <summary>Keys of the settings the user changed since the last Apply or Revert (see <see cref="SettingsEdits"/>).</summary>
+    private readonly HashSet<string> _edited = new(StringComparer.Ordinal);
+    private bool _applying;
     private List<Osmium.Desktop.Settings.SettingDescriptor> _all = [];
     private readonly Label _dirty = Ui.Text("", muted: true);
 
@@ -763,10 +800,10 @@ internal sealed class SettingsPage : UserControl, IPage
         foreach (var c in SettingReflector.Categories(_working)) _categories.Items.Add(c.Name);
         _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; Render(); };
         _search.TextChanged += (_, _) => Render();
-        _renderer.Changed += () => _dirty.Text = "Unsaved changes";
+        _renderer.Changed += d => MarkEdited(d.Key);
         var tools = Ui.Bar(_search,
             Ui.Button("Apply", (_, _) => Apply(), accent: true),
-            Ui.Button("Revert", (_, _) => { _working = _app.Settings.Clone(); Render(); _dirty.Text = ""; }),
+            Ui.Button("Revert", (_, _) => Revert()),
             Ui.Button("Restore defaults", (_, _) => RestoreDefaults()),
             Ui.Button("Repair Explorer integration", (_, _) => Repair()),
             _dirty);
@@ -776,9 +813,33 @@ internal sealed class SettingsPage : UserControl, IPage
         body.Controls.Add(_categories);
         Controls.Add(Ui.Page("Settings", "Every option Osmium has. Settings marked EXPERIMENTAL need the master switch on the Experimental page.", body, tools));
         _categories.SelectedIndex = 0;
+        app.SettingsChanged += OnSettingsChanged;
+        Disposed += (_, _) => app.SettingsChanged -= OnSettingsChanged;
     }
 
-    public void Activated() { }
+    public bool HasUnsavedChanges => _edited.Count > 0;
+
+    public void Activated() => RefreshFromCurrent();
+
+    /// <summary>Settings were saved elsewhere (tray, Cluster page): show them, unless the page holds unsaved edits.
+    /// Those are kept, and Apply merges them onto whatever is current then.</summary>
+    private void OnSettingsChanged()
+    {
+        if (!_applying && !IsDisposed) RefreshFromCurrent();
+    }
+
+    private void RefreshFromCurrent()
+    {
+        if (_edited.Count > 0) return;
+        _working = _app.Settings.Clone();
+        Render();
+    }
+
+    private void MarkEdited(string key)
+    {
+        _edited.Add(key);
+        _dirty.Text = "Unsaved changes";
+    }
 
     public void ShowCategory(string name)
     {
@@ -824,10 +885,22 @@ internal sealed class SettingsPage : UserControl, IPage
                 if (d.ShowDialog(this) != DialogResult.OK) return;
                 _working.Watch.Folders.Add(new WatchFolderConfig { Path = d.SelectedPath, Profile = _working.Compression.Profile });
                 Fill();
-                _dirty.Text = "Unsaved changes";
+                MarkEdited(SettingsEdits.WatchFolders);
             }),
-            Ui.Button("Remove", (_, _) => { foreach (ListViewItem i in list.SelectedItems) _working.Watch.Folders.Remove((WatchFolderConfig)i.Tag!); Fill(); _dirty.Text = "Unsaved changes"; }),
-            Ui.Button("Toggle", (_, _) => { foreach (ListViewItem i in list.SelectedItems) { var f = (WatchFolderConfig)i.Tag!; f.Enabled = !f.Enabled; } Fill(); _dirty.Text = "Unsaved changes"; }),
+            Ui.Button("Remove", (_, _) =>
+            {
+                if (list.SelectedItems.Count == 0) return;
+                foreach (ListViewItem i in list.SelectedItems) _working.Watch.Folders.Remove((WatchFolderConfig)i.Tag!);
+                Fill();
+                MarkEdited(SettingsEdits.WatchFolders);
+            }),
+            Ui.Button("Toggle", (_, _) =>
+            {
+                if (list.SelectedItems.Count == 0) return;
+                foreach (ListViewItem i in list.SelectedItems) { var f = (WatchFolderConfig)i.Tag!; f.Enabled = !f.Enabled; }
+                Fill();
+                MarkEdited(SettingsEdits.WatchFolders);
+            }),
             Ui.Text("New files are compressed to an \"_osmium\" subfolder once they stop changing; originals are kept.", muted: true));
         _watchPanel.Controls.Add(list);
         _watchPanel.Controls.Add(bar);
@@ -835,12 +908,26 @@ internal sealed class SettingsPage : UserControl, IPage
         Fill();
     }
 
+    /// <summary>Saves the edited settings on top of the current ones, so changes made elsewhere since the page
+    /// was shown (tray toggles, a key saved on the Cluster page) are kept.</summary>
     private void Apply()
     {
-        _app.SaveSettings(_working);
+        var merged = SettingsEdits.Apply(_app.Settings, _working, _edited);
+        _applying = true;
+        try { _app.SaveSettings(merged); }
+        finally { _applying = false; }
+        _edited.Clear();
         _working = _app.Settings.Clone();
         _dirty.Text = "Saved";
         Render();
+    }
+
+    private void Revert()
+    {
+        _edited.Clear();
+        _working = _app.Settings.Clone();
+        Render();
+        _dirty.Text = "";
     }
 
     private void RestoreDefaults()
@@ -850,14 +937,17 @@ internal sealed class SettingsPage : UserControl, IPage
         var defaults = new OsmiumSettings();
         var prop = typeof(OsmiumSettings).GetProperties().FirstOrDefault(p =>
             p.PropertyType.GetCustomAttributes(typeof(SettingsCategoryAttribute), false).OfType<SettingsCategoryAttribute>().FirstOrDefault()?.Name == cat);
-        prop?.SetValue(_working, prop.GetValue(defaults));
+        if (prop is null) return;
+        prop.SetValue(_working, prop.GetValue(defaults));
+        foreach (var key in SettingsEdits.KeysOf(cat)) _edited.Add(key);
         Render();
         _dirty.Text = "Unsaved changes";
     }
 
+    /// <summary>Re-applies the saved integration settings (unsaved edits on this page are not used).</summary>
     private void Repair()
     {
-        if (_app.ApplyIntegration(_working)) Ui.Info("Explorer integration updated for your account.");
+        if (_app.ApplyIntegration(_app.Settings)) Ui.Info("Explorer integration updated for your account.");
         else Ui.Error("Could not update the registry; see the Log page.");
     }
 }

@@ -129,6 +129,17 @@ internal sealed class TrayApp : ApplicationContext
 
     // ------------------------------------------------------------------ settings
 
+    /// <summary>
+    /// Raised on the UI thread after <see cref="SaveSettings"/> stored and applied new settings. Pages that keep a
+    /// copy of a setting (the Settings page, the Cluster page's key box) reload it unless they hold unsaved edits.
+    /// </summary>
+    public event Action? SettingsChanged;
+
+    /// <summary>
+    /// Stores <paramref name="s"/> as the complete new settings. Callers start from <c>Settings.Clone()</c> taken
+    /// right before the change (the Settings page merges its edits with <see cref="SettingsEdits.Apply"/>), so a
+    /// stale copy never overwrites changes made elsewhere.
+    /// </summary>
     public void SaveSettings(OsmiumSettings s)
     {
         var old = Settings;
@@ -138,13 +149,17 @@ internal sealed class TrayApp : ApplicationContext
             || !s.Integration.QuickProfiles.SequenceEqual(old.Integration.QuickProfiles);
         static string WorkerConfig(OsmiumSettings x) => $"{x.Cluster.ClusterKey}|{x.Cluster.WorkerPort}|{x.Cluster.WorkerSlots}|{x.Cluster.WorkerMemoryMiB}";
         bool workerChanged = WorkerConfig(s) != WorkerConfig(old);
+        _store.Save(s); // first: if the file cannot be written, nothing has changed
         Settings = s;
-        _store.Save(s);
-        if (!s.Security.RememberForSession) _sessionPasswords.Clear();
-        if (integrationChanged) ApplyIntegration(s);
-        else if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
-        if (workerChanged && _worker is not null) StopWorker(); // restarted below with the new configuration
-        ApplyRuntimeSettings();
+        try
+        {
+            if (!s.Security.RememberForSession) _sessionPasswords.Clear();
+            if (integrationChanged) ApplyIntegration(s);
+            else if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
+            if (workerChanged && _worker is not null) StopWorker(); // restarted below with the new configuration
+            ApplyRuntimeSettings();
+        }
+        finally { SettingsChanged?.Invoke(); }
     }
 
     /// <summary>Re-registers the per-user Explorer integration from settings (also used by "Repair").</summary>
