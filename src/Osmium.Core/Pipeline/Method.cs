@@ -18,12 +18,13 @@ public sealed record ParamDef(
     string Description,
     IReadOnlyList<long>? SearchValues = null,
     IReadOnlyList<string>? Choices = null,
-    bool Experimental = false)
+    bool Experimental = false,
+    bool Tunable = true)
 {
     public long Clamp(long v) => Math.Clamp(v, Min, Max);
 
     public IReadOnlyList<long> Dimension =>
-        SearchValues ?? (Type == ParamType.Bool ? [0, 1]
+        !Tunable ? [Default] : SearchValues ?? (Type == ParamType.Bool ? [0, 1]
             : Max - Min <= 16 ? Enumerable.Range(0, (int)(Max - Min + 1)).Select(i => Min + i).ToArray()
             : [Default]);
 }

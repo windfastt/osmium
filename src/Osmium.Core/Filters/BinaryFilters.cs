@@ -181,9 +181,9 @@ public sealed class Pcm16Filter : SameLengthFilter
 {
     private static readonly ParamDef[] Defs =
     [
-        new("offset", "Region offset", ParamType.Int, 0, int.MaxValue, 0, "Start of the PCM data in the block."),
-        new("length", "Region length", ParamType.Int, 0, int.MaxValue, int.MaxValue, "Length of the PCM data (clipped to the block)."),
-        new("channels", "Channels", ParamType.Int, 1, 8, 2, "Interleaved channel count."),
+        new("offset", "Region offset", ParamType.Int, 0, int.MaxValue, 0, "Start of the PCM data in the block.", Tunable: false),
+        new("length", "Region length", ParamType.Int, 0, int.MaxValue, int.MaxValue, "Length of the PCM data (clipped to the block).", Tunable: false),
+        new("channels", "Channels", ParamType.Int, 1, 8, 2, "Interleaved channel count.", Tunable: false),
         new("lms", "LMS order", ParamType.Int, 0, 32, 16, "Adaptive filter taps (0 = fixed predictor only).", [0, 8, 16, 32]),
         new("split", "Split byte planes", ParamType.Bool, 0, 1, 1, "Store low bytes then high bytes of the residuals."),
     ];
@@ -287,11 +287,11 @@ public sealed class Image2DFilter : SameLengthFilter
 {
     private static readonly ParamDef[] Defs =
     [
-        new("offset", "Pixel data offset", ParamType.Int, 0, int.MaxValue, 0, "Start of the pixel array in the block."),
-        new("width", "Width (pixels)", ParamType.Int, 1, 1 << 20, 1, "Image width."),
-        new("rows", "Rows", ParamType.Int, 1, 1 << 20, 1, "Image height."),
-        new("bpp", "Bytes per pixel", ParamType.Int, 1, 4, 3, "3 = 24-bit BGR, 4 = 32-bit BGRA, 1 = grayscale/indexed."),
-        new("rowbytes", "Row stride (bytes)", ParamType.Int, 1, 1 << 24, 4, "Bytes per row including padding."),
+        new("offset", "Pixel data offset", ParamType.Int, 0, int.MaxValue, 0, "Start of the pixel array in the block.", Tunable: false),
+        new("width", "Width (pixels)", ParamType.Int, 1, 1 << 20, 1, "Image width.", Tunable: false),
+        new("rows", "Rows", ParamType.Int, 1, 1 << 20, 1, "Image height.", Tunable: false),
+        new("bpp", "Bytes per pixel", ParamType.Int, 1, 4, 3, "3 = 24-bit BGR, 4 = 32-bit BGRA, 1 = grayscale/indexed.", Tunable: false),
+        new("rowbytes", "Row stride (bytes)", ParamType.Int, 1, 1 << 24, 4, "Bytes per row including padding.", Tunable: false),
         new("green", "Subtract green", ParamType.Bool, 0, 1, 1, "Decorrelate colour channels before prediction (bpp ≥ 3)."),
     ];
     public override int Id => MethodIds.Image2D;

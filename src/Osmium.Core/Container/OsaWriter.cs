@@ -124,6 +124,7 @@ public sealed class OsaWriter : IDisposable
             var footer = new ArchiveFooter(offset, Osa.FrameHeaderSize + bodyLen, BinaryPrimitives.ReadUInt64LittleEndian(_header.ArchiveId));
             _fs.Write(footer.Serialize());
             _fs.Flush(flushToDisk: true);
+            _fs.Dispose(); // closed so the archive can be re-opened for verification before Commit()
             _finished = true;
         }
     }

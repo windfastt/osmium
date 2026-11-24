@@ -242,7 +242,7 @@ public sealed class LzmaCodec : MethodBase
     private static readonly ParamDef[] Defs =
     [
         new("dict", "Dictionary", ParamType.Size, 1 << 16, 1 << 29, 64 << 20,
-            "Match window. Automatically shrunk to the block size. Encoder needs ~11.5× this in RAM (bt4).", DictSteps),
+            "Match window. Automatically shrunk to the block size. Encoder needs ~11.5× this in RAM (bt4).", DictSteps, Tunable: false),
         new("lc", "Literal context bits", ParamType.Int, 0, 8, 3, "High bits of the previous byte used to predict literals. 0 suits binaries, 3–4 text.", [0, 1, 2, 3, 4, 8]),
         new("lp", "Literal position bits", ParamType.Int, 0, 4, 0, "Alignment of literals. 2 suits 32-bit records.", [0, 1, 2]),
         new("pb", "Position bits", ParamType.Int, 0, 4, 2, "Alignment of matches. 0 suits text, 2 binaries.", [0, 1, 2]),
@@ -362,7 +362,7 @@ public sealed class PpmdCodec : MethodBase
     private static readonly ParamDef[] Defs =
     [
         new("order", "Model order", ParamType.Int, 2, 16, 8, "Context length. 6–8 for general text, up to 16 for very repetitive text.", [4, 6, 8, 10, 12, 16]),
-        new("mem", "Model memory", ParamType.Size, 1 << 20, 256 << 20, 64 << 20, "Memory for the context tree (same for compression and decompression).", [16 << 20, 64 << 20, 256 << 20]),
+        new("mem", "Model memory", ParamType.Size, 1 << 20, 256 << 20, 64 << 20, "Memory for the context tree (same for compression and decompression).", [16 << 20, 64 << 20, 256 << 20], Tunable: false),
     ];
     public override int Id => MethodIds.Ppmd;
     public override string Name => "ppmd";

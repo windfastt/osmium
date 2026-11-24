@@ -36,7 +36,8 @@ public sealed class OsaReader : IDisposable
             ArchiveHeader header;
             ArchiveFooter footer;
             long length;
-            using (var fs = new FileStream(handle, FileAccess.Read, 1, false))
+            // A separate stream for header/footer: disposing a FileStream built on 'handle' would close it.
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096))
             {
                 header = ArchiveHeader.Read(fs);
                 footer = ArchiveFooter.Read(fs);

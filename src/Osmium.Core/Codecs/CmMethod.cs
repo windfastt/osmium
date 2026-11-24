@@ -9,7 +9,7 @@ public sealed class CmMethod : MethodBase
     private static readonly ParamDef[] Defs =
     [
         new("mem", "Model memory (log2 of 64-byte buckets)", ParamType.Int, 16, 26, 22,
-            "Hash-table size: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB, 26 = 4 GiB. Same memory is needed to decompress.", [18, 20, 22, 24]),
+            "Hash-table size: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB, 26 = 4 GiB. Same memory is needed to decompress.", [18, 20, 22, 24], Tunable: false),
         new("models", "Model set (flags)", ParamType.Int, 0, (int)CmModels.All, (int)CmModels.Default,
             "Bit flags selecting context models: orders 2/3/4/5/6/8, word, word pair, sparse A/B/C, match, record.",
             [(int)CmModels.Default, (int)CmModels.Text, (int)CmModels.Binary, (int)CmModels.All]),
@@ -19,7 +19,7 @@ public sealed class CmMethod : MethodBase
         new("lr2", "Final mixer learning rate", ParamType.Int, 1, 64, 10, "Second-layer mixer learning rate.", [6, 10, 16]),
         new("minlen", "Match model minimum length", ParamType.Int, 3, 32, 6, "Shortest repeat the match model will follow.", [4, 6, 8, 12]),
         new("stride", "Record stride", ParamType.Int, 0, 65536, 0,
-            "Record length for the record model (0 = off; set automatically when a stride is detected)."),
+            "Record length for the record model (0 = off; set automatically when a stride is detected).", Tunable: false),
         new("apm", "SSE adaptation rate", ParamType.Int, 4, 9, 7, "Adaptation shift of the secondary estimation stages.", [6, 7]),
     ];
 
