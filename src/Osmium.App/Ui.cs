@@ -22,6 +22,29 @@ internal static class Ui
         return b;
     }
 
+    /// <summary>A "Show"/"Hide" button that unmasks or masks <paramref name="box"/>; its text says what a click does.</summary>
+    public static Button RevealButton(TextBox box)
+    {
+        var b = Button(box.UseSystemPasswordChar ? "Show" : "Hide");
+        b.Click += (_, _) => SetMasked(box, b, !box.UseSystemPasswordChar);
+        return b;
+    }
+
+    /// <summary>Masks or unmasks a box and keeps its <see cref="RevealButton"/> text in step.</summary>
+    public static void SetMasked(TextBox box, Button reveal, bool masked)
+    {
+        box.UseSystemPasswordChar = masked;
+        reveal.Text = masked ? "Show" : "Hide";
+    }
+
+    /// <summary>Copies text to the clipboard; another program holding the clipboard is reported, not thrown.</summary>
+    public static void CopyToClipboard(string text)
+    {
+        if (text.Length == 0) return; // SetText throws on an empty string
+        try { Clipboard.SetText(text); }
+        catch (System.Runtime.InteropServices.ExternalException) { Error("Another program is using the clipboard. Try again."); }
+    }
+
     public static FlowLayoutPanel Bar(params Control[] controls)
     {
         var f = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = new Padding(0, 4, 0, 6) };

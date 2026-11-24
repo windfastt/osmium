@@ -285,6 +285,16 @@ internal sealed class SettingsRenderer : Panel
         }
         var text = new TextBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
         text.TextChanged += (_, _) => Commit(d, text.Text);
+        if (d.Editor == SettingEditor.Password)
+        {
+            // Wide enough for a whole cluster key (70 characters), scaled for the monitor's DPI.
+            text.Font = Theme.Mono;
+            text.Width = text.LogicalToDeviceUnits(560);
+            var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+            p.Controls.Add(text);
+            p.Controls.Add(Ui.RevealButton(text));
+            return p;
+        }
         if (d.Editor is SettingEditor.FolderPath or SettingEditor.FilePath)
         {
             var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };

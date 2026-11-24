@@ -664,7 +664,8 @@ internal sealed class RulesPage : UserControl, IPage
 internal sealed class ClusterPage : UserControl, IPage
 {
     private readonly TrayApp _app;
-    private readonly TextBox _key = new() { Width = 560, UseSystemPasswordChar = true };
+    private readonly TextBox _key = new() { UseSystemPasswordChar = true };
+    private readonly Button _reveal;
     private readonly FastList _list = Ui.List(("Name", 180), ("Address", 200), ("Slots", 60), ("Status", 400));
     private readonly Label _local = Ui.Text("", muted: true, maxWidth: 900);
     private readonly Label _found = Ui.Text("", muted: true, maxWidth: 900);
@@ -677,16 +678,16 @@ internal sealed class ClusterPage : UserControl, IPage
     public ClusterPage(TrayApp app)
     {
         _app = app;
+        // A whole key (OSM1- and 11 groups: 70 characters) fits; monospaced so the groups line up when read aloud.
+        _key.Font = Theme.Mono;
+        _key.Width = _key.LogicalToDeviceUnits(560);
         _key.TextChanged += (_, _) => { if (!_loadingKey) _keyEdited = true; };
         LoadKey();
+        _reveal = Ui.RevealButton(_key);
         var keyRow = Ui.Bar(new Label { Text = "Cluster key:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) }, _key,
-            Ui.Button("Show", (_, _) => _key.UseSystemPasswordChar = !_key.UseSystemPasswordChar),
-            Ui.Button("Generate", (_, _) =>
-            {
-                if (_key.Text.Length > 0 && !Ui.Confirm("Replace the current key? Other PCs will need the new key.")) return;
-                _key.Text = ClusterKey.Generate().ToString();
-            }),
-            Ui.Button("Copy", (_, _) => { if (_key.Text.Length > 0) Clipboard.SetText(_key.Text); }),
+            _reveal,
+            Ui.Button("Generate", (_, _) => GenerateKey()),
+            Ui.Button("Copy", (_, _) => Ui.CopyToClipboard(ClusterSettings.NormalizeClusterKey(_key.Text))),
             Ui.Button("Save", (_, _) => SaveKey(), accent: true));
         _lend.CheckedChanged += (_, _) =>
         {
@@ -732,6 +733,14 @@ internal sealed class ClusterPage : UserControl, IPage
         _loadingKey = true;
         try { _key.Text = _app.Settings.Cluster.ClusterKey; }
         finally { _loadingKey = false; }
+    }
+
+    /// <summary>Puts a new random key in the box, unmasked so it can be read and copied (it is saved with Save).</summary>
+    internal void GenerateKey()
+    {
+        if (_key.Text.Length > 0 && !Ui.Confirm("Replace the current key? Other PCs will need the new key.")) return;
+        _key.Text = ClusterKey.Generate().ToString();
+        Ui.SetMasked(_key, _reveal, masked: false);
     }
 
     /// <summary>Saves the key in its canonical form (OSM1-XXXXX-…), however it was pasted; an empty box removes it.</summary>
