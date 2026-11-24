@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Attach a build of this commit to an existing release, e.g. v0.1.1 (leave empty for a normal CI run)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -19,8 +24,8 @@ jobs:
     name: Build & test (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
       - run: dotnet build Osmium.sln -c Release
@@ -35,16 +40,20 @@ jobs:
       matrix:
         arch: [x64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
       - name: Version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Select-Object -First 1
-          if ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) } else { $v = "$base-ci.$env:GITHUB_RUN_NUMBER" }
+          if ($env:RELEASE_TAG -match '^v\d') { $v = $env:RELEASE_TAG.Substring(1) }
+          elseif ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) }
+          else { $v = "$base-ci.$env:GITHUB_RUN_NUMBER" }
           "VER=$v" >> $env:GITHUB_ENV
 
       - name: Build
@@ -89,7 +98,7 @@ jobs:
           if (Compare-Object $a $b) { throw 'extracted files differ' }
           & $cli info smoke/test.osa
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: osmium-${{ matrix.arch }}
           path: |
@@ -98,7 +107,7 @@ jobs:
             artifacts/osmium-*.exe
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: matrix.arch == 'x64' && always()
         with:
           name: ui-selftest-screenshots
@@ -107,30 +116,36 @@ jobs:
   release:
     name: Release
     needs: [linux, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release_tag, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: osmium-*
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS.txt
+        # The artifacts keep their folder layout (installer/…); release assets are flat.
+        run: |
+          find dist -mindepth 2 -type f -exec mv -t dist {} +
+          find dist -mindepth 1 -type d -empty -delete
+          cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Release notes from CHANGELOG.md
         # The section "## [x.y.z] ..." for the tag's version, with hard-wrapped list items joined back into one line.
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" '
+          awk -v v="${TAG#v}" '
             $0 ~ "^## \\[" v "\\]" { f = 1; next }
             /^## \[/ { f = 0 }
             !f { next }
             /^  +[^ ]/ && buf != "" { sub(/^ +/, " "); buf = buf $0; next }
             { if (started) print buf; buf = $0; started = 1 }
             END { if (started) print buf }' CHANGELOG.md > notes.md
-          if [ -s notes.md ]; then cat notes.md; else echo "::warning::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; fi
+          if [ -s notes.md ]; then cat notes.md; else echo "::warning::CHANGELOG.md has no section for ${TAG#v}"; fi
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -138,12 +153,12 @@ jobs:
         # Works both for a pushed tag and for a release published in GitHub's UI ("create new tag on publish"):
         # an existing release gets the files attached and its notes replaced by the CHANGELOG section.
         run: |
-          pre=""; [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
-          title="Osmium ${GITHUB_REF_NAME#v}"
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-            if [ -s notes.md ]; then gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file notes.md $pre; fi
+          pre=""; [[ "$TAG" == *-* ]] && pre="--prerelease"
+          title="Osmium ${TAG#v}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            if [ -s notes.md ]; then gh release edit "$TAG" --title "$title" --notes-file notes.md $pre; fi
           else
             if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$title" "${notes[@]}" $pre
+            gh release create "$TAG" dist/* --title "$title" "${notes[@]}" $pre
           fi
