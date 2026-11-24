@@ -67,6 +67,9 @@ public sealed class PipelineSpec : IEquatable<PipelineSpec>
         return w.ToArray();
     }
 
+    /// <summary>Reads the form written by <see cref="Serialize"/>. Like <see cref="BlockDescriptor.Deserialize"/>, it rejects
+    /// method ids, parameter names and values this version does not know with <see cref="NewerVersionException"/>
+    /// rather than dropping or clamping them.</summary>
     public static PipelineSpec Deserialize(ReadOnlySpan<byte> blob, MethodRegistry registry)
     {
         var r = new BlobReader(blob);
@@ -75,10 +78,9 @@ public sealed class PipelineSpec : IEquatable<PipelineSpec>
         for (int i = 0; i < n; i++)
         {
             int id = r.Int(65535);
-            var m = registry.ById(id) ?? throw new InvalidDataException($"Unknown method id {id} (archive made by a newer Osmium?).");
-            stages.Add(new StageSpec(m, ParamValues.Deserialize(r.Bytes(4096))));
+            stages.Add(BlockDescriptor.StoredStage(id, ParamValues.Deserialize(r.Bytes(4096)), registry, null));
         }
-        return new PipelineSpec(stages);
+        return BlockDescriptor.Pipeline(stages, null);
     }
 
     public ulong Hash => XxHash3.HashToUInt64(Serialize());

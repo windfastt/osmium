@@ -9,7 +9,16 @@ public static class BlockAssembler
     public static byte[] AssembleRange(ArchivePlan plan, PlanBlock block, long from, int length)
     {
         var buf = new byte[length];
-        long end = from + length;
+        AssembleRange(plan, block, from, buf);
+        return buf;
+    }
+
+    /// <summary>Fills <paramref name="destination"/> with the block's bytes from <paramref name="from"/> on, reading only
+    /// the parts of the source files that overlap that range (padding is zero).</summary>
+    public static void AssembleRange(ArchivePlan plan, PlanBlock block, long from, Span<byte> destination)
+    {
+        destination.Clear();
+        long end = from + destination.Length;
         foreach (var part in block.Parts)
         {
             long ps = part.BlockOffset, pe = part.BlockOffset + part.Length;
@@ -18,9 +27,8 @@ public static class BlockAssembler
             var unit = plan.Units[part.Unit];
             var src = plan.Files[unit.File].Src;
             long fileOffset = unit.Offset + part.UnitOffset + (s - ps);
-            ReadExact(src.FullPath, fileOffset, buf.AsSpan((int)(s - from), (int)(e - s)));
+            ReadExact(src.FullPath, fileOffset, destination.Slice((int)(s - from), (int)(e - s)));
         }
-        return buf;
     }
 
     public static void ReadExact(string path, long offset, Span<byte> dst)

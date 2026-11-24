@@ -64,7 +64,11 @@ public sealed record ExtractOptions
 
 public sealed record ExtractProgress(long BytesDone, long BytesTotal, int FilesDone, int FilesTotal, string? Current);
 
-public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkipped, IReadOnlyList<string> Errors);
+public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkipped, IReadOnlyList<string> Errors)
+{
+    /// <summary>How many of <see cref="FilesFailed"/> are in blocks that need a newer version of Osmium (not damaged).</summary>
+    public int FilesNeedingNewerVersion { get; init; }
+}
 
 public static class MemoryBudgets
 {
@@ -177,6 +181,7 @@ public static class Extractor
 
         var budget = new MemoryGate(options.MemoryBudget);
         var fileLocks = new ConcurrentDictionary<FileState, object>();
+        var newerFrames = new ConcurrentDictionary<int, bool>();
         Parallel.ForEach(byFrame.Keys.OrderBy(k => k),
             new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelBlocks), CancellationToken = ct },
             frame =>
@@ -188,6 +193,11 @@ public static class Extractor
                 try
                 {
                     raw = reader.ReadBlock(frame, new CodecContext { Token = ct });
+                }
+                catch (NewerVersionException ex)
+                {
+                    errors.Enqueue(ex.Message); // names the block and what it needs; it is not damage
+                    newerFrames[frame] = true;
                 }
                 catch (Exception ex) when (ex is CorruptDataException or InvalidDataException or IOException)
                 {
@@ -215,7 +225,10 @@ public static class Extractor
 
         if (!test) ApplyDirectoryMetadata(entries.Where(e => e.IsDirectory), destination!, options);
         progress?.Report(new ExtractProgress(total, total, filesDone, files.Count, null));
-        return new ExtractResult(ok, failed, skipped, errors.ToList());
+        return new ExtractResult(ok, failed, skipped, errors.ToList())
+        {
+            FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
+        };
 
         bool Complete(FileState f, byte[]? _)
         {

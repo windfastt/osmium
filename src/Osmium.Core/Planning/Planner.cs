@@ -411,7 +411,7 @@ public sealed class Planner(PlanOptions o)
         }
 
         if (p.SearchEvals > 0 && !best.IsStore)
-            best = await HillClimbAsync(g, best, scores[best], sample, trials, ct);
+            best = await HillClimbAsync(g, best, scores[best], sample, biggestBlock, trials, ct);
 
         g.Spec = best;
         if (p.RaceTopTwo)
@@ -422,13 +422,16 @@ public sealed class Planner(PlanOptions o)
         g.Explain.Add($"  chose {g.Spec}{(g.Alternates.Count > 0 ? $" (race vs {g.Alternates[0]})" : "")}");
     }
 
-    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, ITrialRunner trials, CancellationToken ct)
+    /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same
+    /// check the candidates passed (the sample is usually much smaller than the blocks it stands for).</param>
+    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, long biggestBlock,
+        ITrialRunner trials, CancellationToken ct)
     {
         int budget = o.Profile.SearchEvals;
         var tried = new HashSet<PipelineSpec> { best };
         while (budget > 0)
         {
-            var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, sample.Length)).Take(budget).ToList();
+            var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, biggestBlock)).Take(budget).ToList();
             if (neighbours.Count == 0) break;
             budget -= neighbours.Count;
             var sizes = await trials.RunAsync(neighbours, sample, ct);
@@ -492,6 +495,7 @@ public sealed class Planner(PlanOptions o)
     /// <summary>
     /// Deterministic sample of a group: the whole group when it fits, a prefix for region-filtered classes
     /// (audio/image parameters are absolute offsets), otherwise 16 aligned slices spread across the group.
+    /// Only the bytes that end up in the sample are read from the source files.
     /// </summary>
     internal static byte[] BuildSample(ArchivePlan plan, PlanGroup g, long rung)
     {
@@ -505,9 +509,9 @@ public sealed class Planner(PlanOptions o)
             foreach (var b in blocks)
             {
                 if (pos >= len) break;
-                var raw = BlockAssembler.Assemble(plan, b, (int)Math.Min(b.RawSize, len - pos));
-                raw.CopyTo(whole.AsSpan((int)pos));
-                pos += raw.Length;
+                int n = (int)Math.Min(b.RawSize, len - pos);
+                BlockAssembler.AssembleRange(plan, b, 0, whole.AsSpan((int)pos, n));
+                pos += n;
             }
             return whole;
         }
@@ -519,16 +523,15 @@ public sealed class Planner(PlanOptions o)
         {
             long start = (total - sliceLen) * s / (slices - 1);
             start -= start % Math.Max(1, g.Alignment);
-            // locate block containing 'start'
+            // The slice is [start, start + sliceLen) of the group's blocks laid end to end; it can span blocks.
             long acc = 0;
             int written = 0;
             foreach (var b in blocks)
             {
                 if (start + written >= acc + b.RawSize) { acc += b.RawSize; continue; }
-                var raw = BlockAssembler.Assemble(plan, b, (int)b.RawSize);
-                int from = (int)(start + written - acc);
-                int n = Math.Min(sliceLen - written, raw.Length - from);
-                raw.AsSpan(from, n).CopyTo(result.AsSpan(s * sliceLen + written));
+                long from = start + written - acc;
+                int n = (int)Math.Min(sliceLen - written, b.RawSize - from);
+                BlockAssembler.AssembleRange(plan, b, from, result.AsSpan(s * sliceLen + written, n));
                 written += n;
                 acc += b.RawSize;
                 if (written >= sliceLen) break;

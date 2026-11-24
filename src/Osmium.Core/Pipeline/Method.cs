@@ -21,7 +21,11 @@ public sealed record ParamDef(
     bool Experimental = false,
     bool Tunable = true)
 {
+    /// <summary>For values from user or planner input. Values read from an archive are checked with
+    /// <see cref="Accepts"/> instead and never clamped.</summary>
     public long Clamp(long v) => Math.Clamp(v, Min, Max);
+
+    public bool Accepts(long v) => v >= Min && v <= Max;
 
     public IReadOnlyList<long> Dimension =>
         !Tunable ? [Default] : SearchValues ?? (Type == ParamType.Bool ? [0, 1]
@@ -104,7 +108,11 @@ public abstract class MethodBase : IMethod
     public virtual double EncodeSpeed(ParamValues p) => 200;
     public virtual double DecodeSpeed(ParamValues p) => 400;
 
-    /// <summary>Fills defaults, drops unknown names, clamps to declared ranges.</summary>
+    /// <summary>
+    /// Fills defaults, drops unknown names, clamps to declared ranges. Right for specs built from user or planner input
+    /// (pipeline text, rules, the tuner); specs read from an archive are checked first and rejected instead
+    /// (<see cref="BlockDescriptor.Deserialize"/>), so for them this only fills defaults.
+    /// </summary>
     public ParamValues Normalize(ParamValues p)
     {
         var list = new List<KeyValuePair<string, long>>();
