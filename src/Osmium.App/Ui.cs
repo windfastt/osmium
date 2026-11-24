@@ -252,45 +252,90 @@ internal sealed class NavButton : Button
     }
 }
 
-internal static class PasswordDialog
+/// <summary>
+/// Asks for an archive password (twice for a new archive). It comes to the front when shown, also when an Explorer
+/// verb opened it (the forwarding instance allows that, see Program.Main), so typing goes here and not to Explorer.
+/// </summary>
+internal sealed class PasswordDialog : Form
 {
-    public static string? Ask(string prompt, bool confirm)
+    private readonly EditBox _first = new() { UseSystemPasswordChar = true, Width = 280 };
+    private readonly EditBox? _confirm;
+
+    /// <summary>The password after OK, without control characters.</summary>
+    public string? Password { get; private set; }
+
+    public PasswordDialog(string prompt, bool confirm)
     {
-        using var f = new Form
-        {
-            Text = "Osmium", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterScreen,
-            MinimizeBox = false, MaximizeBox = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            AutoScaleMode = AutoScaleMode.Dpi, AutoScaleDimensions = new SizeF(96f, 96f), Padding = new Padding(12), TopMost = true,
-        };
+        Text = "Osmium";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        Padding = new Padding(12);
+        TopMost = true;
         var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
         t.Controls.Add(Ui.Text(prompt));
-        var p1 = new EditBox { UseSystemPasswordChar = true, Width = 280 };
-        t.Controls.Add(p1);
-        TextBox? p2 = null;
+        t.Controls.Add(_first);
         if (confirm)
         {
             t.Controls.Add(Ui.Text("Confirm password"));
-            p2 = new EditBox { UseSystemPasswordChar = true, Width = 280 };
-            t.Controls.Add(p2);
+            _confirm = new EditBox { UseSystemPasswordChar = true, Width = 280 };
+            t.Controls.Add(_confirm);
         }
-        var ok = Ui.Button("OK", accent: true);
+        var ok = Ui.Button("OK", (_, _) => Check(), accent: true);
         ok.DialogResult = DialogResult.OK;
         var cancel = Ui.Button("Cancel");
         cancel.DialogResult = DialogResult.Cancel;
         t.Controls.Add(Ui.Bar(ok, cancel));
-        f.Controls.Add(t);
-        f.AcceptButton = ok;
-        f.CancelButton = cancel;
-        Theme.Apply(f);
-        while (true)
+        Controls.Add(t);
+        AcceptButton = ok;
+        CancelButton = cancel;
+        ActiveControl = _first;
+        Theme.Apply(this);
+    }
+
+    /// <summary>Shows the dialog; null when it was cancelled.</summary>
+    public static string? Ask(string prompt, bool confirm)
+    {
+        using var f = new PasswordDialog(prompt, confirm);
+        return f.ShowDialog() == DialogResult.OK ? f.Password : null;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try { Native.SetDarkTitleBar(Handle, Theme.IsDark); } catch (Exception) { }
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        Activate();
+        _first.Focus();
+    }
+
+    /// <summary>OK: keeps the dialog open on an empty or mismatched password, with the confirm box cleared.</summary>
+    private void Check()
+    {
+        // Control characters (a pasted tab or line break) are invisible here and could never be typed again.
+        string pw = TextInput.StripControlChars(_first.Text);
+        string? error = pw.Length == 0 ? "The password cannot be empty."
+            : _confirm is not null && TextInput.StripControlChars(_confirm.Text) != pw ? "The passwords do not match."
+            : null;
+        if (error is null)
         {
-            if (f.ShowDialog() != DialogResult.OK) return null;
-            // Control characters (a pasted tab or line break) are invisible here and could never be typed again.
-            string pw = TextInput.StripControlChars(p1.Text);
-            if (pw.Length == 0) { Ui.Error("The password cannot be empty."); continue; }
-            if (p2 is not null && TextInput.StripControlChars(p2.Text) != pw) { Ui.Error("The passwords do not match."); continue; }
-            return pw;
+            Password = pw;
+            return;
         }
+        DialogResult = DialogResult.None; // the OK button had already set OK
+        Ui.Error(error);
+        if (_confirm is not null) _confirm.Text = "";
+        _first.SelectAll();
+        _first.Focus();
     }
 }
 

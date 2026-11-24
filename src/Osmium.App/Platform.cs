@@ -25,7 +25,13 @@ internal static partial class Native
     [LibraryImport("shell32.dll")]
     internal static partial void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
 
+    /// <summary>Lets another process (<see cref="AsfwAny"/>: any process) bring its window to the front.</summary>
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool AllowSetForegroundWindow(int processId);
+
     internal const uint EsContinuous = 0x80000000, EsSystemRequired = 0x00000001;
+    internal const int AsfwAny = -1; // ASFW_ANY
 
     /// <summary>Immersive dark title bar (attribute 20 on Win10 20H1+, 19 on older builds).</summary>
     internal static void SetDarkTitleBar(IntPtr hwnd, bool dark)
