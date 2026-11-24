@@ -18,7 +18,7 @@ namespace Osmium.Cli
         private static readonly HashSet<string> Flags = new(StringComparer.OrdinalIgnoreCase)
         {
             "overwrite", "skip", "rename", "no-verify", "explain", "experimental", "verbose", "v", "json", "force",
-            "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery",
+            "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery", "ship-symmetric",
         };
 
         public Args(IEnumerable<string> argv)

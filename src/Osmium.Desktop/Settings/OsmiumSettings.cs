@@ -15,7 +15,7 @@ public enum ProfileName { Store, Fast, Balanced, Max, Ultra, Insane }
 [SettingsCategory("General", Order = 0, Glyph = "", Description = "Appearance, startup and notifications.")]
 public sealed class GeneralSettings
 {
-    [Setting("Theme", Description = "Follow Windows, or force light/dark.", Order = 0)]
+    [Setting("Theme", Description = "Follow Windows, or force light/dark.", Order = 0, RequiresRestart = true)]
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     [Setting("Start with Windows", Description = "Start Osmium in the notification area when you sign in.", Order = 1)]
     public bool StartWithWindows { get; set; } = true;
@@ -133,7 +133,7 @@ public sealed class IntegrationSettings
     public bool FileAssociation { get; set; } = true;
     [Setting("Quick-compress profiles in menu", Description = "Profiles offered directly in the context menu (one per line).", Editor = SettingEditor.StringList, Order = 2)]
     public List<string> QuickProfiles { get; set; } = ["balanced", "ultra"];
-    [Setting("Invocation batching window", Description = "Explorer starts one process per selected file; invocations within this window become one job.", Min = 100, Max = 5000, Unit = " ms", Order = 3, Advanced = true)]
+    [Setting("Invocation batching window", Description = "Explorer starts one process per selected file; invocations within this window become one job.", Min = 100, Max = 5000, Unit = " ms", Order = 3, Advanced = true, RequiresRestart = true)]
     public int CoalesceMs { get; set; } = 350;
 }
 

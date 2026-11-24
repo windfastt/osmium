@@ -225,6 +225,12 @@ internal sealed class CompressPage : UserControl, IPage
         if (paths.Count == 0) { Ui.Info("Add some files or folders first."); return; }
         var output = _output.Text.Trim();
         if (output.Length == 0) { Ui.Error("Choose where to save the archive."); return; }
+        if (_app.Settings.General.Output == OutputLocation.Ask)
+        {
+            using var d = new SaveFileDialog { Filter = "Osmium archive (*.osa)|*.osa", FileName = Path.GetFileName(output), InitialDirectory = SafeDir(output) };
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            output = d.FileName;
+        }
         if (!output.EndsWith(".osa", StringComparison.OrdinalIgnoreCase)) output += ".osa";
         bool overwrite = false;
         if (File.Exists(output))
@@ -366,7 +372,7 @@ internal sealed class ArchivesPage : UserControl, IPage
         try
         {
             string? pw = null;
-            using var r = OsaReader.Open(path, () => pw = PasswordDialog.Ask($"Password for {Path.GetFileName(path)}", confirm: false));
+            using var r = OsaReader.Open(path, () => pw = _app.AskPassword(path));
             _archive = path;
             _password = pw;
             _path.Text = path;
@@ -388,6 +394,7 @@ internal sealed class ArchivesPage : UserControl, IPage
         }
         catch (Exception e) when (e is IOException or InvalidDataException or WrongPasswordException or PasswordRequiredException)
         {
+            if (e is WrongPasswordException) _app.ForgetPassword(path);
             Ui.Error(e.Message, "Cannot open archive");
         }
     }
@@ -544,7 +551,16 @@ internal sealed class RulesPage : UserControl, IPage
             Ui.Button("Add example", (_, _) => AddExample()),
             new Label { Text = "Test path:", AutoSize = true, Padding = new Padding(12, 6, 0, 0) }, _testPath,
             Ui.Button("Explain", (_, _) => TestPath()));
-        var split = new SplitContainer { Orientation = Orientation.Horizontal, SplitterDistance = 200 };
+        // SplitterDistance is clamped against the control's current (default 150x100) size if set too early,
+        // so apply it once the real height is known.
+        var split = new SplitContainer { Orientation = Orientation.Horizontal, FixedPanel = FixedPanel.Panel1 };
+        bool splitSet = false;
+        split.SizeChanged += (_, _) =>
+        {
+            if (splitSet || split.Height < 300) return;
+            split.SplitterDistance = Math.Min(LogicalToDeviceUnits(220), split.Height - LogicalToDeviceUnits(140));
+            splitSet = true;
+        };
         _list.Dock = DockStyle.Fill;
         _json.Dock = DockStyle.Fill;
         split.Panel1.Controls.Add(_list);
@@ -841,13 +857,8 @@ internal sealed class SettingsPage : UserControl, IPage
 
     private void Repair()
     {
-        var feats = Osmium.Desktop.Shell.ShellFeatures.None;
-        if (_working.Integration.ContextMenu) feats |= Osmium.Desktop.Shell.ShellFeatures.ContextMenu;
-        if (_working.Integration.FileAssociation) feats |= Osmium.Desktop.Shell.ShellFeatures.Association;
-        if (_working.General.StartWithWindows) feats |= Osmium.Desktop.Shell.ShellFeatures.Startup;
-        Registration.Remove("user");
-        int rc = feats == Osmium.Desktop.Shell.ShellFeatures.None ? 0 : Registration.Apply("user", feats, _working.Integration.QuickProfiles);
-        if (rc == 0) Ui.Info("Explorer integration updated for your account."); else Ui.Error("Could not update the registry; see the Log page.");
+        if (_app.ApplyIntegration(_working)) Ui.Info("Explorer integration updated for your account.");
+        else Ui.Error("Could not update the registry; see the Log page.");
     }
 }
 
@@ -863,7 +874,11 @@ internal sealed class LogPage : UserControl, IPage
     {
         _list.Font = Theme.Mono;
         var tools = Ui.Bar(Ui.Button("Open log folder", (_, _) => AppLog.OpenFolder()),
-            Ui.Button("Copy all", (_, _) => Clipboard.SetText(string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}")))));
+            Ui.Button("Copy all", (_, _) =>
+            {
+                var text = string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}"));
+                if (text.Length > 0) Clipboard.SetText(text); // SetText throws on an empty string
+            }));
         Controls.Add(Ui.Page("Log", "Application events, shell invocations, worker activity and errors.", _list, tools));
         _timer.Tick += (_, _) => { if (Visible) Fill(); };
         _timer.Start();

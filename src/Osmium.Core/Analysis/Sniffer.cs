@@ -281,7 +281,9 @@ public static class Sniffer
             byte c = head[i];
             if (c is 9 or 10 or 13 || (c >= 32 && c < 127)) evenPrint++;
         }
-        return oddZero > pairs * 0.4 && evenPrint > pairs * 0.4;
+        // Without a BOM demand near-certainty: little-endian integer tables with zero high bytes otherwise look
+        // like UTF-16 (half their odd bytes are zero and many even bytes happen to be printable).
+        return oddZero > pairs * 0.9 && evenPrint > pairs * 0.9;
     }
 
     public static bool TryParsePe(byte[] head, out CpuArch arch, out string desc)

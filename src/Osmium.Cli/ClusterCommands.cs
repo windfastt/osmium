@@ -12,11 +12,11 @@ internal sealed class ClusterSetup : IAsyncDisposable
     public IBlockCompressor Compressor { get; }
     public int ExtraSlots => _cluster.RemoteSlots;
 
-    private ClusterSetup(Cluster c, long budget)
+    private ClusterSetup(Cluster c, long budget, bool shipSymmetric)
     {
         _cluster = c;
         Trials = c.TrialRunner(new MemoryGate(budget));
-        Compressor = c.BlockCompressor();
+        Compressor = c.BlockCompressor(shipSymmetric);
     }
 
     public static async Task<ClusterSetup?> CreateAsync(Args a, PlanOptions po, CancellationToken ct)
@@ -44,7 +44,7 @@ internal sealed class ClusterSetup : IAsyncDisposable
         }
         var cluster = await Cluster.ConnectAsync(endpoints, key, po.Threads, s => Console.WriteLine("cluster: " + s), ct);
         if (cluster.Nodes.Count == 0) { Console.WriteLine("cluster: no usable workers; running locally"); return null; }
-        return new ClusterSetup(cluster, po.MemoryBudget);
+        return new ClusterSetup(cluster, po.MemoryBudget, a.Has("ship-symmetric"));
     }
 
     public ValueTask DisposeAsync() => _cluster.DisposeAsync();

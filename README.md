@@ -19,7 +19,7 @@ in an original context-mixing codec and other PCs on your network when you ask f
 | **Dedup** | whole-file (SHA-256 confirmed) and content-defined chunking (FastCDC) |
 | **Multi-PC** | lend idle PCs as workers; trials and heavy blocks are distributed over an authenticated, encrypted channel |
 | **Safety** | every block decoded and compared before writing; atomic writes; hashes on every block and file; AES-256-GCM encryption |
-| **Settings** | 60+ settings in 11 categories, searchable, with an *Experimental* page behind a master switch |
+| **Settings** | 63 settings in 11 categories (searchable, [reference](docs/SETTINGS.md)) plus 37 codec/filter parameters; an *Experimental* page behind a master switch |
 
 ## Results
 
@@ -103,6 +103,7 @@ write frames in order → re-read the archive → atomic rename`.
 
 * [docs/BLUEPRINT.md](docs/BLUEPRINT.md) — architecture
 * [docs/FORMAT.md](docs/FORMAT.md) — the `.osa` binary format
+* [docs/SETTINGS.md](docs/SETTINGS.md) — every setting, profile and codec/filter parameter (generated from the code)
 * [docs/PLAN.md](docs/PLAN.md) — how it was planned (three architect agents + a critic) and built
 * [docs/IMPROVISATION.md](docs/IMPROVISATION.md) — critic findings, what changed, measurements, backlog
 * [docs/CHECKLIST.md](docs/CHECKLIST.md) — status of every feature
@@ -111,8 +112,8 @@ write frames in order → re-read the archive → atomic rename`.
 
 ```bash
 dotnet build Osmium.sln -c Release                       # any OS with the .NET 10 SDK
-dotnet test -c Release --project tests/Osmium.Core.Tests  # 52 engine/container/cluster tests
-dotnet test -c Release --project tests/Osmium.Desktop.Tests
+dotnet test -c Release --project tests/Osmium.Core.Tests     # 60 engine, container, planner and cluster tests
+dotnet test -c Release --project tests/Osmium.Desktop.Tests  # 15 settings, IPC, jobs, shell-registration tests
 ```
 
 ```powershell

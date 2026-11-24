@@ -88,6 +88,23 @@ public class DesktopTests
     }
 
     [Fact]
+    public void ExperimentalSettingsReachThePlanner()
+    {
+        var s = new OsmiumSettings();
+        s.Compression.Profile = ProfileName.Insane;
+        s.Experimental.CmAllModels = true;                       // without the master switch: no effect
+        Assert.False(JobManager.BuildPlanOptions(s, new JobRequest(), new RuleSet(), null).Profile.CmAllModels);
+        s.Experimental.Enabled = true;
+        var po = JobManager.BuildPlanOptions(s, new JobRequest(), new RuleSet(), null);
+        Assert.True(po.Profile.CmAllModels);
+        Assert.True(po.AllowExperimental);
+        var cms = Candidates.For(Osmium.Core.Analysis.CompatClass.Text, null, po.Profile, Core.Pipeline.MethodRegistry.Default)
+            .Where(c => c.Codec.Method.Name == "cm").ToList();
+        Assert.NotEmpty(cms);
+        Assert.All(cms, c => Assert.Equal((long)Osmium.Core.Codecs.Cm.CmModels.All, c.Codec.Params.Get("models", -1)));
+    }
+
+    [Fact]
     public async Task IpcRoundTripsOverARealPipe()
     {
         var name = IpcProtocol.PipeName("test-" + Guid.NewGuid().ToString("N")[..6], 1);

@@ -63,7 +63,7 @@ internal sealed class TrayApp : ApplicationContext
         Jobs.PasswordPrompt = archive =>
         {
             string? pw = null;
-            _ui.Send(_ => pw = PasswordDialog.Ask($"Password for {Path.GetFileName(archive)}", confirm: false), null);
+            _ui.Send(_ => pw = AskPassword(archive), null);
             return pw;
         };
 
@@ -111,15 +111,53 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    // ------------------------------------------------------------------ passwords
+
+    private readonly Dictionary<string, string> _sessionPasswords = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Asks for an archive password; with "Remember passwords until Osmium exits" the answer is kept in memory.</summary>
+    public string? AskPassword(string archive)
+    {
+        string key = Path.GetFullPath(archive);
+        if (Settings.Security.RememberForSession && _sessionPasswords.TryGetValue(key, out var cached)) return cached;
+        var pw = PasswordDialog.Ask($"Password for {Path.GetFileName(archive)}", confirm: false);
+        if (pw is not null && Settings.Security.RememberForSession) _sessionPasswords[key] = pw;
+        return pw;
+    }
+
+    public void ForgetPassword(string archive) => _sessionPasswords.Remove(Path.GetFullPath(archive));
+
     // ------------------------------------------------------------------ settings
 
     public void SaveSettings(OsmiumSettings s)
     {
-        bool startupChanged = s.General.StartWithWindows != Settings.General.StartWithWindows;
+        var old = Settings;
+        bool startupChanged = s.General.StartWithWindows != old.General.StartWithWindows;
+        bool integrationChanged = s.Integration.ContextMenu != old.Integration.ContextMenu
+            || s.Integration.FileAssociation != old.Integration.FileAssociation
+            || !s.Integration.QuickProfiles.SequenceEqual(old.Integration.QuickProfiles);
+        static string WorkerConfig(OsmiumSettings x) => $"{x.Cluster.ClusterKey}|{x.Cluster.WorkerPort}|{x.Cluster.WorkerSlots}|{x.Cluster.WorkerMemoryMiB}";
+        bool workerChanged = WorkerConfig(s) != WorkerConfig(old);
         Settings = s;
         _store.Save(s);
-        if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
+        if (!s.Security.RememberForSession) _sessionPasswords.Clear();
+        if (integrationChanged) ApplyIntegration(s);
+        else if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
+        if (workerChanged && _worker is not null) StopWorker(); // restarted below with the new configuration
         ApplyRuntimeSettings();
+    }
+
+    /// <summary>Re-registers the per-user Explorer integration from settings (also used by "Repair").</summary>
+    public bool ApplyIntegration(OsmiumSettings s)
+    {
+        var feats = ShellFeatures.None;
+        if (s.Integration.ContextMenu) feats |= ShellFeatures.ContextMenu;
+        if (s.Integration.FileAssociation) feats |= ShellFeatures.Association;
+        if (s.General.StartWithWindows) feats |= ShellFeatures.Startup; // Remove() also deletes the Run value
+        Registration.Remove("user");
+        int rc = feats == ShellFeatures.None ? 0 : Registration.Apply("user", feats, s.Integration.QuickProfiles);
+        AppLog.Info($"Explorer integration updated ({feats})");
+        return rc == 0;
     }
 
     private void ApplyRuntimeSettings()
@@ -146,9 +184,10 @@ internal sealed class TrayApp : ApplicationContext
                 Log = m => AppLog.Info("worker: " + m),
             });
             var w = _worker;
-            _ = Task.Run(async () =>
+            var token = _workerCts.Token;
+            _workerTask = Task.Run(async () =>
             {
-                try { await w.RunAsync(_workerCts.Token); }
+                try { await w.RunAsync(token); }
                 catch (Exception e) { AppLog.Error("worker stopped: " + e.Message); }
             });
         }
@@ -159,10 +198,15 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    private Task? _workerTask;
+
     private void StopWorker()
     {
         _workerCts?.Cancel();
+        // wait for the listener to close so a restart can bind the same port again
+        try { _workerTask?.Wait(TimeSpan.FromSeconds(3)); } catch (AggregateException) { }
         _worker = null;
+        _workerTask = null;
     }
 
     private void SetupWatchFolders()
@@ -219,12 +263,19 @@ internal sealed class TrayApp : ApplicationContext
                 _main?.CompressPage.AddPaths(b.Paths);
                 break;
             case "compress-quick":
-                Jobs.Enqueue(new JobRequest
+            {
+                string output = InvocationCoalescer.ArchiveNameFor(b.Paths);
+                if (Settings.General.Output == OutputLocation.Folder && Directory.Exists(Settings.General.OutputFolder))
+                    output = InvocationCoalescer.Unique(Path.Combine(Settings.General.OutputFolder, Path.GetFileName(output)));
+                else if (Settings.General.Output == OutputLocation.Ask)
                 {
-                    Kind = JobKind.Compress, Inputs = [.. b.Paths], Output = InvocationCoalescer.ArchiveNameFor(b.Paths),
-                    Profile = b.Profile, Origin = "shell",
-                });
+                    using var d = new SaveFileDialog { Filter = "Osmium archive (*.osa)|*.osa", FileName = Path.GetFileName(output), InitialDirectory = Path.GetDirectoryName(output) };
+                    if (d.ShowDialog() != DialogResult.OK) break;
+                    output = d.FileName;
+                }
+                Jobs.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [.. b.Paths], Output = output, Profile = b.Profile, Origin = "shell" });
                 break;
+            }
             case "extract-here":
                 foreach (var a in b.Paths) Jobs.Enqueue(new JobRequest { Kind = JobKind.Extract, Inputs = [a], Output = Path.GetDirectoryName(a)! });
                 break;
@@ -383,6 +434,7 @@ internal sealed class TrayApp : ApplicationContext
     private void OnJobFinished(JobSnapshot j)
     {
         AppLog.Info($"job {j.Name}: {j.State}{(j.Error is null ? "" : " — " + j.Error)}");
+        if (j.State == JobState.Failed && j.Error == new WrongPasswordException().Message) _sessionPasswords.Clear();
         if (j.State == JobState.Completed && j.Kind == JobKind.Compress && Settings.General.OpenFolderWhenDone && j.Output is not null) Shell.Reveal(j.Output);
         var mode = Settings.General.Notifications;
         if (mode == NotificationMode.None || (mode == NotificationMode.FailuresOnly && j.State != JobState.Failed)) return;

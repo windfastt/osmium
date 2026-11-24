@@ -95,6 +95,10 @@ test that must pass on both Linux and Windows.
 - Hill-climbing lowered CM table memory on small samples (hash-collision noise made a smaller table look better),
   which would have hurt on full blocks. Memory-like parameters (CM memory, LZMA dictionary, PPMd memory) are now
   excluded from the search; they are resource limits, not model choices.
+- The planner fixture tests (PLAN.md phase-3 exit criteria) caught a sniffer bug: without a byte-order mark, the
+  UTF-16 heuristic accepted any data with ≥ 40 % zero odd bytes and ≥ 40 % printable even bytes — which little-endian
+  integer tables satisfy, so they were treated as text and never got the delta/transpose candidates meant for them.
+  The no-BOM thresholds are now 90 %/90 %, with a regression test for both directions.
 
 ### 5.3 End-to-end results
 Mixed 16 MiB test folder (license texts, CSV, ELF + .NET binaries, a WAV, a BMP, PNG/JPEG/gzip files, 12-byte

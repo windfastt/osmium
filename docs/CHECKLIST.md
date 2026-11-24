@@ -32,6 +32,8 @@ Windows by CI (`--selftest-ui`, installer compile, Windows test run) · ⬜ back
 - ✅ Statistics: entropy, printable/zero ratios, zstd-1 probe, stride detection with harmonic suppression
 - ✅ Profiles Store → Insane (+ Exhaustive, experimental)
 - ✅ Successive-halving trials on deterministic samples, hill-climbing over tunable parameters, top-2 race
+- ✅ Planner fixture tests: random → Store, text → text codec, int32 records → delta/transpose, x64 PE → x86 filter,
+  WAV → PCM predictor with parsed geometry, BMP → image predictor with parsed geometry, rule-forced pipeline wins
 - ✅ Whole-file dedup (SHA-256 confirmed) and FastCDC chunk dedup
 - ✅ Rules/patches with layers, priorities, provenance, `rules check`, `explain`
 - ⬜ MinHash similarity ordering, intra-file segmentation, GA search, persistent caches

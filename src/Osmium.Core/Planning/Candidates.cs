@@ -14,7 +14,7 @@ public static class Candidates
     {
         var list = new List<string>();
         string cm(string models, int stride = 0) =>
-            $"cm(mem={p.CmMem},models={(int)Enum.Parse<CmModels>(models)}{(stride > 0 ? $",stride={stride}" : "")})";
+            $"cm(mem={p.CmMem},models={(int)(p.CmAllModels ? CmModels.All : Enum.Parse<CmModels>(models))}{(stride > 0 ? $",stride={stride}" : "")})";
         string lz(int lc, int lp, int pb, long? dict = null) =>
             $"lzma(dict={dict ?? p.LzmaDict},lc={lc},lp={lp},pb={pb},fb=273,mf=1)";
         string pm(int order) => $"ppmd(order={order},mem={(p.Level >= ProfileLevel.Ultra ? 256 : 64)}M)";

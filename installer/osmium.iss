@@ -139,26 +139,26 @@ end;
 
 procedure AddToPath(Dir: String);
 var
-  Path: String;
+  CurPath: String;
 begin
-  if not RegQueryStringValue(HKA, EnvKey(), 'Path', Path) then Path := '';
-  if Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Path) + ';') > 0 then Exit;
-  if (Path <> '') and (Copy(Path, Length(Path), 1) <> ';') then Path := Path + ';';
-  RegWriteExpandStringValue(HKA, EnvKey(), 'Path', Path + Dir);
+  if not RegQueryStringValue(HKA, EnvKey(), 'Path', CurPath) then CurPath := '';
+  if Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(CurPath) + ';') > 0 then Exit;
+  if (CurPath <> '') and (Copy(CurPath, Length(CurPath), 1) <> ';') then CurPath := CurPath + ';';
+  RegWriteExpandStringValue(HKA, EnvKey(), 'Path', CurPath + Dir);
 end;
 
 procedure RemoveFromPath(Dir: String);
 var
-  Path: String;
+  CurPath: String;
   P: Integer;
 begin
-  if not RegQueryStringValue(HKA, EnvKey(), 'Path', Path) then Exit;
-  Path := ';' + Path + ';';
-  P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Path));
+  if not RegQueryStringValue(HKA, EnvKey(), 'Path', CurPath) then Exit;
+  CurPath := ';' + CurPath + ';';
+  P := Pos(';' + Uppercase(Dir) + ';', Uppercase(CurPath));
   if P = 0 then Exit;
-  Delete(Path, P, Length(Dir) + 1);
-  Path := Copy(Path, 2, Length(Path) - 2);
-  RegWriteExpandStringValue(HKA, EnvKey(), 'Path', Path);
+  Delete(CurPath, P, Length(Dir) + 1);
+  CurPath := Copy(CurPath, 2, Length(CurPath) - 2);
+  RegWriteExpandStringValue(HKA, EnvKey(), 'Path', CurPath);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

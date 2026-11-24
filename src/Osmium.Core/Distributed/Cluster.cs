@@ -227,7 +227,8 @@ public sealed class Cluster : IAsyncDisposable
     }
 
     public ITrialRunner TrialRunner(MemoryGate gate, double spotCheckRate = 0.05) => new DistributedTrialRunner(this, new LocalTrialRunner(LocalSlots, gate), spotCheckRate);
-    public IBlockCompressor BlockCompressor() => new DistributedBlockCompressor(this);
+    /// <param name="shipSymmetric">Experimental: also ship CM/PPMd blocks (their local verification costs as much as compressing).</param>
+    public IBlockCompressor BlockCompressor(bool shipSymmetric = false) => new DistributedBlockCompressor(this, shipSymmetric);
 
     public async ValueTask DisposeAsync()
     {
@@ -307,7 +308,7 @@ public sealed class DistributedTrialRunner(Cluster cluster, LocalTrialRunner loc
 }
 
 /// <summary>Ships asymmetric-codec blocks (cheap to verify) to idle workers; verifies every result locally.</summary>
-public sealed class DistributedBlockCompressor(Cluster cluster) : IBlockCompressor
+public sealed class DistributedBlockCompressor(Cluster cluster, bool shipSymmetric = false) : IBlockCompressor
 {
     private int _localBusy;
 
@@ -316,7 +317,7 @@ public sealed class DistributedBlockCompressor(Cluster cluster) : IBlockCompress
 
     public async Task<CompressedBlock> CompressAsync(PipelineSpec spec, byte[] raw, CodecContext ctx)
     {
-        if (WorthShipping(spec) && Volatile.Read(ref _localBusy) >= cluster.LocalSlots)
+        if ((shipSymmetric || WorthShipping(spec)) && Volatile.Read(ref _localBusy) >= cluster.LocalSlots)
         {
             var node = cluster.Nodes.Where(n => n.Usable && n.Busy < n.Slots && spec.EncodeMemory(raw.Length) <= n.Memory)
                 .OrderBy(n => (double)n.Busy / n.Slots).FirstOrDefault();

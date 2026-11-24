@@ -29,6 +29,8 @@ public sealed record Profile
     public int ZstdLevel { get; init; } = 19;
     public DedupMode Dedup { get; init; } = DedupMode.Files;
     public bool Experimental { get; init; }
+    /// <summary>Experimental: every CM candidate uses the full model set (orders 5/8, all sparse models).</summary>
+    public bool CmAllModels { get; init; }
 
     public static readonly Profile Store = new()
     {
