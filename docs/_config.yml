@@ -1,0 +1,4 @@
+# GitHub Pages (Settings → Pages → Deploy from a branch → main, /docs).
+# docs/index.html is the product page; the Markdown documents are rendered with the default theme.
+# Every page asks search engines not to index it (docs/_includes/head-custom.html, and a meta tag in index.html).
+title: Osmium

@@ -116,6 +116,10 @@ write frames in order → re-read the archive → atomic rename`.
 * [docs/PLAN.md](docs/PLAN.md) — how it was planned (three architect agents + a critic) and built
 * [docs/IMPROVISATION.md](docs/IMPROVISATION.md) — critic findings, what changed, measurements, backlog
 * [docs/CHECKLIST.md](docs/CHECKLIST.md) — status of every feature
+* [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — comparison with eight other compressors
+* [ROADMAP.md](ROADMAP.md) — what comes next, starting with the measured gaps
+* [CHANGELOG.md](CHANGELOG.md) — release notes
+* `docs/index.html` — the product page, served by GitHub Pages from `/docs`
 
 ## Build
 

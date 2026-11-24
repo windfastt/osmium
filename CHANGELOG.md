@@ -37,7 +37,8 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 - `docs/SETTINGS.md` — every setting, profile and codec/filter parameter, generated from the code.
 - `tools/crosscheck.py` and `docs/BENCHMARKS.md` — reproducible comparison with zip, bzip2, Brotli, Zstandard, xz,
   7-Zip (LZMA2 and PPMd), lrzip and ZPAQ, with every round trip verified.
-- Product website: `docs/index.html` (GitHub Pages can serve it from `/docs`).
+- Product website: `docs/index.html` (GitHub Pages serves it from `/docs`; pages ask search engines not to index them).
+- `ROADMAP.md`: next steps, starting with the gaps the benchmarks found (x86 code against ZPAQ, planning time).
 
 ## [0.1.0] — 2026-11-24 — first implementation
 
