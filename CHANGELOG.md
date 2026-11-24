@@ -14,10 +14,45 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 - **Installer:** the optional firewall rule also opens UDP 46511, which LAN discovery of cluster workers needs.
 - **CLI password prompt:** arrow keys, Tab, Esc and other non-character keys no longer add hidden characters to the
   password; Ctrl+C cancels the prompt.
+- **Settings page:** *Apply* saved a copy of the settings taken when the page was first shown, silently reverting
+  anything changed elsewhere since (a cluster key saved on the Cluster page, the tray toggles for the default profile,
+  watch folders and lending this PC). It now saves only the settings you edited. The *Verify every block* warning
+  appeared when turning verification on instead of off.
+- **Cluster keys:** a key pasted with line breaks, spaces, typographic dashes or invisible characters was rejected,
+  and extra characters were ignored. Keys are now read the way people paste them, and errors say what is wrong (too
+  short or too long, a likely typo, a look-alike character, a checksum mismatch). *Show*/*Hide* works and says what
+  it does, *Generate* shows the new key, the key boxes fit a whole key, and *Copy* copies the canonical form. An
+  invalid saved key, or a worker that stopped, is shown on the Cluster page, in the tray tooltip and once as a
+  notification; *No workers answered* explains what discovery needs.
+- **`osmium worker`** without `--key` generated a new random key on every start that matched no other PC; it now
+  asks for the cluster key.
+- **Explorer verbs:** the window or password prompt opened from Explorer stayed behind Explorer, so a password typed
+  right away went to Explorer. The password prompt now stays open on a mismatch instead of closing and reopening.
+- **Keyboard:** Enter in a single-line box beeped and did nothing; it now runs the box's action. The Tune dialog
+  takes Enter and Esc; focus moves into the page after navigating; `&` in names no longer shows as an underline;
+  lists support Ctrl+A, Ctrl+C and Enter; Ctrl+V on the Compress page adds files copied in Explorer; Ctrl+NumPad1–8
+  navigate.
+- **Display:** ports and counts no longer show thousands separators ("46,510"). The Tune dialog shows each codec
+  parameter with a fitting editor (checkbox, list of choices, sizes such as `64M`) instead of raw numbers. The Rules
+  page no longer discards unsaved edits when shown again, and the settings search waits until you stop typing.
+- **Planner:** each of a sample's 16 slices read its whole block, so a 4 MiB sample of a 112 MiB block read about
+  1.8 GB; slices now read only their own bytes (the samples are identical). The parameter search checked memory
+  against the sample instead of the block, so it could choose a pipeline that exceeds the memory budget.
+- **Archives made by a newer Osmium:** a block using a newer method or parameter made the whole archive fail to open
+  with a message that read like corruption. Now the archive opens and lists, every block this version understands
+  extracts, and the rest are reported as needing a newer version of Osmium. Values read from an archive are checked
+  and never clamped.
 
 ### Added
 - `osmium license` prints the license and third-party notices; `osmium version` and the help text state the MIT
   license and that Osmium comes without warranty.
+- **About Osmium** (tray menu and Settings page): version, engine fingerprint, license, and buttons that open the
+  license and third-party notices.
+- Exiting asks first when the Settings, Rules or Cluster page has unsaved edits.
+- **Tests:** golden vectors that pin the output of every Osmium CM model set and every filter, planner tests with
+  scripted trial results (successive halving, parameter search, Store preference, the top-two race, thread-count
+  independence), sampling and memory-limit tests, tests for archives from a newer version, cluster-key parsing and
+  settings-editing tests.
 
 ### Changed
 - **Website:** rebuilt from the real product. The mock-ups of the tray and the main window (with invented data) are

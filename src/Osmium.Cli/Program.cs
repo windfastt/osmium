@@ -288,8 +288,20 @@ namespace Osmium.Cli
                 new Progress<ExtractProgress>(p => progress.Update($"Extracting {Fmt.Pct(p.BytesDone, p.BytesTotal)}  {p.FilesDone}/{p.FilesTotal} files")), ct);
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
-            Console.WriteLine($"Extracted {res.FilesOk} file(s) to {dest} in {sw.Elapsed.TotalSeconds:F1}s{(res.FilesSkipped > 0 ? $", {res.FilesSkipped} skipped" : "")}{(res.FilesFailed > 0 ? $", {res.FilesFailed} FAILED" : "")}");
+            int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
+            Console.WriteLine($"Extracted {res.FilesOk} file(s) to {dest} in {sw.Elapsed.TotalSeconds:F1}s{(res.FilesSkipped > 0 ? $", {res.FilesSkipped} skipped" : "")}" +
+                              $"{(damaged > 0 ? $", {damaged} FAILED" : "")}{(newer > 0 ? $", {newer} need a newer version of Osmium" : "")}");
             return res.FilesFailed == 0 && res.Errors.Count == 0 ? 0 : 2;
+        }
+
+        /// <summary>"N file(s) damaged, M file(s) need a newer version of Osmium" for a test or extract that did not verify.</summary>
+        private static string FailureSummary(ExtractResult res)
+        {
+            int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
+            var parts = new List<string>();
+            if (damaged > 0 || newer == 0) parts.Add($"{damaged} file(s) damaged");
+            if (newer > 0) parts.Add($"{newer} file(s) need a newer version of Osmium (the rest verified)");
+            return string.Join(", ", parts);
         }
 
         private static int Test(Args a, CancellationToken ct)
@@ -302,7 +314,7 @@ namespace Osmium.Cli
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
             Console.WriteLine(res.FilesFailed == 0 && res.Errors.Count == 0
                 ? $"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified."
-                : $"FAILED — {res.FilesFailed} file(s) damaged.");
+                : $"FAILED — {FailureSummary(res)}.");
             return res.FilesFailed == 0 && res.Errors.Count == 0 ? 0 : 2;
         }
 
@@ -337,6 +349,8 @@ namespace Osmium.Cli
             Console.WriteLine($"Blocks ({r.Blocks.Count}):");
             foreach (var b in r.Blocks)
                 Console.WriteLine($"  #{b.Frame,-4} {Fmt.Bytes(b.RawSize),10} → {Fmt.Bytes(b.PackedSize),10}  {b.Descriptor.Spec}");
+            if (r.NewerVersion is { } newer)
+                Console.WriteLine($"Note: {newer.Message} Blocks marked \"needs a newer Osmium\" cannot be extracted by this version; the others can.");
             return 0;
         }
 
