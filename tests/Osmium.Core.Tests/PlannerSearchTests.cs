@@ -155,7 +155,7 @@ public class PlannerSearchTests
         var rungs = trials.Calls.Take(2).ToList();
         Assert.Equal([256 << 10, (int)g.Size], rungs.Select(c => c.SampleLength));
         Assert.Equal([14, 5], rungs.Select(c => c.Specs.Length)); // every text candidate (CM included), then max(2, ⌈14/3⌉)
-        Assert.Equal([7, 6, 5], trials.Calls.Skip(2).Select(c => c.Specs.Length));
+        Assert.True(trials.Calls.Count > 2, "no hill-climb"); // how the climb spends its evaluations is tested above
         Assert.Equal("lzma(dict=256M,fb=273,lc=8,lp=0,mf=1,pb=0)", g.Spec!.ToString());
         Assert.Equal(["lzma(dict=256M,fb=273,lc=3,lp=0,mf=1,pb=0)"], g.Alternates.Select(s => s.ToString()));
     }
@@ -194,11 +194,14 @@ public class PlannerSearchTests
     public async Task PlanDoesNotDependOnTheOrderGroupsFinishIn()
     {
         // Scripted trials with a hill-climb, delayed by varying amounts so that concurrently planned groups interleave
-        // differently in every run.
+        // differently in every run. The LZMA landscape guarantees climbing steps on any sample; the noise, smaller than
+        // a step, re-ranks the other candidates on every rung.
         using var t = new TempDir();
         var dir = MixedFolder(t);
         var profile = Profile.Ultra with { Name = "jitter", Rungs = [16 << 10, 64 << 10] };
-        async Task<string> Plan(int threads, int salt) => Fingerprint(await new Planner(Options(profile, new ScriptedTrials(Noisy)
+        static long Landscape(PipelineSpec s, byte[] sample) =>
+            LzmaLandscape(s, sample) * 1000 + (long)(ScriptedTrials.StableHash($"{s}@{sample.Length}") % 1000);
+        async Task<string> Plan(int threads, int salt) => Fingerprint(await new Planner(Options(profile, new ScriptedTrials(Landscape)
         {
             Delay = n => TimeSpan.FromMilliseconds(ScriptedTrials.StableHash($"{salt}:{n}") % 12),
         }, threads: threads)).BuildAsync(Scanner.Scan([dir]), Ct));
