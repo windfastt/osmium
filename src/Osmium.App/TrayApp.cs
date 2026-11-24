@@ -542,7 +542,8 @@ internal sealed class TrayApp : ApplicationContext
     public void ExitApp(bool confirm)
     {
         if (_exiting) return;
-        if (confirm && TrayText.ExitQuestion(Settings.General.ConfirmExit && Jobs.AnyActive, _main?.PagesWithUnsavedChanges() ?? []) is { } question)
+        var unsaved = _main is { IsDisposed: false } main ? main.PagesWithUnsavedChanges() : [];
+        if (confirm && TrayText.ExitQuestion(Settings.General.ConfirmExit && Jobs.AnyActive, unsaved) is { } question)
         {
             var r = MessageBox.Show(question, "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (r != DialogResult.Yes) return;
