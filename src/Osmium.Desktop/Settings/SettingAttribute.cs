@@ -31,7 +31,13 @@ public sealed class SettingAttribute(string label) : Attribute
     public bool RequiresRestart { get; set; }
     public bool Advanced { get; set; }
     public bool Dangerous { get; set; }
+    /// <summary>For on/off settings: a question asked before the risky change (see <see cref="WarnWhenOff"/>).</summary>
     public string? WarningText { get; set; }
+    /// <summary>
+    /// <see cref="WarningText"/> is asked when the box is turned off instead of on: for settings whose safe state is
+    /// on, such as verifying every block.
+    /// </summary>
+    public bool WarnWhenOff { get; set; }
     /// <summary>"Prop", "!Prop" or "Prop=Value" referring to a sibling property.</summary>
     public string? VisibleWhen { get; set; }
     public string? EnabledWhen { get; set; }
@@ -62,6 +68,7 @@ public sealed class SettingDescriptor
     public bool Advanced { get; init; }
     public bool Dangerous { get; init; }
     public string? WarningText { get; init; }
+    public bool WarnWhenOff { get; init; }
     public string? VisibleWhen { get; init; }
     public string? EnabledWhen { get; init; }
     public SettingEditor Editor { get; init; }
@@ -95,6 +102,18 @@ public sealed class SettingDescriptor
     }
 
     public static bool IsNumeric(Type t) => t == typeof(int) || t == typeof(long) || t == typeof(double) || t == typeof(float);
+
+    /// <summary>
+    /// Whether turning an on/off setting to <paramref name="newValue"/> must first be confirmed with
+    /// <see cref="WarningText"/>: turning it on, or turning it off for <see cref="WarnWhenOff"/> settings.
+    /// </summary>
+    public bool NeedsConfirmation(bool newValue) => WarningText is not null && newValue != WarnWhenOff;
+
+    /// <summary>
+    /// Whether the number box groups digits ("600,000"). Only settings whose range goes above 65 535 do (iteration
+    /// counts, memory sizes); ports, levels, counts and other values up to 65 535 show plain digits ("46510").
+    /// </summary>
+    public bool GroupDigits => double.IsNaN(Max) || Max > 65535;
 }
 
 public static class SettingReflector
@@ -118,7 +137,7 @@ public static class SettingReflector
                     Category = cat.Name, Key = $"{catProp.Name}.{p.Name}", Label = a.Label, Description = a.Description,
                     Group = a.Group, ValueType = p.PropertyType, Min = a.Min, Max = a.Max, Step = a.Step, Unit = a.Unit,
                     Experimental = a.Experimental, RequiresRestart = a.RequiresRestart, Advanced = a.Advanced, Dangerous = a.Dangerous,
-                    WarningText = a.WarningText, VisibleWhen = a.VisibleWhen, EnabledWhen = a.EnabledWhen, Editor = a.Editor,
+                    WarningText = a.WarningText, WarnWhenOff = a.WarnWhenOff, VisibleWhen = a.VisibleWhen, EnabledWhen = a.EnabledWhen, Editor = a.Editor,
                     Keywords = a.Keywords, Default = p.GetValue(defaults),
                     Get = () => pp.GetValue(section), Set = v => pp.SetValue(section, Coerce(v, pp.PropertyType)),
                     Choices = p.PropertyType.IsEnum ? Enum.GetNames(p.PropertyType) : null,

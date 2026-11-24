@@ -247,14 +247,22 @@ internal sealed class SettingsRenderer : Panel
         if (t == typeof(bool))
         {
             var cb = new CheckBox { Text = "Enabled", AutoSize = true, Checked = value is true };
+            bool restoring = false;
             cb.CheckedChanged += (_, _) =>
             {
-                if (cb.Checked && d.WarningText is not null && !Ui.Confirm(d.WarningText + "\n\nContinue?")) { cb.Checked = false; return; }
+                if (restoring) return;
+                if (d.NeedsConfirmation(cb.Checked) && !Ui.Confirm(d.WarningText + "\n\nContinue?"))
+                {
+                    restoring = true; // put the box back without asking again
+                    try { cb.Checked = !cb.Checked; }
+                    finally { restoring = false; }
+                    return;
+                }
                 Commit(d, cb.Checked);
             };
             return cb;
         }
-        if (t.IsEnum)
+        if (t.IsEnum || d.Choices is { Count: > 0 })
         {
             var combo = Ui.Combo(d.Choices ?? [], value?.ToString());
             combo.Width = 220;
@@ -267,7 +275,7 @@ internal sealed class SettingsRenderer : Panel
             {
                 Minimum = (decimal)(double.IsNaN(d.Min) ? -1_000_000_000 : d.Min),
                 Maximum = (decimal)(double.IsNaN(d.Max) ? 1_000_000_000 : d.Max),
-                Increment = (decimal)d.Step, Width = 160, ThousandsSeparator = true,
+                Increment = (decimal)d.Step, Width = 160, ThousandsSeparator = d.GroupDigits,
             };
             n.Value = Math.Clamp(Convert.ToDecimal(value ?? 0, CultureInfo.InvariantCulture), n.Minimum, n.Maximum);
             n.ValueChanged += (_, _) => Commit(d, t == typeof(int) ? (object)(int)n.Value : t == typeof(long) ? (long)n.Value : (double)n.Value);
@@ -285,6 +293,14 @@ internal sealed class SettingsRenderer : Panel
         }
         var text = new TextBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
         text.TextChanged += (_, _) => Commit(d, text.Text);
+        if (d.Editor == SettingEditor.ByteSize)
+        {
+            text.Width = 120;
+            var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+            p.Controls.Add(text);
+            p.Controls.Add(new Label { Text = "bytes, or with K, M or G (for example 64M)", AutoSize = true, Padding = new Padding(0, 5, 0, 0), Tag = "muted" });
+            return p;
+        }
         if (d.Editor == SettingEditor.Password)
         {
             // Wide enough for a whole cluster key (70 characters), scaled for the monitor's DPI.

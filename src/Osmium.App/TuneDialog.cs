@@ -101,14 +101,8 @@ internal sealed class TuneDialog : Form
     {
         var m = MethodRegistry.Default.Get(_codec.SelectedItem!.ToString()!);
         if (!_paramState.ContainsKey(m.Name)) _paramState[m.Name] = ParamValues.Empty;
-        var descs = m.Params.Select(d => new Osmium.Desktop.Settings.SettingDescriptor
-        {
-            Category = m.DisplayName, Key = $"{m.Name}.{d.Name}", Label = d.Label, Description = d.Description,
-            ValueType = typeof(long), Min = d.Min, Max = d.Max, Default = d.Default, Experimental = d.Experimental,
-            Unit = d.Type == ParamType.Size ? " bytes" : null,
-            Get = () => _paramState[m.Name].Get(d.Name, d.Default),
-            Set = v => { _paramState[m.Name] = _paramState[m.Name].With(d.Name, Convert.ToInt64(v)); SyncFromBuilder(); },
-        }).ToList();
+        // On/off parameters as checkboxes, choices by name, sizes as "64M"; the values map back unchanged.
+        var descs = ParamDescriptors.For(m, () => _paramState[m.Name], p => { _paramState[m.Name] = p; SyncFromBuilder(); });
         _params.Render(descs, descs, () => true, m.Description);
     }
 

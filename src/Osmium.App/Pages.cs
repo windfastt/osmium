@@ -539,13 +539,21 @@ internal sealed class RulesPage : UserControl, IPage
     private readonly TextBox _json = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true };
     private readonly TextBox _testPath = new() { Width = 360, PlaceholderText = "e.g. photos/raw/img001.bmp" };
     private readonly Label _testResult = Ui.Text("", muted: true, maxWidth: 900);
+    /// <summary>The editor holds changes that are not in rules.json (typed, or added with "Add example").</summary>
+    private bool _dirty;
+    private bool _loading;
 
     public RulesPage(TrayApp app)
     {
         _app = app;
         _json.Font = Theme.Mono;
+        _json.TextChanged += (_, _) => { if (!_loading) _dirty = true; };
         var tools = Ui.Bar(
-            Ui.Button("Reload", (_, _) => ReloadRules()),
+            Ui.Button("Reload", (_, _) =>
+            {
+                if (_dirty && !Ui.Confirm("Discard your unsaved changes and reload rules.json?")) return;
+                ReloadRules();
+            }),
             Ui.Button("Validate", (_, _) => ValidateRules()),
             Ui.Button("Save", (_, _) => Save(), accent: true),
             Ui.Button("Add example", (_, _) => AddExample()),
@@ -571,11 +579,29 @@ internal sealed class RulesPage : UserControl, IPage
         ReloadRules();
     }
 
-    public void Activated() => ReloadRules();
+    public bool HasUnsavedChanges => _dirty;
+
+    /// <summary>Shows rules.json again (it may have been changed by "Save patch as rule" or the Lab), unless the
+    /// editor holds unsaved changes.</summary>
+    public void Activated()
+    {
+        if (!_dirty) ReloadRules();
+    }
 
     private void ReloadRules()
     {
-        _json.Text = File.Exists(AppPaths.RulesFile) ? File.ReadAllText(AppPaths.RulesFile) : new RuleSet().ToJson();
+        string text;
+        try { text = File.Exists(AppPaths.RulesFile) ? File.ReadAllText(AppPaths.RulesFile) : new RuleSet().ToJson(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Error("rules.json could not be read: " + e.Message);
+            _testResult.Text = "rules.json could not be read: " + e.Message;
+            return;
+        }
+        _loading = true;
+        try { _json.Text = text; }
+        finally { _loading = false; }
+        _dirty = false;
         RefreshList();
     }
 
@@ -630,6 +656,7 @@ internal sealed class RulesPage : UserControl, IPage
         var problems = rs.Check(MethodRegistry.Default);
         if (problems.Count > 0 && !Ui.Confirm("There are problems:\n" + string.Join("\n", problems) + "\n\nSave anyway?")) return;
         rs.Save(AppPaths.RulesFile);
+        _dirty = false;
         _app.LoadRules();
         RefreshList();
     }
@@ -841,14 +868,18 @@ internal sealed class SettingsPage : UserControl, IPage
     private bool _applying;
     private List<Osmium.Desktop.Settings.SettingDescriptor> _all = [];
     private readonly Label _dirty = Ui.Text("", muted: true);
+    /// <summary>Re-renders once typing in the search box pauses, not on every keystroke.</summary>
+    private readonly System.Windows.Forms.Timer _searchDelay = new() { Interval = 250 };
 
     public SettingsPage(TrayApp app)
     {
         _app = app;
         _working = app.Settings.Clone();
         foreach (var c in SettingReflector.Categories(_working)) _categories.Items.Add(c.Name);
-        _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; Render(); };
-        _search.TextChanged += (_, _) => Render();
+        _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; RenderNow(); };
+        _searchDelay.Tick += (_, _) => RenderNow();
+        _search.TextChanged += (_, _) => { _searchDelay.Stop(); _searchDelay.Start(); };
+        Disposed += (_, _) => _searchDelay.Dispose();
         _renderer.Changed += d => MarkEdited(d.Key);
         var tools = Ui.Bar(_search,
             Ui.Button("Apply", (_, _) => Apply(), accent: true),
@@ -897,6 +928,12 @@ internal sealed class SettingsPage : UserControl, IPage
     }
 
     public IEnumerable<string> CategoryNames => _categories.Items.Cast<string>();
+
+    private void RenderNow()
+    {
+        _searchDelay.Stop();
+        Render();
+    }
 
     private void Render()
     {
@@ -987,13 +1024,19 @@ internal sealed class SettingsPage : UserControl, IPage
     private void RestoreDefaults()
     {
         string cat = _categories.SelectedItem as string ?? "General";
-        if (!Ui.Confirm($"Restore the defaults for \"{cat}\"?")) return;
+        var keys = SettingsEdits.KeysOf(cat);
+        string question = $"Restore the defaults for \"{cat}\"?";
+        if (keys.Contains("Cluster.ClusterKey") && !string.IsNullOrWhiteSpace(_working.Cluster.ClusterKey))
+            question += "\n\nThis also removes the cluster key when you click Apply. Your other PCs will then need a new key, or you will have to enter this one again.";
+        if (keys.Contains(SettingsEdits.WatchFolders) && _working.Watch.Folders.Count > 0)
+            question += $"\n\nThis also removes the {_working.Watch.Folders.Count} watched folder(s) from the list when you click Apply.";
+        if (!Ui.Confirm(question)) return;
         var defaults = new OsmiumSettings();
         var prop = typeof(OsmiumSettings).GetProperties().FirstOrDefault(p =>
             p.PropertyType.GetCustomAttributes(typeof(SettingsCategoryAttribute), false).OfType<SettingsCategoryAttribute>().FirstOrDefault()?.Name == cat);
         if (prop is null) return;
         prop.SetValue(_working, prop.GetValue(defaults));
-        foreach (var key in SettingsEdits.KeysOf(cat)) _edited.Add(key);
+        foreach (var key in keys) _edited.Add(key);
         Render();
         _dirty.Text = "Unsaved changes";
     }

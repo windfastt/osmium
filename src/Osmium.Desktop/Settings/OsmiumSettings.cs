@@ -45,7 +45,7 @@ public sealed class CompressionSettings
     [Setting("Solid block size", Description = "0 = profile default. Larger blocks compress better but need more memory and limit parallelism.", Min = 0, Max = 1024, Unit = " MiB", Order = 3)]
     public int BlockSizeMiB { get; set; }
     [Setting("Verify every block", Description = "Decode each block and compare before writing it. Strongly recommended.", Order = 4, Dangerous = true,
-        WarningText = "Turning verification off means a codec bug could produce an archive that does not extract.")]
+        WarningText = "Turning verification off means a codec bug could produce an archive that does not extract.", WarnWhenOff = true)]
     public bool VerifyBlocks { get; set; } = true;
     [Setting("Store planner log in archive", Description = "Lets 'Explain' show why each pipeline was chosen (archive-relative paths only).", Order = 5)]
     public bool StorePlanLog { get; set; } = true;
