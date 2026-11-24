@@ -6,3 +6,6 @@ artifacts/
 .vs/
 TestResults/
 *.osa.tmp
+
+# Claude Code session data (agent worktrees)
+.claude/
