@@ -75,6 +75,7 @@ namespace Osmium.Cli
                     "worker" => await WorkerCommand.RunAsync(a, cts.Token),
                     "keygen" => WorkerCommand.KeyGen(),
                     "version" or "--version" => Version(),
+                    "license" or "licence" or "--license" => License(),
                     _ => Fail($"Unknown command '{cmd}'. Run 'osmium help'."),
                 };
             }
@@ -116,11 +117,30 @@ namespace Osmium.Cli
               rules check <rules.json>
               worker [--port 46510] [--key OSM1-…] [--slots N] [--mem 4G]   Lend this machine to a cluster
               keygen                 Create a cluster pairing key
+              license                Show the license and third-party notices
+              version                Show the version
+
+            Osmium is free software under the MIT License and comes with no warranty.
+            Keep backups, and test archives (osmium t) before deleting originals.
             """);
 
         private static int Version()
         {
             Console.WriteLine("osmium " + (typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "?"));
+            Console.WriteLine("MIT License, provided as is without warranty. Run 'osmium license' for the license and third-party notices.");
+            return 0;
+        }
+
+        private static int License()
+        {
+            foreach (var (name, title) in new[] { ("Osmium.LICENSE.txt", "Osmium license"), ("Osmium.THIRD-PARTY-NOTICES.txt", "Third-party notices") })
+            {
+                using var stream = typeof(Cli).Assembly.GetManifestResourceStream(name);
+                if (stream is null) return Fail($"The {title.ToLowerInvariant()} are missing from this build; see https://github.com/windfastt/osmium.");
+                using var reader = new StreamReader(stream);
+                Console.WriteLine(reader.ReadToEnd().TrimEnd());
+                Console.WriteLine();
+            }
             return 0;
         }
 
@@ -220,13 +240,27 @@ namespace Osmium.Cli
             if (Console.IsInputRedirected) return null;
             Console.Error.Write("Password: ");
             var sb = new System.Text.StringBuilder();
-            while (true)
+            // Read Ctrl+C as a key so it can end the prompt (otherwise ReadKey keeps waiting after the cancel handler).
+            bool treatCtrlC = Console.TreatControlCAsInput;
+            Console.TreatControlCAsInput = true;
+            try
             {
-                var k = Console.ReadKey(intercept: true);
-                if (k.Key == ConsoleKey.Enter) break;
-                if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
-                sb.Append(k.KeyChar);
+                while (true)
+                {
+                    var k = Console.ReadKey(intercept: true);
+                    if (k.Key == ConsoleKey.Enter) break;
+                    if (k.Key == ConsoleKey.C && k.Modifiers.HasFlag(ConsoleModifiers.Control))
+                    {
+                        Console.Error.WriteLine();
+                        throw new OperationCanceledException();
+                    }
+                    if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
+                    // Arrows, Tab, Esc, function keys and dead keys produce '\0' or control characters: never part of a password.
+                    if (char.IsControl(k.KeyChar) || k.KeyChar == '\0') continue;
+                    sb.Append(k.KeyChar);
+                }
             }
+            finally { Console.TreatControlCAsInput = treatCtrlC; }
             Console.Error.WriteLine();
             return sb.ToString();
         }
