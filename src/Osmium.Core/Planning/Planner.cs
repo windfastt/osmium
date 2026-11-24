@@ -492,6 +492,7 @@ public sealed class Planner(PlanOptions o)
     /// <summary>
     /// Deterministic sample of a group: the whole group when it fits, a prefix for region-filtered classes
     /// (audio/image parameters are absolute offsets), otherwise 16 aligned slices spread across the group.
+    /// Only the bytes that end up in the sample are read from the source files.
     /// </summary>
     internal static byte[] BuildSample(ArchivePlan plan, PlanGroup g, long rung)
     {
@@ -505,9 +506,9 @@ public sealed class Planner(PlanOptions o)
             foreach (var b in blocks)
             {
                 if (pos >= len) break;
-                var raw = BlockAssembler.Assemble(plan, b, (int)Math.Min(b.RawSize, len - pos));
-                raw.CopyTo(whole.AsSpan((int)pos));
-                pos += raw.Length;
+                int n = (int)Math.Min(b.RawSize, len - pos);
+                BlockAssembler.AssembleRange(plan, b, 0, whole.AsSpan((int)pos, n));
+                pos += n;
             }
             return whole;
         }
@@ -519,16 +520,15 @@ public sealed class Planner(PlanOptions o)
         {
             long start = (total - sliceLen) * s / (slices - 1);
             start -= start % Math.Max(1, g.Alignment);
-            // locate block containing 'start'
+            // The slice is [start, start + sliceLen) of the group's blocks laid end to end; it can span blocks.
             long acc = 0;
             int written = 0;
             foreach (var b in blocks)
             {
                 if (start + written >= acc + b.RawSize) { acc += b.RawSize; continue; }
-                var raw = BlockAssembler.Assemble(plan, b, (int)b.RawSize);
-                int from = (int)(start + written - acc);
-                int n = Math.Min(sliceLen - written, raw.Length - from);
-                raw.AsSpan(from, n).CopyTo(result.AsSpan(s * sliceLen + written));
+                long from = start + written - acc;
+                int n = (int)Math.Min(sliceLen - written, b.RawSize - from);
+                BlockAssembler.AssembleRange(plan, b, from, result.AsSpan(s * sliceLen + written, n));
                 written += n;
                 acc += b.RawSize;
                 if (written >= sliceLen) break;
