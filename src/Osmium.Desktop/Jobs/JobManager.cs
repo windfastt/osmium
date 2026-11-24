@@ -336,7 +336,12 @@ public sealed class JobManager : IDisposable
         j.Output = test ? archive : r.Output;
         lock (j.Log) j.Log.AddRange(res.Errors.Select(e => "error: " + e));
         if (res.FilesFailed > 0 || res.Errors.Count > 0)
-            throw new InvalidDataException($"{res.FilesFailed} file(s) failed verification; {res.Errors.Count} error(s).");
+        {
+            int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
+            if (newer > 0 && damaged == 0)
+                throw new InvalidDataException($"{newer} file(s) need a newer version of Osmium; every other file verified.");
+            throw new InvalidDataException($"{damaged} file(s) failed verification{(newer > 0 ? $", {newer} need a newer version of Osmium" : "")}; {res.Errors.Count} error(s).");
+        }
     }
 
     private sealed record HistoryEntry(string Name, JobKind Kind, JobState State, long In, long Out, string? Output, DateTime Created, double Seconds, string? Error);

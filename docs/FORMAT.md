@@ -61,8 +61,14 @@ stage*: varint methodId
         bytes  params                  varint count · (str name · svarint value)*, names strictly ascending
 ```
 Decoding runs the stages in reverse; each must produce exactly its recorded `inputSize`, then the final output's
-XxHash128 must equal `rawHash`. Unknown method ids or parameter names make only that block undecodable
-("method N requires a newer Osmium"), never the whole archive.
+XxHash128 must equal `rawHash`. A method id, parameter name or parameter value outside the declared range that this
+reader does not know makes only that block undecodable, never the whole archive: the archive opens, listings show
+the block's pipeline as "needs a newer Osmium (method id 8)", every other block extracts, and reading the block
+reports "This archive needs a newer version of Osmium: block 3 uses method id 8." Stored values are checked, never
+clamped, because a value from a newer writer would decode differently. The same message is used for the other
+features a newer writer can add: unknown critical header flags (checked only after the header CRC, so damage is
+still reported as damage), critical header extensions, key-derivation functions and ciphers, index versions and
+frame flags. An index compressed with an unknown method cannot be opened, and says so.
 
 | Id | Kind | Name | Parameters |
 |---|---|---|---|
