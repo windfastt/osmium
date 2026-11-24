@@ -3,7 +3,7 @@
 All notable changes to Osmium. Versions follow [Semantic Versioning](https://semver.org); the `.osa` format version
 (1.0) is independent of the app version and has not changed.
 
-## [0.1.2] — unreleased — patch release
+## [0.2.0] — unreleased
 
 ### Fixed
 - **Licensing:** every download now carries the license texts it must: `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` (now
