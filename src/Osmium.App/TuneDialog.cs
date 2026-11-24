@@ -28,6 +28,9 @@ internal sealed class TuneDialog : Form
 
     public string? Pipeline { get; private set; }
 
+    /// <summary>Completes once the file's analysis is shown (it replaces the "Analyzing…" line).</summary>
+    internal Task Analysis { get; }
+
     public TuneDialog(TrayApp app, string path, string? current, string profile, bool startDeep)
     {
         _app = app;
@@ -83,7 +86,7 @@ internal sealed class TuneDialog : Form
         Theme.Apply(this);
 
         _pipeline.Text = current is null or "store" or "exclude" ? "lzma" : current;
-        Ui.RunSafe(this, async () =>
+        Analysis = Ui.RunSafeAsync(this, async () =>
         {
             var a = await Task.Run(() => Sniffer.Analyze(path, 32));
             info.Text = $"{Ui.Bytes(new FileInfo(path).Length)} · {a.Summary}";
