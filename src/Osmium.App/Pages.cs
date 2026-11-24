@@ -911,6 +911,7 @@ internal sealed class SettingsPage : UserControl, IPage
             Ui.Button("Revert", (_, _) => Revert()),
             Ui.Button("Restore defaults", (_, _) => RestoreDefaults()),
             Ui.Button("Repair Explorer integration", (_, _) => Repair()),
+            Ui.Button("About Osmium…", (_, _) => _app.ShowAbout()),
             _dirty);
         var body = new Panel();
         body.Controls.Add(_renderer);

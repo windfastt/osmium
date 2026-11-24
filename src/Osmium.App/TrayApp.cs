@@ -90,7 +90,7 @@ internal sealed class TrayApp : ApplicationContext
 
         if (startup.Kind == "invoke") HandleMessage(new IpcMessage { Verb = startup.Verb, Profile = startup.Profile, Args = startup.Paths ?? [] });
         else if (startup.Kind != "tray") ShowMain();
-        AppLog.Info($"Osmium started ({(AppPaths.Portable ? "portable" : "installed")}), engine fingerprint {Convert.ToHexString(Protocol.EngineFingerprint())[..8]}");
+        AppLog.Info($"Osmium started ({(AppPaths.Portable ? "portable" : "installed")}), engine fingerprint {Osmium.Desktop.AboutInfo.EngineFingerprint()}");
     }
 
     private static Icon LoadAppIcon()
@@ -431,7 +431,20 @@ internal sealed class TrayApp : ApplicationContext
         _menu.Items.Add(lend);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Settings…", null, (_, _) => ShowMain("Settings"));
+        _menu.Items.Add("About Osmium…", null, (_, _) => ShowAbout());
         _menu.Items.Add("Exit", null, (_, _) => ExitApp(confirm: true));
+    }
+
+    private AboutDialog? _about;
+
+    /// <summary>Version, engine fingerprint and licence (tray menu, Settings page). Only one at a time.</summary>
+    public void ShowAbout()
+    {
+        if (_about is { IsDisposed: false }) { _about.Activate(); return; }
+        using var d = new AboutDialog(_appIcon);
+        _about = d;
+        try { d.ShowDialog(_main is { Visible: true } owner ? owner : null); }
+        finally { _about = null; }
     }
 
     /// <summary>Timer/menu handlers must never throw: an exception would reach Application.ThreadException and
