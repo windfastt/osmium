@@ -12,20 +12,30 @@ public interface ITrialRunner
     Task<long[]> RunAsync(IReadOnlyList<PipelineSpec> specs, byte[] sample, CancellationToken ct);
 }
 
+/// <summary>
+/// Runs trials on this machine. All concurrent <see cref="RunAsync"/> calls share one pool of <c>threads</c> slots,
+/// so the planner can work on several groups at once without oversubscribing the CPU.
+/// </summary>
 public sealed class LocalTrialRunner(int threads, MemoryGate gate) : ITrialRunner
 {
-    public Task<long[]> RunAsync(IReadOnlyList<PipelineSpec> specs, byte[] sample, CancellationToken ct)
+    private readonly SemaphoreSlim _slots = new(Math.Max(1, threads));
+
+    public async Task<long[]> RunAsync(IReadOnlyList<PipelineSpec> specs, byte[] sample, CancellationToken ct)
     {
         var sizes = new long[specs.Count];
-        Parallel.For(0, specs.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, threads), CancellationToken = ct }, i =>
+        await Task.WhenAll(specs.Select((spec, i) => Task.Run(async () =>
         {
-            long mem = specs[i].EncodeMemory(sample.Length);
-            using var lease = gate.Acquire(mem, ct);
-            try { sizes[i] = PipelineExecutor.TrialSize(specs[i], sample, new CodecContext { Token = ct }); }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception) { sizes[i] = -1; }
-        });
-        return Task.FromResult(sizes);
+            await _slots.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                using var lease = gate.Acquire(spec.EncodeMemory(sample.Length), ct);
+                try { sizes[i] = PipelineExecutor.TrialSize(spec, sample, new CodecContext { Token = ct }); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { sizes[i] = -1; }
+            }
+            finally { _slots.Release(); }
+        }, ct))).ConfigureAwait(false);
+        return sizes;
     }
 }
 
@@ -167,16 +177,18 @@ public sealed class Planner(PlanOptions o)
         BuildGroups(plan);
         Layout(plan, o.BlockCap ?? p.BlockCap);
 
-        // 4. choose a pipeline for each group
+        // 4. choose a pipeline for each group. Groups are independent, so they are planned concurrently; the trial
+        //    runner bounds the total parallelism, and every group's choice depends only on its own trial results, so
+        //    the plan is the same as planning them one after another (largest first, so they start first).
         var gate = new MemoryGate(o.MemoryBudget);
         var trials = o.Trials ?? new LocalTrialRunner(o.Threads, gate);
         int done = 0;
-        foreach (var g in plan.Groups.OrderByDescending(g => g.Size))
+        ct.ThrowIfCancellationRequested();
+        await Task.WhenAll(plan.Groups.OrderByDescending(g => g.Size).Select(async g =>
         {
-            ct.ThrowIfCancellationRequested();
-            await ChooseAsync(plan, g, trials, ct);
-            o.Progress?.Invoke("Planning", (double)++done / plan.Groups.Count);
-        }
+            await ChooseAsync(plan, g, trials, ct).ConfigureAwait(false);
+            o.Progress?.Invoke("Planning", (double)Interlocked.Increment(ref done) / plan.Groups.Count);
+        })).ConfigureAwait(false);
         return plan;
     }
 
