@@ -72,7 +72,6 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Source: "..\assets\archive.ico"; DestDir: "{app}\icons"; Flags: ignoreversion
 Source: "..\assets\osmium.ico"; DestDir: "{app}\icons"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
-Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Osmium"; Filename: "{app}\{#AppExe}"; AppUserModelID: "Osmium.Desktop"; Comment: "Maximum-ratio file compressor"
@@ -86,6 +85,7 @@ Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Description: "Start Osmium"; 
 Filename: "{app}\{#AppExe}"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "OsmiumQuit"
 Filename: "{app}\{#AppExe}"; Parameters: "--unregister --scope {code:Scope}"; Flags: runhidden waituntilterminated; RunOnceId: "OsmiumUnregister"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Osmium cluster worker"""; Flags: runhidden waituntilterminated; RunOnceId: "OsmiumFirewall"; Check: IsAdminInstallMode
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Osmium cluster discovery"""; Flags: runhidden waituntilterminated; RunOnceId: "OsmiumFirewallDiscovery"; Check: IsAdminInstallMode
 
 [Code]
 function Scope(Param: String): String;
@@ -176,9 +176,18 @@ begin
         SuppressibleMsgBox('Explorer integration could not be registered. You can repair it later in Settings.', mbError, MB_OK, IDOK);
     if WizardIsTaskSelected('addtopath') then AddToPath(ExpandConstant('{app}'));
     if WizardIsTaskSelected('firewall') then
+    begin
+      { Workers listen on TCP 46510 and answer LAN discovery on UDP 46511. Remove rules from an earlier install first,
+        so upgrades do not add duplicates. }
+      Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="Osmium cluster worker"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+      Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="Osmium cluster discovery"', '', SW_HIDE, ewWaitUntilTerminated, Code);
       Exec(ExpandConstant('{sys}\netsh.exe'),
         'advfirewall firewall add rule name="Osmium cluster worker" dir=in action=allow protocol=TCP localport=46510 profile=private program="' + ExpandConstant('{app}\{#AppExe}') + '"',
         '', SW_HIDE, ewWaitUntilTerminated, Code);
+      Exec(ExpandConstant('{sys}\netsh.exe'),
+        'advfirewall firewall add rule name="Osmium cluster discovery" dir=in action=allow protocol=UDP localport=46511 profile=private program="' + ExpandConstant('{app}\{#AppExe}') + '"',
+        '', SW_HIDE, ewWaitUntilTerminated, Code);
+    end;
   end;
 end;
 

@@ -32,6 +32,24 @@ dotnet publish src/Osmium.Cli -c Release -r $rid --self-contained -p:PublishSing
 if ($LASTEXITCODE -ne 0) { throw 'single-file CLI publish failed' }
 Move-Item -Force "artifacts/cli-$rid/osmium.exe" "artifacts/osmium-$Version-$rid.exe"
 
+Write-Host '== License files'
+# Every download carries Osmium's license, the third-party notices and the .NET runtime's own license and notices
+# (the builds are self-contained, so the runtime ships inside them).
+Copy-Item LICENSE "$out/LICENSE.txt"
+Copy-Item THIRD-PARTY-NOTICES.md "$out/THIRD-PARTY-NOTICES.txt"
+$packages = ((dotnet nuget locals global-packages --list) -replace '^global-packages:\s*', '').Trim()
+$runtimeConfig = Get-Content "$out/Osmium.App.runtimeconfig.json" -Raw | ConvertFrom-Json
+$netcore = $runtimeConfig.runtimeOptions.includedFrameworks | Where-Object name -eq 'Microsoft.NETCore.App' | Select-Object -First 1
+if (-not $netcore) { throw 'Could not find the bundled .NET runtime version in Osmium.App.runtimeconfig.json' }
+$pack = Join-Path $packages "microsoft.netcore.app.runtime.$rid/$($netcore.version)"
+foreach ($f in 'LICENSE.TXT', 'THIRD-PARTY-NOTICES.TXT') {
+    if (-not (Test-Path (Join-Path $pack $f))) { throw "Missing $f in the .NET runtime pack at $pack" }
+}
+Copy-Item (Join-Path $pack 'LICENSE.TXT') "$out/dotnet-LICENSE.txt"
+Copy-Item (Join-Path $pack 'THIRD-PARTY-NOTICES.TXT') "$out/dotnet-THIRD-PARTY-NOTICES.txt"
+# The single-file CLI is attached to releases on its own; its license files are attached next to it.
+Copy-Item "$out/LICENSE.txt", "$out/THIRD-PARTY-NOTICES.txt", "$out/dotnet-LICENSE.txt", "$out/dotnet-THIRD-PARTY-NOTICES.txt" artifacts/
+
 Write-Host '== Portable ZIP'
 $portable = "artifacts/portable-$rid"
 Remove-Item -Recurse -Force $portable -ErrorAction SilentlyContinue

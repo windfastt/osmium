@@ -6,7 +6,7 @@
     <Version>0.1.1</Version>
     <Authors>Osmium contributors</Authors>
     <Product>Osmium</Product>
-    <Copyright>MIT License</Copyright>
+    <Copyright>Copyright (c) 2026 Osmium contributors</Copyright>
     <Deterministic>true</Deterministic>
     <InvariantGlobalization>false</InvariantGlobalization>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>

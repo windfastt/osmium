@@ -105,6 +105,7 @@ jobs:
             artifacts/installer/*.exe
             artifacts/*.zip
             artifacts/osmium-*.exe
+            artifacts/*.txt
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v6
