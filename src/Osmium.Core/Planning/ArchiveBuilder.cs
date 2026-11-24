@@ -252,16 +252,17 @@ public static class ArchiveBuilder
 
         // Structural re-read of the written file (CRCs, payload hashes, index) before it replaces anything.
         Report("Checking archive");
+        double decodeSec;
+        long maxMem;
         using (var check = OsaReader.Open(writer.TempPath, () => o.Password))
         {
             for (int i = 0; i < check.Blocks.Count; i++) check.ReadBody(i);
             if (check.Entries.Count != entries.Count) throw new InvalidOperationException("Index re-read mismatch.");
+            decodeSec = check.EstimatedDecodeSeconds;
+            maxMem = check.MaxBlockDecodeMemory;
         }
         writer.Commit(o.Overwrite);
         long outLen = new FileInfo(o.OutputPath).Length;
-        double decodeSec;
-        long maxMem;
-        using (var r = OsaReader.Open(o.OutputPath, () => o.Password)) { decodeSec = r.EstimatedDecodeSeconds; maxMem = r.MaxBlockDecodeMemory; }
         Report("Done");
         return new BuildResult(o.OutputPath, plan.TotalInput, outLen, plan.Files.Count, plan.Blocks.Count, sw.Elapsed, warnings, planLog, decodeSec, maxMem);
     }

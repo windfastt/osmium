@@ -247,7 +247,7 @@ public static class Extractor
                 }
                 if (!test)
                 {
-                    File.Move(f.PartPath!, f.Target!, overwrite: options.Overwrite == OverwriteMode.Overwrite);
+                    Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: options.Overwrite == OverwriteMode.Overwrite);
                     ApplyFileMetadata(f.Target!, f.Entry, options);
                     if (zone is not null) WriteZoneIdentifier(f.Target!, zone);
                 }

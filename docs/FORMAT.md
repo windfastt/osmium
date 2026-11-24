@@ -79,7 +79,7 @@ XxHash128 must equal `rawHash`. Unknown method ids or parameter names make only 
 | 66 | filter | `delta` | `stride` |
 | 67 | filter | `transpose` | `stride` |
 | 68 | filter | `pcm16` | `offset`, `length`, `channels`, `lms`, `split` |
-| 69 | filter | `image` | `offset`, `rowbytes`, `rows`, `bpp`, `green` |
+| 69 | filter | `image` | `offset`, `width`, `rows`, `bpp`, `rowbytes`, `green` |
 | 70 | filter | `text` | – (its dictionary travels inside the filtered stream, so it gets compressed too) |
 
 Ids ≥ 128 are reserved for experimental methods.
@@ -92,20 +92,24 @@ Raw index:
 ```
 varint indexVersion (= 1)
 varint blockCount
-  block* (frame-number order): varint gapBefore (normally 0) · varint frameLength (incl. 28-byte frame header)
-                               varint rawSize · varint decodeMemKiB
+  block* (frame-number order), each wrapped as `bytes` (length-prefixed record):
+          varint gapBefore (normally 0) · varint frameLength (incl. 28-byte frame header)
+          varint rawSize · varint decodeMemKiB · bytes descriptor (copy of the block's pipeline descriptor, so
+          listings can show methods without decrypting/reading every frame)
 varint entryCount                     sorted by ordinal byte order of path (parents before children)
-  entry*: varint sharedPrefix · varint suffixLen · u8[suffixLen] suffix      (front-coded path)
+  entry*, each wrapped as `bytes` (length-prefixed record):
+          varint sharedPrefix · varint suffixLen · u8[suffixLen] suffix      (front-coded path)
           u8 kind (0 file, 1 directory)
           varint present (bit0 mtime · bit1 ctime · bit2 attributes)
-          [i64 mtime FILETIME UTC] [i64 ctime FILETIME UTC] [varint attributes & 0x2027]
+          [u64 mtime FILETIME UTC] [u64 ctime FILETIME UTC] [varint attributes & 0x2027]
           file: varint size · varint segmentCount · (varint frame · varint offset · varint length)* · u8[16] XxHash128
 varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", "plan" (JSON explain log), "rules" (JSON)
 ```
+- Length-prefixed records let a newer minor version append fields that older readers skip.
 - Frame offsets are implicit: `offset(frame k) = headerLength + Σ_{j<k} (gapBefore_j + frameLength_j) + gapBefore_k`.
 - A file is the concatenation of its segments; segments of different files may overlap (dedup). Empty files have no
   segments; every directory (including empty ones) is stored so attributes and times can be restored.
-- Reader invariants: Σ segment lengths = size; offset + length ≤ rawSize of the frame; rawSize ≤ 2^30;
+- Reader invariants: no duplicate paths; Σ segment lengths = size; offset + length ≤ rawSize of the frame; rawSize ≤ 2^30;
   path ≤ 32 KiB; stageCount ≤ 8; decodeMemKiB ≤ the configured limit (otherwise ask before decoding).
 
 ## 4. Footer (last 32 bytes)

@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  linux:
+    name: Build & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet build Osmium.sln -c Release
+      - run: dotnet test -c Release --project tests/Osmium.Core.Tests
+      - run: dotnet test -c Release --project tests/Osmium.Desktop.Tests
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Select-Object -First 1
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) } else { $v = "$base-ci.$env:GITHUB_RUN_NUMBER" }
+          "VER=$v" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: dotnet build Osmium.sln -c Release -p:Version=${{ env.VER }}
+
+      # Same tests as Linux, on Windows: includes the CM golden hash, proving byte-identical output across OSes.
+      - name: Test
+        if: matrix.arch == 'x64'
+        run: |
+          dotnet test -c Release --project tests/Osmium.Core.Tests
+          dotnet test -c Release --project tests/Osmium.Desktop.Tests
+
+      - name: Publish, portable ZIP, installer
+        shell: pwsh
+        run: ./build/publish.ps1 -Arch ${{ matrix.arch }} -Version $env:VER
+
+      - name: UI self-test (renders every page, light and dark)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $exe = "artifacts/publish/win-x64/Osmium.App.exe"
+          foreach ($mode in @('', 'dark')) {
+            $argv = @('--selftest-ui', 'artifacts/selftest') + @($mode | Where-Object { $_ })
+            $p = Start-Process -FilePath $exe -ArgumentList $argv -Wait -PassThru
+            Get-Content artifacts/selftest/selftest.log
+            if ($p.ExitCode -ne 0) { throw "UI self-test failed ($mode): exit $($p.ExitCode)" }
+          }
+
+      - name: CLI smoke test (compress, test, extract, compare)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $cli = "artifacts/publish/win-x64/osmium.exe"
+          New-Item -ItemType Directory -Force smoke/in/sub | Out-Null
+          Copy-Item README.md, docs/*.md smoke/in/
+          Copy-Item artifacts/publish/win-x64/Osmium.Core.dll smoke/in/sub/
+          & $cli a smoke/test.osa smoke/in --profile max; if ($LASTEXITCODE) { throw 'compress failed' }
+          & $cli t smoke/test.osa; if ($LASTEXITCODE) { throw 'test failed' }
+          & $cli x smoke/test.osa smoke/out; if ($LASTEXITCODE) { throw 'extract failed' }
+          $a = Get-ChildItem -Recurse -File smoke/in | ForEach-Object { (Get-FileHash $_.FullName).Hash } | Sort-Object
+          $b = Get-ChildItem -Recurse -File smoke/out/in | ForEach-Object { (Get-FileHash $_.FullName).Hash } | Sort-Object
+          if (Compare-Object $a $b) { throw 'extracted files differ' }
+          & $cli info smoke/test.osa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osmium-${{ matrix.arch }}
+          path: |
+            artifacts/installer/*.exe
+            artifacts/*.zip
+            artifacts/osmium-*.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x64' && always()
+        with:
+          name: ui-selftest-screenshots
+          path: artifacts/selftest/
+
+  release:
+    name: Release
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: osmium-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pre=""; [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
+          gh release create "$GITHUB_REF_NAME" dist/* --generate-notes $pre

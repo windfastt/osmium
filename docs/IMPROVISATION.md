@@ -73,5 +73,41 @@ because of it, what was deliberately not adopted, and the backlog of further ide
 - Recycle Bin removal of sources after verified compression.
 
 ## 5. Measured decisions
-Filled in during implementation (CM tuning experiments, profile results on test corpora) — see the README
-"Results" section for the final numbers.
+
+### 5.1 CM tuning before freezing the format
+Samples: 1.5 MB of license/changelog text, 2 MB of a .NET DLL, 1 MB of synthetic int32+float records; CM with
+256 MiB tables. Total compressed bytes, lower is better:
+
+| Variant | Total | vs. baseline | Decision |
+|---|---|---|---|
+| Baseline (fixed final blend) | 1 090 710 | — | |
+| Stretch-domain final blend | 1 090 875 | +0.02 % | rejected |
+| Learned final mixer (per bit position) | 1 086 810 | −0.36 % | adopted |
+| Learning-rate warm-up (first ~16 KiB) | 1 089 214 | −0.14 % | adopted |
+| Counter limit 1023 for orders 0–1 | 1 095 463 | +0.44 % | rejected (critic suggestion that hurt) |
+| Confidence input per context | 1 074 920 | −1.45 % | adopted |
+| **Confidence + learned final + warm-up** | **1 070 422** | **−1.86 %** | **CM v1** (≈30 % slower) |
+
+The finished CM v1 beats `xz -9e` by about 10 % on the same text and DLL samples, and is pinned by a golden-hash
+test that must pass on both Linux and Windows.
+
+### 5.2 Planner fixes found by measurement
+- Hill-climbing lowered CM table memory on small samples (hash-collision noise made a smaller table look better),
+  which would have hurt on full blocks. Memory-like parameters (CM memory, LZMA dictionary, PPMd memory) are now
+  excluded from the search; they are resource limits, not model choices.
+
+### 5.3 End-to-end results
+Mixed 16 MiB test folder (license texts, CSV, ELF + .NET binaries, a WAV, a BMP, PNG/JPEG/gzip files, 12-byte
+telemetry records, a duplicate file). Reference: `tar | xz -9e` = 6 095 132 bytes.
+
+| Profile | Archive | vs. xz -9e | Time |
+|---|---|---|---|
+| fast | 8 227 602 | +35 % | 0.3 s |
+| balanced | 5 604 113 | −8.1 % | 6 s |
+| max | 5 407 508 | −11.3 % | 6 s |
+| ultra | 4 983 958 | −18.2 % | 53 s |
+| insane | 4 927 730 | **−19.2 %** | ~10 min (mostly planning) |
+
+All archives passed `osmium t` and extracted byte-identically (`diff -r`). A distributed `max` run with two workers
+produced the same blocks as the local run in 9.6 s instead of 15.8 s (one local thread). See the README for the
+Windows-payload benchmark.

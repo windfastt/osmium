@@ -134,7 +134,7 @@ public sealed class OsaWriter : IDisposable
     {
         if (!_finished) throw new InvalidOperationException("Finish() must be called before Commit().");
         _fs.Dispose();
-        File.Move(TempPath, FinalPath, overwrite);
+        IO.FileRetry.Move(TempPath, FinalPath, overwrite);
         _committed = true;
     }
 

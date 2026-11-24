@@ -126,12 +126,14 @@ Filters are chosen by analysis/trials, never blindly: a filter that does not shr
 - **Whole-file dedup**: files with identical size + XxHash128 are confirmed by SHA-256 and stored once.
 - **Content-defined chunking** (Insane, or on request): Gear rolling hash (FastCDC normalised chunking),
   min 16 KiB / avg 64 KiB / max 256 KiB; chunks identified by SHA-256; duplicate chunks become shared segments.
-- **Solid blocks**: one per (class, group) split at `BlockCap`; ordering by extension then similarity.
-- **Verification**: each compressed block is decoded and its XxHash3 checked before being written (on by default
-  from Max upward, always for remote results); after writing, the archive is re-opened and tested before the
-  atomic rename.
-- **Safety**: `.tmp` output, fsync, rename; never touches sources; refuses to overwrite an existing archive unless
-  asked; extraction refuses absolute paths, `..`, drive letters, reserved device names and alternate data streams.
+- **Solid blocks**: one per (class, group) split at `BlockCap`; ordering by extension, then name. (Similarity
+  ordering via MinHash is backlog.)
+- **Verification** (always on; advanced opt-out): every block is decoded through the full pipeline and its XXH128
+  compared before it is written — remote results are additionally re-checked by the coordinator; after writing, the
+  archive is re-opened and every frame is structurally verified (CRCs, payload hashes, index) before the atomic rename.
+- **Safety**: `<name>.osa.partial-xxxx` output, fsync, rename; never touches sources; refuses to overwrite an existing
+  archive unless asked; extraction writes `*.osmium-part-xxxx`, verifies the file hash, then renames; paths are
+  validated with Windows rules on every OS (FORMAT §7); a source that changes while being read fails the job.
 ## 7. Analysis (`Osmium.Core/Analysis`)
 
 ### 7.1 Reading and sampling
@@ -181,8 +183,8 @@ size → record hint, ESE, Jet/ACE, OLE CFB).
 | Fast | sniff + H0 | none (table: zstd 3 / Store) | – | 16 MiB | quick |
 | Balanced (default) | 16 windows | none; table + filters (zstd 19 long / LZMA / PPMd) | – | 64 MiB | everyday |
 | Max | 32 windows | 1 rung (1 MiB), ≤ 4 candidates, no CM | – | 256 MiB | strong, still fast to decode |
-| Ultra | 64 windows | rungs 1 MiB → 4 MiB, η = 3, ≤ 10 candidates, CM allowed | hill-climb ≤ 24 evals/group | 1 GiB | archival |
-| Insane | 128 windows | rungs 256 KiB → 16 MiB, ≤ 40 candidates, **top-2 raced on full data** | hill-climb + merge/split refinement | 4 GiB | "any hassle" |
+| Ultra | 64 windows | rungs 1 MiB → 4 MiB, η = 3, ≤ 10 candidates, CM allowed | hill-climb ≤ 24 evals/group | 512 MiB | archival |
+| Insane | 128 windows | rungs 256 KiB → 16 MiB, ≤ 40 candidates, **top-2 raced on full blocks**, chunk dedup | hill-climb ≤ 48 evals/group | 1 GiB | "any hassle" |
 | Exhaustive *(experimental)* | full | every candidate in the bounded grid on full data | grid ≤ 500 evals/group | class-wide | research / tiny inputs |
 
 ### 8.2 Objective
@@ -228,8 +230,9 @@ record RuleActions(PipelineSpec? Pipeline, bool? Store, bool? Exclude, string[]?
 ```
 - Match fields are AND-ed, array items OR-ed. Globs are relative to the job root with `/` separators and `**`;
   case-insensitive on Windows. Regex uses `RegexOptions.NonBacktracking` with a timeout.
-- **Precedence per action property** (CSS-like): highest `(Layer, Priority, Specificity, Order)` wins.
-  Layers: built-in < global (`%APPDATA%\Osmium\rules.json`) < job. Specificity: exact path > regex > glob > extension > kind/size.
+- **Precedence per action property**: highest `(Layer, Priority, Order)` wins (specificity was dropped after the
+  critic review — simpler to explain). Layers: built-in < global (`%APPDATA%\Osmium\rules.json`, plus the codec/filter
+  switches from Settings) < job (per-file patches from the Compress page).
   `ForbidCodecs/ForbidFilters` are unioned; `Exclude` from any rule wins; `Store` ≡ pipeline Store.
 - Every effective value carries provenance (rule id + layer) for explain.
 - **Patch = rule with `Origin.type = "tuned"`** created by "Tune this file" (app right-click → Tune / Deep auto-tune,
@@ -248,8 +251,8 @@ record RuleActions(PipelineSpec? Pipeline, bool? Store, bool? Exclude, string[]?
   every task leases its estimated encode/decode memory. Planner clamps model/dictionary sizes so no single task
   exceeds the budget.
 - Codecs are single-threaded per task (determinism); parallelism is across blocks and trials.
-- **Crash safety**: output goes to `<name>.osa.tmp`; it is renamed only after the index is written, flushed and
-  (by default) the whole archive verified. Sources are never touched; "delete sources" is not offered in v1.
+- **Crash safety**: output goes to `<name>.osa.partial-xxxx`; it is renamed only after the index is written, flushed
+  and the archive structurally re-verified. Sources are never touched; "delete sources" is not offered in v1.
 
 ## 11. Distributed compression (`Osmium.Core/Distributed`)
 
@@ -267,8 +270,9 @@ record RuleActions(PipelineSpec? Pipeline, bool? Store, bool? Exclude, string[]?
 - Handshake: `Hello(nonceC, ephemeral P-256 pub, clusterTag)` → `Challenge(nonceS, ephemeral pub)` →
   `Auth = HMAC(K_auth, "c-auth" ‖ transcriptHash)` → `AuthOk = HMAC(K_auth, "s-auth" ‖ transcriptHash)`.
   The client proves knowledge first; comparisons use fixed-time equality.
-- `K_master` = 32 random bytes shown as a pairing code (`OSM1-…`), or derived from a passphrase with PBKDF2-SHA256
-  (600 000 iterations). `K_auth`, `K_disc`, `clusterTag` are HKDF/HMAC derivations of it.
+- `K_master` = 32 random bytes shown as a pairing code (`OSM1-…`, base32 with a checksum). Passphrase-derived keys
+  were removed after the critic review (an eavesdropper could brute-force them offline from the handshake).
+  `K_auth`, `K_disc`, `clusterTag` are HKDF/HMAC derivations of it.
 - Session keys: `HKDF(K_master ‖ ECDH secret, salt = transcriptHash)` → separate keys and IVs per direction
   (forward secrecy). Frames: `u32 len | AES-256-GCM(type ‖ body) | tag`, nonce = IV ⊕ sequence number,
   AAD = length; strict sequence check rejects replay/reorder. Max frame 1 MiB + overhead.
