@@ -83,10 +83,13 @@ public sealed class OsaReader : IDisposable
         uint flags = BinaryPrimitives.ReadUInt32LittleEndian(fh.AsSpan(4));
         ulong number = BinaryPrimitives.ReadUInt64LittleEndian(fh.AsSpan(8));
         long bodyLen = BinaryPrimitives.ReadInt64LittleEndian(fh.AsSpan(16));
+        string location = isIndex ? "the index" : $"block {expectedFrame}";
         if (number != expectedFrame) throw new CorruptDataException($"Expected frame {expectedFrame} but found {number}.");
         if (((flags & Osa.FrameFlagEncrypted) != 0) != header.Encrypted) throw new CorruptDataException("Frame encryption flag mismatch.");
         if (((flags & Osa.FrameFlagIndex) != 0) != isIndex) throw new CorruptDataException("Frame type mismatch.");
-        if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) != 0) throw new CorruptDataException("Unknown frame flags.");
+        // The frame header CRC has been checked: a flag this version does not know was set by a newer one.
+        if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) is var unknown and not 0)
+            throw new NewerVersionException($"frame flag 0x{unknown:X}", location);
         if (bodyLen != frameLength - Osa.FrameHeaderSize) throw new CorruptDataException("Frame length mismatch.");
         var body = GC.AllocateUninitializedArray<byte>(checked((int)bodyLen));
         int read = 0;
@@ -97,17 +100,27 @@ public sealed class OsaReader : IDisposable
             read += n;
         }
         byte[] plain = key is null ? body : key.Open(header.ArchiveId, expectedFrame, body, isIndex ? header.Raw : ReadOnlySpan<byte>.Empty);
-        return BlockBody.Parse(plain, reg);
+        return BlockBody.Parse(plain, reg, location);
     }
 
+    /// <summary>
+    /// The first block this version cannot decode because a newer version of Osmium made it, or null. Such an archive
+    /// still opens and lists (those blocks show a stand-in pipeline); reading those blocks throws this exception, and
+    /// every other block extracts normally.
+    /// </summary>
+    public NewerVersionException? NewerVersion => Index.Blocks.Select(b => b.Descriptor.NewerVersion).FirstOrDefault(e => e is not null);
+
     /// <summary>Reads and structurally verifies one frame (CRCs, tag, payload hash) without decoding it.</summary>
+    /// <exception cref="NewerVersionException">The block needs a newer version of Osmium.</exception>
     public BlockBody ReadBody(int frame)
     {
         var b = Blocks[frame];
+        if (b.Descriptor.NewerVersion is { } newer) throw newer.Again();
         return ReadFrame(_handle, b.Offset, b.FrameLength, (ulong)frame, Header, _key, _registry, isIndex: false);
     }
 
     /// <summary>Reads, decodes and hash-verifies one block's raw content.</summary>
+    /// <exception cref="NewerVersionException">The block needs a newer version of Osmium.</exception>
     public byte[] ReadBlock(int frame, CodecContext? ctx = null)
     {
         var body = ReadBody(frame);

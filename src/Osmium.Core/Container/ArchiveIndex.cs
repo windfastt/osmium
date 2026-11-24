@@ -93,6 +93,7 @@ public sealed class ArchiveIndex
     {
         var r = new BlobReader(data);
         int ver = r.Int(1000);
+        if (ver > Version) throw new NewerVersionException($"index version {ver}");
         if (ver != Version) throw new CorruptDataException($"Unsupported index version {ver}.");
         var idx = new ArchiveIndex();
         int nb = r.Int(1 << 24);
@@ -105,9 +106,8 @@ public sealed class ArchiveIndex
             long raw = (long)rr.U();
             long memKiB = (long)rr.U();
             if (raw > BlockLimits.MaxRawSize) throw new CorruptDataException("Block larger than the 1 GiB limit.");
-            BlockDescriptor desc;
-            var descBytes = rr.Bytes(1 << 16);
-            desc = BlockDescriptor.Deserialize(descBytes, registry);
+            // A block that needs a newer Osmium gets a stand-in, so the archive still opens and its other blocks extract.
+            var desc = BlockDescriptor.DeserializeOrStandIn(rr.Bytes(1 << 16), registry, $"block {i}");
             offset += gap;
             idx.Blocks.Add(new BlockInfo(i, offset, frameLen, raw, memKiB * 1024, desc));
             offset += frameLen;

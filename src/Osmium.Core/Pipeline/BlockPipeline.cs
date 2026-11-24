@@ -7,8 +7,20 @@ public sealed record BlockDescriptor(PipelineSpec Spec, long[] InputSizes)
 {
     public long RawSize => InputSizes[0];
 
+    /// <summary>
+    /// Set when this version of Osmium cannot decode the block, because it uses a method, parameter or parameter value
+    /// of a newer version. Only <see cref="DeserializeOrStandIn"/> returns such descriptors (for the archive index, so
+    /// that the archive still opens and lists): <see cref="Spec"/> is then a stand-in that names what is missing and
+    /// throws this exception when it is run.
+    /// </summary>
+    public NewerVersionException? NewerVersion { get; private init; }
+
+    /// <summary>The descriptor bytes as read, kept for stand-ins so that they serialize unchanged.</summary>
+    private byte[]? Stored { get; init; }
+
     public byte[] Serialize()
     {
+        if (Stored is not null) return Stored.ToArray();
         var w = new BlobWriter().U((ulong)Spec.Stages.Count);
         for (int i = 0; i < Spec.Stages.Count; i++)
         {
@@ -18,41 +30,137 @@ public sealed record BlockDescriptor(PipelineSpec Spec, long[] InputSizes)
         return w.ToArray();
     }
 
-    public static BlockDescriptor Deserialize(ReadOnlySpan<byte> blob, MethodRegistry registry)
+    /// <summary>
+    /// Reads a descriptor. A method id, a parameter name or a parameter value this version does not know raises
+    /// <see cref="NewerVersionException"/>. Values are checked, never clamped: a value written by a newer version
+    /// would decode differently.
+    /// </summary>
+    /// <param name="location">Where the descriptor is from, e.g. "block 3" or "the index", for the error message.</param>
+    public static BlockDescriptor Deserialize(ReadOnlySpan<byte> blob, MethodRegistry registry, string? location = null)
+    {
+        var (ids, sizes, parameters) = ReadStages(blob);
+        var stages = new List<StageSpec>(ids.Length);
+        for (int i = 0; i < ids.Length; i++) stages.Add(StoredStage(ids[i], parameters[i], registry, location));
+        return new BlockDescriptor(Pipeline(stages, location), sizes);
+    }
+
+    /// <summary>
+    /// Like <see cref="Deserialize"/>, but a block that needs a newer version of Osmium yields a stand-in descriptor
+    /// carrying <see cref="NewerVersion"/> instead of an exception, so that only that block is undecodable, never the
+    /// whole archive (FORMAT §2.2). Structurally invalid descriptors still throw.
+    /// </summary>
+    public static BlockDescriptor DeserializeOrStandIn(ReadOnlySpan<byte> blob, MethodRegistry registry, string location)
+    {
+        var (ids, sizes, parameters) = ReadStages(blob);
+        var stages = new List<StageSpec>(ids.Length);
+        try
+        {
+            for (int i = 0; i < ids.Length; i++) stages.Add(StoredStage(ids[i], parameters[i], registry, location));
+        }
+        catch (NewerVersionException e)
+        {
+            return new BlockDescriptor(PipelineSpec.Of(new NewerVersionStandIn(e)), [sizes[0]])
+            {
+                NewerVersion = e,
+                Stored = blob.ToArray(),
+            };
+        }
+        return new BlockDescriptor(Pipeline(stages, location), sizes);
+    }
+
+    private static (int[] Ids, long[] Sizes, ParamValues[] Params) ReadStages(ReadOnlySpan<byte> blob)
     {
         var r = new BlobReader(blob);
         int n = r.Int(PipelineSpec.MaxStages);
         if (n < 1) throw new InvalidDataException("Empty pipeline descriptor.");
-        var stages = new List<StageSpec>(n);
+        var ids = new int[n];
         var sizes = new long[n];
+        var parameters = new ParamValues[n];
         for (int i = 0; i < n; i++)
         {
-            int id = r.Int(65535);
+            ids[i] = r.Int(65535);
             sizes[i] = (long)r.U();
             if (sizes[i] > BlockLimits.MaxRawSize) throw new InvalidDataException($"Stage size {sizes[i]} exceeds the 1 GiB block limit.");
-            var m = registry.ById(id) ?? throw new UnknownMethodException(id);
-            var p = ParamValues.Deserialize(r.Bytes(4096));
-            foreach (var kv in p.All)
-            {
-                var def = m.Params.FirstOrDefault(d => d.Name == kv.Key)
-                    ?? throw new CorruptDataException($"Method '{m.Name}' has no parameter '{kv.Key}' (archive made by a newer Osmium?).");
-                if (kv.Value < def.Min || kv.Value > def.Max)
-                    throw new CorruptDataException($"Parameter {m.Name}.{kv.Key}={kv.Value} is out of range.");
-            }
-            stages.Add(new StageSpec(m, p));
+            parameters[i] = ParamValues.Deserialize(r.Bytes(4096));
         }
         if (!r.End) throw new InvalidDataException("Trailing bytes in pipeline descriptor.");
-        return new BlockDescriptor(new PipelineSpec(stages), sizes);
+        return (ids, sizes, parameters);
+    }
+
+    /// <summary>
+    /// Resolves one stored stage: the method must exist and every parameter must be one it declares, within the
+    /// declared range. Only parameters that are absent take their defaults (when the spec is built); nothing is clamped
+    /// or dropped, unlike specs built from user or planner input (<see cref="MethodBase.Normalize"/>).
+    /// </summary>
+    internal static StageSpec StoredStage(int id, ParamValues p, MethodRegistry registry, string? location)
+    {
+        var m = registry.ById(id) ?? throw new UnknownMethodException(id, location);
+        foreach (var kv in p.All)
+        {
+            var def = m.Params.FirstOrDefault(d => d.Name == kv.Key)
+                ?? throw new NewerVersionException($"parameter {m.Name}.{kv.Key}", location);
+            if (!def.Accepts(kv.Value)) throw new NewerVersionException($"parameter {m.Name}.{kv.Key}={kv.Value}", location);
+        }
+        return new StageSpec(m, p);
+    }
+
+    /// <summary>Builds the pipeline of stored stages; an impossible stage order (a codec before a filter) is corrupt data.</summary>
+    internal static PipelineSpec Pipeline(List<StageSpec> stages, string? location)
+    {
+        try { return new PipelineSpec(stages); }
+        catch (ArgumentException e) { throw new CorruptDataException($"Invalid pipeline{(location is null ? "" : " in " + location)}: {e.Message}", e); }
     }
 }
 
 /// <summary>Thrown for structurally invalid or corrupted archive data.</summary>
 public class CorruptDataException(string message, Exception? inner = null) : IOException(message, inner);
 
-public sealed class UnknownMethodException(int id)
-    : CorruptDataException($"Method {id} is not supported by this version of Osmium (archive made by a newer version?).")
+/// <summary>
+/// The archive uses something this version of Osmium does not know (a method id, a parameter name or value, a format
+/// feature) because a newer version made it. The message says so instead of calling the archive corrupt. Derives from
+/// <see cref="CorruptDataException"/>, so existing handlers still catch it.
+/// </summary>
+public class NewerVersionException(string feature, string? location = null)
+    : CorruptDataException($"This archive needs a newer version of Osmium: {location ?? "it"} uses {feature}.")
+{
+    /// <summary>What this version does not know, e.g. "method id 8" or "parameter cm.models=8191".</summary>
+    public string Feature => feature;
+
+    /// <summary>Where it is used, e.g. "block 3" or "the index"; null when not known.</summary>
+    public string? Location => location;
+
+    /// <summary>A new exception with the same details, for throwing again (an exception object is not shared between throws).</summary>
+    internal virtual NewerVersionException Again() => new(Feature, Location);
+}
+
+public sealed class UnknownMethodException(int id, string? location = null) : NewerVersionException($"method id {id}", location)
 {
     public int MethodId => id;
+
+    internal override NewerVersionException Again() => new UnknownMethodException(MethodId, Location);
+}
+
+/// <summary>
+/// The only stage of the stand-in pipeline of a block that needs a newer version: listings show its name, and
+/// running it throws the <see cref="NewerVersionException"/> it stands for.
+/// </summary>
+internal sealed class NewerVersionStandIn(NewerVersionException reason) : IMethod
+{
+    public int Id => -1;
+    public string Name => $"needs a newer Osmium ({reason.Feature})";
+    public string DisplayName => Name;
+    public MethodKind Kind => MethodKind.Codec;
+    public string Description => reason.Message;
+    public bool Experimental => false;
+    public bool Deterministic => true;
+    public IReadOnlyList<ParamDef> Params => [];
+
+    public byte[] Encode(ReadOnlyMemory<byte> input, ParamValues p, CodecContext ctx) => throw reason.Again();
+    public byte[] Decode(ReadOnlyMemory<byte> input, int outputLength, ParamValues p, CodecContext ctx) => throw reason.Again();
+    public long EncodeMemory(ParamValues p, long inputLength) => 0;
+    public long DecodeMemory(ParamValues p, long outputLength) => 0;
+    public double EncodeSpeed(ParamValues p) => 1;
+    public double DecodeSpeed(ParamValues p) => 1;
 }
 
 public static class BlockLimits

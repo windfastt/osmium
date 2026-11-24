@@ -79,7 +79,6 @@ public sealed class ArchiveHeader
         ushort major = BinaryPrimitives.ReadUInt16LittleEndian(fixedPart.AsSpan(8));
         if (major != Osa.Major) throw new CorruptDataException($"Unsupported archive format version {major}.x.");
         uint flags = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(12));
-        if ((flags & 0xFFFF & ~Osa.KnownCriticalFlags) != 0) throw new CorruptDataException("Archive uses features this version does not understand.");
         uint extLen = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(32));
         if (extLen > 1 << 20) throw new CorruptDataException("Header extension area too large.");
         var rest = new byte[extLen + 4];
@@ -89,6 +88,9 @@ public sealed class ArchiveHeader
         rest.AsSpan(0, (int)extLen).CopyTo(all.AsSpan(36));
         if (Osa.Crc(all) != BinaryPrimitives.ReadUInt32LittleEndian(rest.AsSpan((int)extLen)))
             throw new CorruptDataException("Archive header is corrupt (CRC mismatch).");
+        // Checked after the CRC: an unknown critical flag in an intact header was set by a newer version.
+        if ((flags & 0xFFFF & ~Osa.KnownCriticalFlags) is var unknown and not 0)
+            throw new NewerVersionException($"archive flag 0x{unknown:X4}");
 
         EncryptionInfo? enc = null;
         string? creator = null;
@@ -101,11 +103,11 @@ public sealed class ArchiveHeader
             {
                 case 1:
                     var er = new BlobReader(val);
-                    if (er.B() != 1) throw new CorruptDataException("Unsupported key-derivation function.");
+                    if (er.B() is var kdf and not 1) throw new NewerVersionException($"key derivation function {kdf}");
                     int iters = er.Int(100_000_000);
                     if (iters > MaxKdfIterations) throw new CorruptDataException($"Key derivation cost {iters} exceeds the safety limit.");
                     var salt = er.Raw(32).ToArray();
-                    if (er.B() != 1) throw new CorruptDataException("Unsupported cipher.");
+                    if (er.B() is var aead and not 1) throw new NewerVersionException($"cipher {aead}");
                     var verifier = er.Raw(16).ToArray();
                     enc = new EncryptionInfo(iters, salt, verifier);
                     break;
@@ -113,7 +115,7 @@ public sealed class ArchiveHeader
                     creator = Encoding.UTF8.GetString(val);
                     break;
                 default:
-                    if ((type & 1) == 1) throw new CorruptDataException($"Archive requires unknown feature #{type}.");
+                    if ((type & 1) == 1) throw new NewerVersionException($"archive feature #{type}");
                     break;
             }
         }
@@ -241,7 +243,8 @@ public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, Read
         return full;
     }
 
-    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry)
+    /// <param name="location">"block N" or "the index", for errors about a pipeline that needs a newer version.</param>
+    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry, string? location = null)
     {
         var span = body.Span;
         var r = new BlobReader(span);
@@ -255,6 +258,6 @@ public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, Read
         if (payloadLen != span.Length - r.Position) throw new CorruptDataException("Block payload length mismatch.");
         var payload = body[r.Position..];
         if (XxHash3.HashToUInt64(payload.Span) != payloadHash) throw new CorruptDataException("Block payload is corrupt (hash mismatch).");
-        return new BlockBody(BlockDescriptor.Deserialize(desc, registry), hash, payload);
+        return new BlockBody(BlockDescriptor.Deserialize(desc, registry, location), hash, payload);
     }
 }
