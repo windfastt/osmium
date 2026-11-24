@@ -135,7 +135,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        # Works both for a pushed tag and for a release published in GitHub's UI ("create new tag on publish"):
+        # an existing release gets the files attached and its notes replaced by the CHANGELOG section.
         run: |
           pre=""; [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
-          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Osmium ${GITHUB_REF_NAME#v}" "${notes[@]}" $pre
+          title="Osmium ${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            if [ -s notes.md ]; then gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file notes.md $pre; fi
+          else
+            if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+            gh release create "$GITHUB_REF_NAME" dist/* --title "$title" "${notes[@]}" $pre
+          fi
