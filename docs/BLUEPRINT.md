@@ -142,14 +142,18 @@ Filters are chosen by analysis/trials, never blindly: a filter that does not shr
 - Header (first 4 KiB) and tail (last 4 KiB) are used for signatures/trailers only, never for statistics.
 - Body: whole file if ≤ 1 MiB; otherwise K stratified 64 KiB windows
   (Fast 1, Balanced 16, Max 32, Ultra 64, Insane 128).
-- Windows are placed inside parsed structure regions when known (PE code sections, WAV `data`, BMP pixels).
+- Windows are spread evenly over the body (stratified sampling). *Planned:* placing them inside parsed structure
+  regions when known (PE code sections, WAV `data`, BMP pixels).
 
 ### 7.2 Signatures (kind detection)
-PE (machine → x86/x64/ARM64; IL-only .NET assemblies get **no** x86 filter), ELF, Mach-O, WAV (PCM 16/24, float),
-BMP (24/32 bpp, row stride, top-down flag), text (BOMs, strict UTF-8 rate, printable ratio, UTF-16 LE/BE, subtypes
-XML/JSON/CSV/log/source), already-compressed (ZIP/docx/jar, 7z, RAR4/5, gzip, xz, zstd, bzip2, lz4, CAB, JPEG, PNG,
-GIF, WebP, MP3, MP4/MOV, MKV/WebM, FLAC, Ogg), PDF (share of `FlateDecode` stream bytes), databases (SQLite page
-size → record hint, ESE, Jet/ACE, OLE CFB).
+Implemented: PE (machine → x86/x64/ARM64; IL-only .NET assemblies get **no** x86 filter), ELF, WAV (format, bits,
+channels and the `data` region; the PCM predictor handles 16-bit), BMP (8/24/32 bpp, row stride), text (BOMs, strict
+UTF-8 rate, printable ratio, UTF-16 LE/BE), already-compressed formats (ZIP/Office/JAR, 7-Zip, RAR, gzip, xz, zstd,
+bzip2, LZ4, CAB, JPEG, PNG, GIF, WebP, MP3, MP4/MOV/HEIC, MKV/WebM, FLAC, Ogg, WOFF/WOFF2, Osmium archives), PDF
+(detected; mostly-deflated PDFs are noted), SQLite and OLE compound files.
+
+*Planned (not built yet):* Mach-O, 24-bit and float WAV predictors, the share of `FlateDecode` bytes in PDFs, ESE and
+Jet/ACE databases, SQLite page size as a record hint, and text subtypes (XML/JSON/CSV/log/source).
 
 ### 7.3 Statistics
 - H0 (order-0 entropy), H1 (empirical order-1 on the sample), printable / high-bit / zero ratios, zero-run coverage,
@@ -192,16 +196,17 @@ size → record hint, ESE, Jet/ACE, OLE CFB).
 Times come from a **deterministic cost model** (per-codec reference throughput), not wall-clock measurements, so
 plans are reproducible and identical whether trials ran locally or on workers. λd defaults to 0; the
 "decode speed weight" setting (None / Light / Strong) penalises symmetric codecs such as CM.
-Ties within 0.1 % go to the faster decoder, then to the lexically smallest spec hash.
+Ties are broken by the ordinal spec string, so plans are deterministic. *Planned:* prefer the faster decoder
+when two candidates are within 0.1 %.
 
 ### 8.3 Group formation
 1. Apply rule pre-pass (Exclude / Store / analysis depth).
 2. Dedup (whole-file always; CDC chunks when enabled).
 3. Partition by `(forced spec ?? compatibility class, named solid group)`; `solid: own` ⇒ singleton block.
-4. Order within a class: extension, then similarity (SimHash over sampled 4-grams, greedy nearest-neighbour
-   for ≤ 20k items), same base-name bonus.
+4. Order within a class: by extension, then file name, then path. *Planned:* similarity ordering (SimHash over sampled
+   4-grams, greedy nearest-neighbour for ≤ 20k items) with a same-base-name bonus.
 5. Split into blocks ≤ `BlockCap` = min(profile cap, memory-derived cap).
-6. Ultra+: merge adjacent small groups when the merged sample compresses smaller.
+6. *Planned:* for Ultra and above, merge adjacent small groups when the merged sample compresses smaller.
 
 ### 8.4 Core loop
 ```
