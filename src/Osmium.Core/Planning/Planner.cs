@@ -411,7 +411,7 @@ public sealed class Planner(PlanOptions o)
         }
 
         if (p.SearchEvals > 0 && !best.IsStore)
-            best = await HillClimbAsync(g, best, scores[best], sample, trials, ct);
+            best = await HillClimbAsync(g, best, scores[best], sample, biggestBlock, trials, ct);
 
         g.Spec = best;
         if (p.RaceTopTwo)
@@ -422,13 +422,16 @@ public sealed class Planner(PlanOptions o)
         g.Explain.Add($"  chose {g.Spec}{(g.Alternates.Count > 0 ? $" (race vs {g.Alternates[0]})" : "")}");
     }
 
-    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, ITrialRunner trials, CancellationToken ct)
+    /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same
+    /// check the candidates passed (the sample is usually much smaller than the blocks it stands for).</param>
+    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, long biggestBlock,
+        ITrialRunner trials, CancellationToken ct)
     {
         int budget = o.Profile.SearchEvals;
         var tried = new HashSet<PipelineSpec> { best };
         while (budget > 0)
         {
-            var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, sample.Length)).Take(budget).ToList();
+            var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, biggestBlock)).Take(budget).ToList();
             if (neighbours.Count == 0) break;
             budget -= neighbours.Count;
             var sizes = await trials.RunAsync(neighbours, sample, ct);
