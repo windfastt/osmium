@@ -141,9 +141,13 @@ public sealed class ArchiveIndex
                 long sum = 0;
                 for (int s = 0; s < ns; s++)
                 {
+                    if (nb == 0) throw new CorruptDataException("A file refers to a block, but the archive has none.");
                     int frame = r2.Int(nb - 1);
-                    long off = (long)r2.U(), len = (long)r2.U();
-                    if (off + len > idx.Blocks[frame].RawSize || len <= 0) throw new CorruptDataException("Segment points outside its block.");
+                    ulong uoff = r2.U(), ulen = r2.U();
+                    long raw = idx.Blocks[frame].RawSize;
+                    // Unsigned comparisons: a crafted offset or length must not wrap around to pass the check.
+                    if (ulen == 0 || uoff > (ulong)raw || ulen > (ulong)raw - uoff) throw new CorruptDataException("Segment points outside its block.");
+                    long off = (long)uoff, len = (long)ulen;
                     segs.Add(new Segment(frame, off, len));
                     sum += len;
                 }

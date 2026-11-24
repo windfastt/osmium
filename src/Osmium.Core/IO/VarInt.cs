@@ -119,10 +119,12 @@ public ref struct BlobReader
 
     public ulong U() => VarInt.Read(_data, ref _pos);
 
+    /// <summary>A varint in [0, <paramref name="max"/>]. A negative <paramref name="max"/> (e.g. "count - 1" of an empty
+    /// list) allows no value at all.</summary>
     public int Int(int max = int.MaxValue)
     {
         ulong v = U();
-        if (v > (ulong)max) throw new InvalidDataException($"Value {v} exceeds limit {max}.");
+        if (max < 0 || v > (ulong)max) throw new InvalidDataException($"Value {v} exceeds limit {max}.");
         return (int)v;
     }
 
