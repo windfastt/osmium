@@ -76,7 +76,7 @@ Osmium's own self-contained win-x64 publish output: 273 DLLs (.NET ReadyToRun as
 ## What the numbers say
 
 - **Mixed data is where planning per kind of data pays.** On the mixed folder every Osmium profile from Balanced up
-  beats 7-Zip and xz, and Ultra and Insane beat every other tool: Insane is −18.9 % against
+  beats 7-Zip and xz, and Ultra and Insane beat every other tool on this folder: Insane is −18.9 % against
   `xz -9e` and −6.8 % against lrzip, the smallest other result. Max gets
   −11.3 % against xz without context mixing, so it still extracts in 0.5 s.
 - **On program files, ZPAQ and lrzip are still smaller.** On the Windows application folder ZPAQ -m5 reaches

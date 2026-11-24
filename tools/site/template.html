@@ -1,0 +1,979 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- The project keeps a low profile: please do not index. -->
+<meta name="robots" content="noindex, nofollow">
+<meta name="description" content="Osmium is an MIT-licensed file compressor for Windows that plans a compression pipeline for each kind of data.">
+<title>Osmium</title>
+<link rel="icon" href="{{FAVICON}}">
+<style>
+/* Fonts are served from this site (SIL Open Font License 1.1, see fonts/*-OFL.txt): no requests to other hosts. */
+@font-face { font-family: "Anybody"; font-style: normal; font-weight: 100 900; font-stretch: 50% 150%; font-display: swap; src: url("fonts/anybody-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Anybody"; font-style: normal; font-weight: 100 900; font-stretch: 50% 150%; font-display: swap; src: url("fonts/anybody-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; src: url("fonts/instrument-sans-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; src: url("fonts/instrument-sans-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Martian Mono"; font-style: normal; font-weight: 100 800; font-stretch: 75% 112.5%; font-display: swap; src: url("fonts/martian-mono-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Martian Mono"; font-style: normal; font-weight: 100 800; font-stretch: 75% 112.5%; font-display: swap; src: url("fonts/martian-mono-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+
+/* Layout: one 1200px column. Every section opens with a mono spec line that states its facts, then lets one exhibit
+   (a mock-up, a chart, a diagram) run wide. The hero headline is set wide and condenses to its resting width on load. */
+:root {
+  --page: #eef0f4;
+  --surface: #ffffff;
+  --sunk: #e4e7ed;
+  --ink: #14151b;
+  --ink-2: #3d404d;
+  --muted: #5f6372;
+  --line: #d5d9e2;
+  --line-soft: #e2e5eb;
+  --accent: #3a2a96;
+  --btn: #3a2a96;
+  --btn-ink: #ffffff;
+  --btn-hover: #2c1f7a;
+  --mark: #5b4bd5;
+  --mark-rest: #8e93a3;
+  --grid: #e5e7ed;
+  --axis: #b9bfcb;
+  --live: #1592c8;
+  --exp: #c2410c;
+  --ok: #0f7a3d;
+  --code: #f6f7f9;
+  --shadow: 0 1px 2px rgba(20, 21, 27, .06), 0 10px 32px rgba(20, 21, 27, .09);
+  --font-display: "Anybody", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+  --font-win: "Segoe UI Variable Text", "Segoe UI", "Instrument Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0e0f13; --surface: #17181e; --sunk: #121318; --ink: #eceef4; --ink-2: #c3c6d1; --muted: #9296a4;
+    --line: #2a2c35; --line-soft: #202229; --accent: #b3a9ff; --btn: #b3a9ff; --btn-ink: #121218; --btn-hover: #cbc4ff;
+    --mark: #9085e9; --mark-rest: #666b7a; --grid: #23252d; --axis: #3d404b; --live: #3bb8ee; --exp: #f0702a;
+    --ok: #3ccf7a; --code: #121318; --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 32px rgba(0, 0, 0, .38);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0e0f13; --surface: #17181e; --sunk: #121318; --ink: #eceef4; --ink-2: #c3c6d1; --muted: #9296a4;
+  --line: #2a2c35; --line-soft: #202229; --accent: #b3a9ff; --btn: #b3a9ff; --btn-ink: #121218; --btn-hover: #cbc4ff;
+  --mark: #9085e9; --mark-rest: #666b7a; --grid: #23252d; --axis: #3d404b; --live: #3bb8ee; --exp: #f0702a;
+  --ok: #3ccf7a; --code: #121318; --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 32px rgba(0, 0, 0, .38);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-padding-top: calc(env(safe-area-inset-top, 0px) + 76px); }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 400 17px/1.6 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--page); }
+h1, h2, h3, h4 { margin: 0; font-family: var(--font-display); text-wrap: balance; }
+p, ul, ol, figure, pre { margin: 0; }
+a { color: var(--accent); text-underline-offset: .18em; text-decoration-thickness: 1px; }
+code, pre, kbd, .mono { font-family: var(--font-mono); font-stretch: 87.5%; }
+code { font-size: .84em; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.wrap {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-left: max(clamp(16px, 4vw, 40px), env(safe-area-inset-left, 0px));
+  padding-right: max(clamp(16px, 4vw, 40px), env(safe-area-inset-right, 0px));
+}
+.spec {
+  font: 500 11.5px/1.6 var(--font-mono);
+  font-stretch: 87.5%;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sec { padding-block: clamp(64px, 9vw, 120px); }
+.sec + .sec { border-top: 1px solid var(--line-soft); }
+.sec-head { display: grid; gap: 14px; max-width: 760px; margin-bottom: clamp(32px, 4vw, 52px); }
+h2 { font-size: clamp(32px, 4.4vw, 52px); font-weight: 760; font-stretch: 70%; line-height: 1; letter-spacing: -.005em; }
+h3 { font-size: 21px; font-weight: 680; font-stretch: 86%; line-height: 1.2; }
+.lede { font-size: clamp(17.5px, 1.5vw, 19.5px); color: var(--ink-2); max-width: 38em; }
+.body { color: var(--ink-2); max-width: 40em; }
+
+/* ---------------------------------------------------------------- header */
+.top {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9;
+  background: var(--page);
+  background: color-mix(in srgb, var(--page) 86%, transparent);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.top-in { display: flex; align-items: center; gap: 28px; height: 62px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font: 720 21px/1 var(--font-display); font-stretch: 80%; }
+.top nav { display: flex; gap: 22px; margin-left: auto; }
+.top nav a { color: var(--ink-2); text-decoration: none; font-size: 15px; }
+.top nav a:hover { color: var(--ink); text-decoration: underline; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 46px; padding: 0 20px;
+  border-radius: 9px; border: 1px solid transparent; font: 600 15.5px/1 var(--font-body); text-decoration: none; cursor: pointer;
+}
+.btn-sm { min-height: 38px; padding: 0 15px; font-size: 14.5px; }
+.btn-primary { background: var(--btn); color: var(--btn-ink); }
+.btn-primary:hover { background: var(--btn-hover); }
+.btn-ghost { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.btn-ghost:hover { border-color: var(--axis); }
+@media (max-width: 900px) { .top nav { display: none; } .top .btn { margin-left: auto; } }
+
+/* ---------------------------------------------------------------- hero */
+.hero { padding-block: clamp(44px, 7vw, 92px) clamp(56px, 7vw, 96px); overflow-x: clip; }
+.eyebrow { display: flex; align-items: center; gap: 16px; }
+.tile {
+  flex: none; width: 60px; height: 60px; border: 1.5px solid var(--ink); border-radius: 3px; padding: 4px 5px;
+  display: grid; grid-template-rows: auto 1fr auto; font: 500 9.5px/1 var(--font-mono); font-stretch: 87.5%;
+}
+.tile b { place-self: center; font: 760 25px/1 var(--font-display); font-stretch: 92%; }
+.h1 {
+  margin-top: 4px; overflow-x: clip;
+  font-size: clamp(48px, 7.4vw, 100px); font-weight: 800; font-stretch: 62%; line-height: .9; letter-spacing: -.012em;
+}
+@media (max-width: 920px) { .h1 { font-size: clamp(48px, 12vw, 112px); } }
+.h1 .ln { display: block; white-space: nowrap; }
+@media (prefers-reduced-motion: no-preference) {
+  .h1 .ln { animation: squeeze 1.7s cubic-bezier(.16, .74, .1, 1) .12s both; }
+  .h1 .ln + .ln { animation-delay: .26s; }
+}
+@keyframes squeeze { from { font-stretch: 150%; } to { font-stretch: 62%; } }
+.hero-grid {
+  display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: clamp(32px, 5vw, 64px); align-items: center;
+}
+@media (max-width: 920px) { .hero-grid { grid-template-columns: minmax(0, 1fr); } }
+.hero-copy { display: grid; gap: 24px; align-content: center; min-width: 0; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+.meta { color: var(--muted); font-size: 14.5px; }
+
+/* ---------------------------------------------------------------- results */
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 1px; margin-top: clamp(44px, 6vw, 72px);
+  background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+}
+.st { background: var(--surface); padding: 22px 22px 24px; display: grid; gap: 6px; align-content: start; }
+.st .v { font: 650 clamp(34px, 3.6vw, 44px)/1.05 var(--font-body); letter-spacing: -.01em; }
+.st .l { color: var(--ink-2); font-size: 15px; line-height: 1.45; }
+.st .c { color: var(--muted); font-size: 13px; }
+
+.charts { display: grid; gap: 28px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: clamp(18px, 2.6vw, 30px); min-width: 0; }
+.chart-card { position: relative; display: grid; gap: 18px; }
+.chart-card figcaption { display: grid; gap: 6px; }
+.chart-card .sub { color: var(--ink-2); font-size: 15px; max-width: 60em; }
+.chart-tools { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; justify-content: space-between; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.key { width: 14px; height: 10px; border-radius: 0 3px 3px 0; display: inline-block; }
+.key.osm { background: var(--mark); }
+.key.oth { background: var(--mark-rest); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: none; color: var(--ink-2); font: 500 13.5px/1 var(--font-body); padding: 8px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--sunk); color: var(--ink); font-weight: 600; }
+.bars { display: grid; gap: 0; }
+.br {
+  display: grid; grid-template-columns: minmax(0, 15.5em) minmax(0, 1fr); align-items: center; column-gap: 14px;
+  min-height: 34px; border-radius: 6px; cursor: default;
+}
+.br:hover, .br:focus-visible { background: var(--sunk); }
+.br .nm { font-size: 14.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 6px; }
+.br.osm .nm { color: var(--ink); font-weight: 600; }
+.track {
+  position: relative; height: 34px; border-left: 1px solid var(--axis);
+  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px);
+  background-size: var(--tick) 100%;
+}
+.bar { position: absolute; left: 0; top: 10px; height: 14px; border-radius: 0 4px 4px 0; background: var(--mark-rest); }
+.br.osm .bar { background: var(--mark); }
+.br:hover .bar, .br:focus-visible .bar { filter: brightness(1.12) saturate(1.05); }
+.val { position: absolute; top: 0; line-height: 34px; padding-left: 8px; font-size: 13.5px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.br.osm .val { color: var(--ink); font-weight: 600; }
+.val small { font-size: 12.5px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+.val.tight small { display: none; }
+.axis { display: grid; grid-template-columns: minmax(0, 15.5em) minmax(0, 1fr); column-gap: 14px; }
+.axis .ticks { position: relative; height: 22px; border-top: 1px solid var(--axis); }
+.axis .ticks span { position: absolute; top: 4px; transform: translateX(-50%); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.axis .ticks span:first-child { transform: none; }
+.axis .cap { font-size: 12px; color: var(--muted); padding-left: 6px; padding-top: 4px; }
+@media (max-width: 640px) {
+  .br { grid-template-columns: minmax(0, 1fr); padding-top: 6px; }
+  .br .nm { font-size: 14px; }
+  .track { height: 28px; }
+  .bar { top: 6px; }
+  .val { line-height: 28px; }
+  .axis { grid-template-columns: minmax(0, 1fr); }
+  .axis .cap { display: none; }
+}
+.tip {
+  position: absolute; z-index: 3; pointer-events: none; min-width: 220px; max-width: 300px; padding: 10px 12px; border-radius: 9px;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 13.5px; line-height: 1.45;
+}
+.tip b { display: block; font-size: 15.5px; font-weight: 650; }
+.tip .t { color: var(--ink-2); }
+.tip .m { color: var(--muted); }
+.table-wrap { overflow-x: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+table.data th, table.data td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); text-align: right; white-space: nowrap; }
+table.data th { font-weight: 600; color: var(--ink-2); border-bottom-color: var(--line); }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data tr.osm td:first-child { font-weight: 600; }
+.okmark { color: var(--ok); }
+.notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px 36px; margin-top: 40px; }
+@media (max-width: 900px) { .notes { grid-template-columns: minmax(0, 1fr); } }
+.note h4 { font: 650 15px/1.3 var(--font-body); margin-bottom: 6px; }
+.note p { color: var(--ink-2); font-size: 15px; }
+
+/* ---------------------------------------------------------------- how it works */
+.steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; counter-reset: st; }
+@media (max-width: 700px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+.step { background: var(--surface); padding: 18px 18px 20px; display: grid; gap: 6px; align-content: start; counter-increment: st; }
+.step::before { content: counter(st, decimal-leading-zero); font: 500 11.5px/1 var(--font-mono); font-stretch: 87.5%; color: var(--muted); }
+.step h3 { font-size: 18px; }
+.step p { font-size: 14.5px; color: var(--ink-2); line-height: 1.5; }
+.found { margin-top: 40px; display: grid; gap: 14px; }
+.found .table-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+table.plan { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.plan th, table.plan td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.plan tr:last-child td { border-bottom: 0; }
+table.plan th { font-weight: 600; color: var(--ink-2); border-bottom-color: var(--line); white-space: nowrap; }
+table.plan td.n { white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
+table.plan code { font-size: 12px; word-break: break-word; color: var(--ink); }
+table.plan .k { color: var(--muted); font-size: 13px; display: block; }
+
+/* ---------------------------------------------------------------- screenshots */
+.shot { margin: 0; display: grid; gap: 10px; min-width: 0; }
+.shot img { display: block; width: 100%; height: auto; border-radius: 10px; box-shadow: var(--shadow); background: var(--surface); }
+.shot figcaption { font-size: 13.5px; color: var(--muted); }
+.hero-shot { position: relative; justify-self: end; max-width: 620px; width: 100%; }
+.hero-shot .inset { position: absolute; right: -12px; bottom: 34px; width: 38%; max-width: 230px; }
+.hero-shot .inset img { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+@media (max-width: 920px) { .hero-shot { justify-self: stretch; max-width: 100%; } .hero-shot .inset { right: 8px; } }
+.gallery { display: grid; gap: 16px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tabs button { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 8px; padding: 8px 13px;
+  font: 500 14px/1 var(--font-body); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--btn); border-color: var(--btn); color: var(--btn-ink); }
+.tabs button:hover { border-color: var(--axis); }
+.panel { display: grid; gap: 10px; }
+.panel .shot img { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.shot-note { color: var(--muted); font-size: 14px; }
+.menu-list { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.menu-list li { border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 13.5px; color: var(--ink-2); background: var(--sunk); }
+.legal { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 22px 36px; margin-bottom: 34px; }
+.legal h4 { font: 650 14px/1.3 var(--font-body); color: var(--ink); margin: 0 0 6px; }
+.legal p { font-size: 13.5px; line-height: 1.55; color: var(--muted); margin: 0; }
+.legal a { color: var(--ink-2); }
+
+/* ---------------------------------------------------------------- per-file control */
+.ctl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 1000px) { .ctl { grid-template-columns: minmax(0, 1fr); } }
+.ctl .card { display: grid; gap: 12px; align-content: start; }
+.ctl p { color: var(--ink-2); font-size: 15px; }
+pre.code {
+  background: var(--code); border: 1px solid var(--line-soft); border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+  font-size: 12.5px; line-height: 1.65; color: var(--ink);
+}
+.code .c { color: var(--muted); }
+.code .k { color: var(--accent); }
+
+/* ---------------------------------------------------------------- profiles */
+table.prof { width: 100%; border-collapse: collapse; font-size: 15px; }
+table.prof th, table.prof td { text-align: left; padding: 14px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.prof th { font-weight: 600; color: var(--ink-2); font-size: 13.5px; border-bottom-color: var(--line); white-space: nowrap; }
+table.prof td.p { font: 720 22px/1.1 var(--font-display); font-stretch: 78%; white-space: nowrap; }
+table.prof td.p small { display: block; margin-top: 4px; font: 500 10.5px/1.2 var(--font-mono); font-stretch: 87.5%; letter-spacing: .04em; text-transform: uppercase; color: var(--exp); }
+table.prof td.r { white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 190px; }
+table.prof td.d { color: var(--ink-2); min-width: 260px; }
+.meter { display: block; width: 100%; max-width: 170px; height: 8px; border-radius: 4px; background: var(--sunk); margin-top: 7px; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--mark); border-radius: 4px; }
+.r .m { color: var(--muted); font-size: 13px; display: block; }
+.prof-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow-x: auto; }
+
+/* ---------------------------------------------------------------- cluster */
+.cl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+@media (max-width: 960px) { .cl { grid-template-columns: minmax(0, 1fr); } }
+.net { display: grid; grid-template-columns: minmax(0, 1fr) 128px minmax(0, 1fr); align-items: center; gap: 0; }
+.node { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 4px; }
+.node b { font: 680 17px/1.2 var(--font-display); font-stretch: 86%; }
+.node span { font-size: 13.5px; color: var(--ink-2); }
+.node .mono { font-size: 11.5px; color: var(--muted); }
+.workers { display: grid; gap: 10px; }
+.wire { display: grid; gap: 10px; padding: 0 10px; font: 500 10.5px/1.35 var(--font-mono); font-stretch: 87.5%; color: var(--muted); text-align: center; }
+.wire i { display: block; height: 0; border-top: 1.5px solid var(--axis); position: relative; margin: 4px 0; }
+.wire i::after { content: ""; position: absolute; top: -4.5px; width: 7px; height: 7px; border: solid var(--axis); border-width: 1.5px 1.5px 0 0; }
+.wire i.r::after { right: 0; transform: rotate(45deg); }
+.wire i.l::after { left: 0; transform: rotate(-135deg); }
+@media (max-width: 560px) {
+  .net { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .wire { padding: 4px 0; }
+}
+ol.howto { list-style: none; padding: 0; display: grid; gap: 14px; counter-reset: h; }
+ol.howto li { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 4px 12px; counter-increment: h; }
+ol.howto li::before { content: counter(h); grid-row: span 2; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--ink-2); display: grid; place-items: center; font: 600 13px/1 var(--font-body); }
+ol.howto p { color: var(--ink-2); font-size: 15px; }
+ol.howto pre.code { margin-top: 6px; }
+.facts { list-style: none; padding: 0; display: grid; gap: 10px; margin-top: 26px; }
+.facts li { padding-left: 18px; position: relative; color: var(--ink-2); font-size: 15px; }
+.facts li::before { content: ""; position: absolute; left: 0; top: .62em; width: 7px; height: 7px; background: var(--mark); transform: rotate(45deg); }
+
+/* ---------------------------------------------------------------- safety / format */
+.fmt { display: flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.fmt > div { padding: 14px 14px 16px; border-right: 1px solid var(--line); display: grid; gap: 4px; align-content: start; min-width: 0; }
+.fmt > div:last-child { border-right: 0; }
+.fmt .h { flex: 1.1; } .fmt .bk { flex: 1.25; } .fmt .dots { flex: .45; display: grid; place-items: center; color: var(--muted); }
+.fmt .ix { flex: 1.5; } .fmt .ft { flex: .9; }
+.fmt b { font: 500 12px/1.3 var(--font-mono); font-stretch: 87.5%; }
+.fmt span { font-size: 13.5px; color: var(--ink-2); line-height: 1.45; }
+.fmt .bk { background: color-mix(in srgb, var(--mark) 9%, var(--surface)); }
+@media (max-width: 760px) {
+  .fmt { flex-direction: column; }
+  .fmt > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .fmt > div:last-child { border-bottom: 0; }
+  .fmt .dots { display: none; }
+}
+.fmt-cap { margin-top: 10px; font-size: 13px; color: var(--muted); }
+.guar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px 36px; margin-top: 44px; }
+@media (max-width: 900px) { .guar { grid-template-columns: minmax(0, 1fr); } }
+.guar h3 { font-size: 19px; margin-bottom: 6px; }
+.guar p { color: var(--ink-2); font-size: 15px; }
+
+/* ---------------------------------------------------------------- roadmap */
+.rm-next { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 900px) { .rm-next { grid-template-columns: minmax(0, 1fr); } }
+.rm-next .card { display: grid; gap: 12px; align-content: start; }
+.rm-next p { color: var(--ink-2); font-size: 15px; }
+.tag { justify-self: start; font: 500 10.5px/1 var(--font-mono); font-stretch: 87.5%; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid currentColor; border-radius: 99px; padding: 5px 9px; }
+.gap { display: grid; gap: 7px; margin-block: 4px; }
+.gap div { display: grid; grid-template-columns: 7.5em minmax(0, 1fr) 4.2em; align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink-2); }
+.gap div b { font-weight: 600; color: var(--ink); }
+.gap i { display: block; height: 10px; border-radius: 0 4px 4px 0; background: var(--mark-rest); }
+.gap .o i { background: var(--mark); }
+.gap span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.rm-more { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 40px; margin-top: 36px; }
+@media (max-width: 900px) { .rm-more { grid-template-columns: minmax(0, 1fr); } }
+.rm-more ul { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 12px; }
+.rm-more li { color: var(--ink-2); font-size: 15px; padding-left: 18px; position: relative; }
+.rm-more li::before { content: ""; position: absolute; left: 0; top: .62em; width: 7px; height: 7px; border: 1.5px solid var(--mark); transform: rotate(45deg); }
+.rm-more li b { color: var(--ink); font-weight: 600; }
+
+/* ---------------------------------------------------------------- download */
+.dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 960px) { .dl { grid-template-columns: minmax(0, 1fr); } }
+.dl .card { display: grid; gap: 12px; align-content: start; }
+.dl .fn { font-size: 12px; color: var(--muted); word-break: break-all; }
+.dl p { color: var(--ink-2); font-size: 15px; }
+.dl .btn { justify-self: start; }
+.callout { margin-top: 26px; padding: 16px 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-size: 15px; display: grid; gap: 6px; }
+.build { margin-top: 26px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.copyrow { position: relative; min-width: 0; }
+.copy { position: absolute; top: 8px; right: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 6px; padding: 4px 10px; font: 500 12.5px/1.4 var(--font-body); cursor: pointer; }
+.copy:hover { color: var(--ink); }
+
+footer { padding-block: 44px 56px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 14px; }
+.foot { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; justify-content: space-between; }
+.foot nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.foot a { color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a2a96"/><stop offset="1" stop-color="#14a0d2"/></linearGradient>
+    <symbol id="i-logo" viewBox="0 0 32 32">
+      <rect x="1.28" y="1.28" width="29.44" height="29.44" rx="7.04" fill="url(#g-logo)"/>
+      <polygon points="16,5.76 25.15,11.04 16,16.32 6.85,11.04" fill="#f0f4ff"/>
+      <polygon points="25.15,11.04 25.15,21.6 16,26.88 16,16.32" fill="#aab6d7"/>
+      <polygon points="6.85,11.04 16,16.32 16,26.88 6.85,21.6" fill="#7884af"/>
+      <polygon points="16,12.16 19.6,14.24 16,16.32 12.4,14.24" fill="#3c328c"/>
+      <polygon points="19.6,14.24 19.6,18.4 16,20.48 16,16.32" fill="#286eaa"/>
+      <polygon points="12.4,14.24 16,16.32 16,20.48 12.4,18.4" fill="#1e4682"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#top"><svg width="28" height="28" aria-hidden="true"><use href="#i-logo"/></svg>Osmium</a>
+    <nav aria-label="Sections">
+      <a href="#bench">Results</a>
+      <a href="#how">How it works</a>
+      <a href="#app">The app</a>
+      <a href="#control">Per-file control</a>
+      <a href="#profiles">Profiles</a>
+      <a href="#cluster">Cluster</a>
+      <a href="#safety">Safety</a>
+      <a href="#roadmap">Roadmap</a>
+    </nav>
+    <a class="btn btn-primary btn-sm" href="#download">Download</a>
+  </div>
+</header>
+
+<main id="top">
+<section class="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <div class="eyebrow">
+          <div class="tile" aria-hidden="true"><span>76</span><b>Os</b><span>190.23</span></div>
+          <p class="spec">File compressor for Windows<br>Named after the densest natural element, 22.59 g/cm³</p>
+        </div>
+        <h1 class="h1"><span class="ln">As small as</span><span class="ln">you have time for.</span></h1>
+        <p class="lede">Osmium lives in the notification area and packs files into <code>.osa</code> archives. It works out what each
+          file is, gives every kind of data its own pipeline, races codecs on samples and tunes their settings. Give it more
+          time and it brings in context mixing and the other PCs on your network.</p>
+        <div class="ctas">
+          <a class="btn btn-primary" href="https://github.com/windfastt/osmium/releases/latest">Download for Windows</a>
+          <a class="btn btn-ghost" href="#bench">See the benchmarks</a>
+        </div>
+        <p class="meta">Version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64 · MIT license, no warranty</p>
+      </div>
+
+{{HERO}}
+    </div>
+    <div class="tiles" id="tiles" aria-label="Results summary"></div>
+  </div>
+</section>
+
+<section class="sec" id="bench">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec" id="bench-spec">Benchmarks · 2 folders · 8 other tools in 9 settings · every archive unpacked and compared</p>
+      <h2 id="bench-h">Smallest in our mixed-folder test</h2>
+      <p class="lede" id="bench-lede">Each tool compressed the same two folders at the strongest setting people commonly use,
+        and every archive was unpacked and compared with the original, file by file. In this test Osmium made the smallest
+        archive of the mixed folder; on the folder of program files, ZPAQ and lrzip made smaller ones. Bars show the archive size as a share of the
+        original; shorter is better.</p>
+    </div>
+    <div class="charts" id="charts"></div>
+    <div class="notes">
+      <div class="note"><h4>How it was measured</h4><p id="method">Stream compressors got a tar of the folder. 7-Zip, ZPAQ, zip and Osmium
+        archived the folder directly. xz and Zstandard ran single-threaded, because their multi-threaded modes split the input and lose ratio.</p></div>
+      <div class="note"><h4>Where Osmium loses</h4><p id="loses">On program files, ZPAQ -m5 and lrzip beat Ultra: their models for x86 code are stronger
+        than Osmium's today, and closing that gap is next on the list. Max only matches xz on machine code, since both are
+        LZMA with a branch filter, and Fast is larger than zip on the mixed folder.</p></div>
+      <div class="note"><h4>The cost of the smallest file</h4><p id="cost">Context mixing decompresses about as slowly as it
+        compresses. After compressing, Osmium reports the expected extraction time and memory, and <code>osmium info</code>
+        shows them for any archive. Max keeps LZMA's fast extraction.</p></div>
+      <div class="note"><h4>Conditions</h4><p id="conditions">{{CONDITIONS}}</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">How it works · nine stages · every decision written to the archive's planner log</p>
+      <h2>It reads the files before it packs them</h2>
+      <p class="lede">Most archivers run one algorithm over everything. Osmium sorts files by what they contain and plans each
+        group separately, then proves every block decodes before it writes anything.</p>
+    </div>
+    <div class="steps">
+      <div class="step"><h3>Scan</h3><p>Walks the inputs, applies exclude patterns, reads sizes and timestamps.</p></div>
+      <div class="step"><h3>Analyze</h3><p>Signatures (PE, ELF, WAV, BMP, PNG…), entropy, a zstd-1 probe and record stride.</p></div>
+      <div class="step"><h3>Rules</h3><p>Your per-file patches and rules force, forbid or tune pipelines.</p></div>
+      <div class="step"><h3>Dedup</h3><p>Identical files are stored once. Insane also finds repeated chunks inside and across files.</p></div>
+      <div class="step"><h3>Group</h3><p>Files with the same kind of data share solid blocks, aligned to their record size.</p></div>
+      <div class="step"><h3>Plan</h3><p>Candidates race on growing samples; the losers drop out at each round, then the winner's parameters are hill-climbed.</p></div>
+      <div class="step"><h3>Compress</h3><p>Blocks run in parallel inside a memory budget, on this PC or on paired workers.</p></div>
+      <div class="step"><h3>Verify</h3><p>Every block is decoded and compared byte for byte before it is written.</p></div>
+      <div class="step"><h3>Commit</h3><p>Frames are written in order, the archive is read back, then renamed into place.</p></div>
+    </div>
+
+    <div class="found">
+      <h3>What the planner chose for the mixed folder (Ultra)</h3>
+      <div class="table-wrap">
+        <table class="plan">
+          <thead><tr><th>Group</th><th>What Osmium saw</th><th class="n">Raw</th><th class="n">Packed</th><th>Pipeline chosen</th></tr></thead>
+          <tbody id="plan-rows" data-fill="planner"></tbody>
+        </table>
+      </div>
+      <p class="spec" id="plan-cap">From <code>osmium info</code> and <code>osmium explain</code> on the Ultra archive.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="app">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">The app · tray icon · 8 pages · {{SETTINGS_COUNT}}</p>
+      <h2>It lives next to the clock</h2>
+      <p class="lede">Osmium starts with Windows and waits in the notification area. The ring fills while a job runs; hover it for
+        the phase and percentage, right-click it for everything else. Drop files on the window, or right-click them in Explorer.</p>
+    </div>
+{{GALLERY}}
+  </div>
+</section>
+
+<section class="sec" id="control">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">Per-file control · patches · rules · pipeline syntax · 37 codec and filter parameters</p>
+      <h2>Override anything, per file</h2>
+      <p class="lede">Automatic planning is the default, never the limit. Patch one file from its right-click menu, keep a
+        rule for a whole kind of file, or type the pipeline yourself. <code>osmium explain</code> shows which rule or trial
+        decided each block.</p>
+    </div>
+    <div class="ctl">
+      <div class="card">
+        <h3>Patch a file</h3>
+        <p>Right-click a file on the Compress page. <em>Tune…</em> builds its pipeline stage by stage; <em>Deep auto-tune…</em> searches for it.</p>
+        <ul class="menu-list" aria-label="Right-click menu of the Compress page">
+          <li>Tune…</li><li>Deep auto-tune…</li><li>Store as-is</li><li>Exclude</li><li>Clear patch</li>
+          <li>Save patch as global rule</li><li>Open containing folder</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Write the pipeline</h3>
+        <p>Filters, then one codec, with any parameter you want to pin.</p>
+<pre class="code"><span class="c"># 12-byte records: delta per field, then LZMA</span>
+osmium a out.osa data ^
+  --pipeline <span class="k">"delta(stride=12)+lzma(dict=128M,lc=0,lp=2,pb=2)"</span>
+
+<span class="c"># x64 code: branch converter, then context mixing</span>
+<span class="k">x86+cm(mem=24,models=4095)</span>
+
+<span class="c"># 16-bit stereo WAV: predictor after the 44-byte header, then CM</span>
+<span class="k">pcm16(offset=44,channels=2,lms=32)+cm</span></pre>
+      </div>
+      <div class="card">
+        <h3>Keep a rule</h3>
+        <p>Rules live in <code>%APPDATA%\Osmium\rules.json</code>. Every decision they make is recorded with its source.</p>
+<pre class="code">{ <span class="k">"id"</span>: "logs",
+  <span class="k">"match"</span>: { "globs": ["**/*.log"],
+             "minSize": 1048576 },
+  <span class="k">"actions"</span>: { "params": {
+      "ppmd.order": "16",
+      "lzma.dict": "256M" } } }</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="profiles">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec" id="prof-spec">Profiles · Store to Exhaustive · results for the mixed folder on a 4-core machine</p>
+      <h2>Seven profiles, one trade-off</h2>
+      <p class="lede">Higher profiles try more pipelines on bigger samples and allow context mixing. Choose one per job from the
+        tray menu, or let a rule choose it for a folder.</p>
+    </div>
+    <div class="prof-wrap">
+      <table class="prof">
+        <thead><tr><th>Profile</th><th>What it does</th><th>Mixed folder</th><th>Extraction</th></tr></thead>
+        <tbody id="prof-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="cluster">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">Cluster · ECDH P-256 · AES-256-GCM · TCP 46510 · discovery on UDP 46511</p>
+      <h2>Borrow the other PCs in the house</h2>
+      <p class="lede">Insane spends most of its time racing pipelines. Pair a few idle machines and the trials and the heavy blocks
+        spread across them, while your PC keeps the final say.</p>
+    </div>
+    <div class="cl">
+      <div>
+        <div class="net" role="img" aria-label="Your PC sends blocks and pipelines to worker PCs and receives compressed payloads with hashes, which it verifies.">
+          <div class="node"><b>Your PC</b><span>Plans, verifies returned blocks, writes the archive</span><span class="mono">coordinator</span></div>
+          <div class="wire"><span>blocks + pipeline<br>no file names</span><i class="r"></i><i class="l"></i><span>payload + hash</span></div>
+          <div class="workers">
+            <div class="node"><b>Worker PC</b><span>Compresses what it is sent</span><span class="mono">worker</span></div>
+            <div class="node"><b>Worker PC</b><span>Same engine version, same key</span><span class="mono">worker</span></div>
+          </div>
+        </div>
+        <ul class="facts">
+          <li>Workers authenticate with the shared key (mutual HMAC over an ECDH handshake) and must run the same engine version.</li>
+          <li>They see the contents of the blocks they compress, never file names. Pair only machines you trust.</li>
+          <li>Every block a worker compresses is decoded and compared on your PC before it is written; trial results from workers are spot-checked. A worker that returns a wrong result is quarantined.</li>
+        </ul>
+      </div>
+      <ol class="howto">
+        <li><h3>Make a key once</h3><p>Share the <code>OSM1-…</code> key with the machines you want to pair.</p>
+<pre class="code">osmium keygen</pre></li>
+        <li><h3>Start a worker on each helper</h3><p>Or use <em>Lend this PC to the cluster</em> in its tray menu.</p>
+<pre class="code">osmium worker --key OSM1-…</pre></li>
+        <li><h3>Compress with workers</h3><p>Workers on the network are found automatically.</p>
+<pre class="code">osmium a big.osa D:\data --profile insane ^
+  --workers auto --cluster-key OSM1-…</pre></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="safety">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">Safety · .osa format 1.0 · XXH128 per block and file · CRC32 per frame header</p>
+      <h2>Checked before it is written</h2>
+      <p class="lede">Smaller files are worthless if they do not come back intact. By default, each block is decoded and compared
+        before it reaches the disk, and the finished archive is read again before it replaces anything. Verification can be
+        switched off (Settings, or <code>--no-verify</code>); we recommend leaving it on.</p>
+    </div>
+    <div class="fmt" role="img" aria-label="Layout of an .osa file: header, block frames, index, footer.">
+      <div class="h"><b>Header</b><span>Magic, format version, TLV extensions, CRC32</span></div>
+      <div class="bk"><b>OBLK frame</b><span>Pipeline descriptor, sizes, XXH128 of the raw data, XXH3 of the payload</span></div>
+      <div class="bk"><b>OBLK frame</b><span>One per solid block, in plan order</span></div>
+      <div class="dots" aria-hidden="true">···</div>
+      <div class="ix"><b>Index</b><span>Files, folders, timestamps, per-file hashes, dedup segments. Encrypted, names included, when a password is set</span></div>
+      <div class="ft"><b>OSAE</b><span>Footer: index offset and length</span></div>
+    </div>
+    <p class="fmt-cap">Layout of an <code>.osa</code> file, not to scale. Every frame header carries its own magic, number and CRC, so damage is reported block by block and never decoded silently.</p>
+    <div class="guar">
+      <div><h3>Verified by default</h3><p>Every block is decoded and compared with its input before it is written, including blocks compressed by a worker.</p></div>
+      <div><h3>Atomic and change-aware</h3><p>Archives are written to a temporary file, re-read, then renamed into place. A file that changes while it is read is detected.</p></div>
+      <div><h3>Encrypted, names too</h3><p>AES-256-GCM with PBKDF2-SHA512 and HKDF. With a password, file names, pipelines and contents are encrypted. The block count, block sizes, the version of Osmium that wrote the archive and whether experimental features were used stay visible.</p></div>
+      <div><h3>Safe extraction</h3><p>Paths that try to leave the target folder are refused, and the Mark of the Web is carried over to extracted files.</p></div>
+      <div><h3>Same output everywhere</h3><p>The context-mixing codec is integer-only. CI checks a golden hash on Linux and Windows.</p></div>
+      <div><h3>Extraction cost, stated</h3><p>After compressing, and for any archive in <code>osmium info</code> or on the Archives page, Osmium reports how long extraction will take and how much memory it needs.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="roadmap">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">Roadmap · after {{VERSION}} · measured gaps first</p>
+      <h2>What comes next</h2>
+      <p class="lede">The benchmarks above show where Osmium still loses. Those gaps come first; everything else waits
+        until it has a prototype and a number.</p>
+    </div>
+    <div class="rm-next">
+      <div class="card">
+        <span class="tag">Next</span>
+        <h3>Beat ZPAQ on program files</h3>
+        <p>On 124 MiB of Windows DLLs and EXEs, ZPAQ -m5 is 6.2 % smaller than Ultra. Osmium CM needs stronger models for
+          x86 code: E8/E9 limited to PE code sections, bit-history counters, a two-layer mixer, and opcode and ModRM contexts.</p>
+        <div class="gap" role="img" aria-label="Share of the original on the program-files folder: ZPAQ -m5 25.61 %, lrzip -z 26.49 %, Osmium Ultra 27.30 %, xz -9e 28.81 %.">
+          <div><span>ZPAQ -m5</span><i style="width:85.4%"></i><span>25.6 %</span></div>
+          <div><span>lrzip -z</span><i style="width:88.3%"></i><span>26.5 %</span></div>
+          <div class="o"><b>Osmium Ultra</b><i style="width:91.0%"></i><span>27.3 %</span></div>
+          <div><span>xz -9e</span><i style="width:96.0%"></i><span>28.8 %</span></div>
+        </div>
+        <p>Done when the gap shrinks measurably without losing ground on the mixed folder, and the codec stays integer-only
+          and deterministic.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Next</span>
+        <h3>Faster planning for Ultra and Insane</h3>
+        <p>In a timing run on the mixed folder, Ultra spent 292 of its 346 seconds planning, mostly trying parameter variations on the
+          largest sample. The search earns its keep, shrinking each group by 2–8 %, so it stays.</p>
+        <p>The plan: try each variation on the previous, smaller sample first and send only the best few to the full sample.
+          Insane, whose largest sample is 16 MiB, gains the most.</p>
+        <p>Done when plans stay deterministic, sizes stay within about 0.2 %, and planning time drops.</p>
+      </div>
+    </div>
+    <div class="rm-more">
+      <div>
+        <h3>Planned</h3>
+        <ul>
+          <li><b>Recompress compressed files.</b> Bit-exact re-deflate for PNG, ZIP, DOCX and PDF, and lossless JPEG recompression. Today they are stored as-is.</li>
+          <li><b>Repair and grow archives.</b> <code>osmium salvage</code>, recovery records, append and update, multi-volume.</li>
+          <li><b>Deeper Windows integration.</b> A top-level Windows 11 context menu and notifications with actions.</li>
+          <li><b>Signed builds</b>, so Windows can verify who published them.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Exploring</h3>
+        <ul>
+          <li><b>Faster context mixing.</b> Integer SIMD inner loops, aiming for 1.5–2× with identical output.</li>
+          <li><b>Smarter grouping.</b> Similar files next to each other, and different pipelines for regions of one file.</li>
+          <li><b>Cluster.</b> Passphrase pairing, IPv6 discovery, a second worker double-checking context-mixing blocks.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fmt-cap">The full list, with definitions of done: <a href="https://github.com/windfastt/osmium/blob/main/ROADMAP.md">ROADMAP.md</a>.</p>
+  </div>
+</section>
+
+<section class="sec" id="download">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="spec">Download · version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64</p>
+      <h2>Download</h2>
+      <p class="lede">No separate .NET install is needed. Every file is on the GitHub release page with SHA-256 checksums, and
+        every download includes the license and third-party notices.</p>
+    </div>
+    <div class="dl">
+      <div class="card">
+        <h3>Installer</h3>
+        <p>Per-user by default, so no admin prompt. Adds the tray app, the Explorer menu, the <code>.osa</code> file type and,
+          if you choose, <code>osmium</code> on PATH.</p>
+        <p class="fn mono">Osmium-{{VERSION}}-win-x64-setup.exe</p>
+        <a class="btn btn-primary" href="https://github.com/windfastt/osmium/releases/latest">Get the installer</a>
+      </div>
+      <div class="card">
+        <h3>Portable</h3>
+        <p>Unzip and run. Settings stay in a <code>data</code> folder next to the program, so it works from a USB stick.</p>
+        <p class="fn mono">Osmium-{{VERSION}}-win-x64-portable.zip</p>
+        <a class="btn btn-ghost" href="https://github.com/windfastt/osmium/releases/latest">Get the ZIP</a>
+      </div>
+      <div class="card">
+        <h3>Command line</h3>
+        <p>One self-contained executable. It also works as a stand-alone extractor for anyone you send an archive to.</p>
+        <p class="fn mono">osmium-{{VERSION}}-win-x64.exe</p>
+        <a class="btn btn-ghost" href="https://github.com/windfastt/osmium/releases/latest">Get the CLI</a>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Windows may warn you the first time.</strong>
+      <span>The builds are not code-signed yet, so SmartScreen can show “Windows protected your PC”. Choose <em>More info</em>, then <em>Run anyway</em>.</span>
+    </div>
+    <div class="build">
+      <h3>Build from source</h3>
+      <div class="copyrow">
+<pre class="code" id="build-cmd">git clone https://github.com/windfastt/osmium
+cd osmium
+dotnet test -c Release --project tests/Osmium.Core.Tests
+pwsh build/publish.ps1 -Arch x64</pre>
+        <button class="copy" type="button" data-copy="build-cmd">Copy</button>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="legal">
+      <div><h4>License and warranty</h4><p>Osmium is free software under the <a href="https://github.com/windfastt/osmium/blob/main/LICENSE">MIT License</a>.
+        It is provided “as is”, without warranty of any kind, and its authors are not liable for any damages, including lost
+        data. Keep backups, and test archives with <code>osmium t</code> before you delete the originals.</p></div>
+      <div><h4>Third-party software</h4><p>The downloads include third-party components under their own licenses, listed with
+        their full license texts in <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES</a>.
+        Every download carries this file, and <code>osmium license</code> prints it.</p></div>
+      <div><h4>Trademarks</h4><p>Windows and .NET are trademarks of the Microsoft group of companies. 7-Zip, ZPAQ, xz, Zstandard,
+        Brotli, bzip2, lrzip and Info-ZIP are names of their respective owners and are used here only to identify those
+        products. Osmium is an independent project, not affiliated with, sponsored or endorsed by any of them.</p></div>
+      <div><h4>About the benchmarks</h4><p>{{BENCH_DISCLAIMER}}</p></div>
+      <div><h4>Privacy</h4><p>This page sets no cookies, runs no analytics and loads nothing from other sites; its fonts are
+        served from this site. It is hosted on GitHub Pages, and GitHub may log visits as described in its
+        <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">privacy statement</a>.
+        The app sends nothing over the internet; it uses your local network only if you set up a cluster.</p></div>
+    </div>
+    <div class="foot">
+      <span>Osmium {{VERSION}} · MIT license</span>
+      <nav aria-label="Project links">
+        <a href="https://github.com/windfastt/osmium">Source</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/ROADMAP.md">Roadmap</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md">Benchmarks</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/FORMAT.md">.osa format</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/SETTINGS.md">Settings reference</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+
+<script type="application/json" id="bench-data">/*BENCH*/</script>
+<script>
+(() => {
+  "use strict";
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+  // ------------------------------------------------------------ formats
+  const nf = new Intl.NumberFormat("en-US");
+  const pct = (x, d = 1) => (x * 100).toFixed(d) + " %";
+  const signed = x => (x < 0 ? "−" : "+") + Math.abs(x * 100).toFixed(1) + " %";
+  const mib = b => (b / 1048576).toFixed(1) + " MiB";
+  const secs = s => s < 10 ? s.toFixed(1) + " s" : s < 90 ? Math.round(s) + " s"
+    : s < 5400 ? Math.floor(s / 60) + " min " + String(Math.round(s % 60)).padStart(2, "0") + " s" : (s / 3600).toFixed(1) + " h";
+  // the tray app's own formats (Osmium.Desktop.Tray.TrayText)
+  const tBytes = b => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : b < 1073741824 ? (b / 1048576).toFixed(1) + " MB" : (b / 1073741824).toFixed(2) + " GB";
+  const tDur = s => s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.floor(s / 60) + "m " + String(Math.floor(s % 60)).padStart(2, "0") + "s"
+    : Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+
+  let D;
+  try { D = JSON.parse($("#bench-data").textContent); } catch (e) { D = null; }
+  if (!D) return;
+  const rowsOf = id => D.rows.filter(r => r.ds === id && r.ok);
+  const find = (id, fam) => D.rows.find(r => r.ds === id && r.fam === fam && r.ok);
+  const isOsm = r => r.fam.startsWith("osmium");
+  const nice = r => r.tool;
+
+  // ------------------------------------------------------------ stat tiles
+  const tiles = $("#tiles");
+  for (const t of D.tiles) {
+    const d = el("div", "st");
+    d.append(el("div", "v", t.v), el("div", "l", t.l), el("div", "c", t.c));
+    tiles.append(d);
+  }
+
+  // ------------------------------------------------------------ bar charts
+  const tip = el("div", "tip"); tip.hidden = true; tip.setAttribute("role", "status");
+  function showTip(card, row, r, ds, base) {
+    tip.replaceChildren();
+    tip.append(el("b", null, pct(r.bytes / ds.bytes, 2) + " · " + nf.format(r.bytes) + " bytes"));
+    tip.append(el("div", "t", nice(r) + (r.setting ? " — " + r.setting : "")));
+    if (base && r !== base) tip.append(el("div", "m", "vs xz -9e: " + signed(r.bytes / base.bytes - 1)));
+    tip.append(el("div", "m", "compress " + secs(r.c) + " · extract " + secs(r.d)));
+    tip.append(el("div", "m okmark", "✓ round trip identical"));
+    card.append(tip);
+    tip.hidden = false;
+    const cb = card.getBoundingClientRect(), rb = row.getBoundingClientRect(), bar = row.querySelector(".bar").getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = bar.right - cb.left + 12, y = rb.top - cb.top - h - 6;
+    if (x + w > cb.width - 8) x = Math.max(8, cb.width - w - 8);
+    if (y < 8) y = rb.bottom - cb.top + 6;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  function hideTip() { tip.hidden = true; }
+
+  for (const ds of D.datasets) {
+    const rows = rowsOf(ds.id).sort((a, b) => a.bytes - b.bytes);
+    const base = find(ds.id, "xz");
+    const maxR = Math.max(...rows.map(r => r.bytes / ds.bytes));
+    const ticks = Math.ceil(maxR * 10 + 1.2);          // 10 % steps, with room for the value label
+    const axisMax = ticks / 10;
+
+    const card = el("figure", "card chart-card");
+    const cap = el("figcaption");
+    cap.append(el("h3", null, ds.title), el("p", "sub", ds.desc));
+    const tools = el("div", "chart-tools");
+    const legend = el("div", "legend");
+    const l1 = el("span"); l1.append(el("i", "key osm"), document.createTextNode("Osmium profile"));
+    const l2 = el("span"); l2.append(el("i", "key oth"), document.createTextNode("Other tool, strongest common setting"));
+    legend.append(l1, l2);
+    const seg = el("div", "seg"); seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "View");
+    const bChart = el("button", null, "Chart"), bTable = el("button", null, "Table");
+    for (const b of [bChart, bTable]) b.type = "button";
+    bChart.setAttribute("aria-pressed", "true"); bTable.setAttribute("aria-pressed", "false");
+    seg.append(bChart, bTable);
+    tools.append(legend, seg);
+
+    const bars = el("div", "bars"); bars.setAttribute("role", "list");
+    bars.style.setProperty("--tick", (100 / ticks) + "%");
+    for (const r of rows) {
+      const ratio = r.bytes / ds.bytes;
+      const row = el("div", "br" + (isOsm(r) ? " osm" : ""));
+      row.tabIndex = 0; row.setAttribute("role", "listitem");
+      row.setAttribute("aria-label", nice(r) + ": " + pct(ratio) + " of original, " + nf.format(r.bytes) + " bytes, compressed in " + secs(r.c));
+      const nm = el("div", "nm", nice(r)); nm.title = r.setting ? nice(r) + " — " + r.setting : nice(r);
+      const track = el("div", "track");
+      const bar = el("div", "bar"); bar.style.width = (ratio / axisMax * 100) + "%";
+      const val = el("span", "val", pct(ratio)); val.style.left = (ratio / axisMax * 100) + "%";
+      val.append(el("small", null, secs(r.c)));
+      track.append(bar, val);
+      row.append(nm, track);
+      row.addEventListener("pointerenter", () => showTip(card, row, r, ds, base));
+      row.addEventListener("pointerleave", hideTip);
+      row.addEventListener("focus", () => showTip(card, row, r, ds, base));
+      row.addEventListener("blur", hideTip);
+      bars.append(row);
+    }
+    const axis = el("div", "axis"); axis.setAttribute("aria-hidden", "true");
+    axis.append(el("div", "cap", "share of original size · compress time"));
+    const tk = el("div", "ticks");
+    for (let i = 0; i <= ticks; i++) { const s = el("span", null, (i * 10) + " %"); s.style.left = (i / ticks * 100) + "%"; if (i === ticks) s.style.transform = "translateX(-100%)"; tk.append(s); }
+    axis.append(tk);
+
+    const tw = el("div", "table-wrap"); tw.hidden = true;
+    const tb = el("table", "data");
+    const thead = el("thead"), trh = el("tr");
+    for (const h of ["Tool and setting", "Size (bytes)", "Of original", "vs xz -9e", "Compress", "Extract", "Round trip"]) trh.append(el("th", null, h));
+    thead.append(trh); tb.append(thead);
+    const tbody = el("tbody");
+    for (const r of rows) {
+      const tr = el("tr", isOsm(r) ? "osm" : null);
+      tr.append(el("td", null, nice(r) + (r.setting ? " — " + r.setting : "")), el("td", null, nf.format(r.bytes)), el("td", null, pct(r.bytes / ds.bytes, 2)),
+        el("td", null, base && r !== base ? signed(r.bytes / base.bytes - 1) : "—"), el("td", null, secs(r.c)), el("td", null, secs(r.d)), el("td", "okmark", "✓ identical"));
+      tbody.append(tr);
+    }
+    tb.append(tbody); tw.append(tb);
+    const chartBox = el("div"); chartBox.append(bars, axis);
+
+    bChart.addEventListener("click", () => { chartBox.hidden = false; tw.hidden = true; bChart.setAttribute("aria-pressed", "true"); bTable.setAttribute("aria-pressed", "false"); });
+    bTable.addEventListener("click", () => { chartBox.hidden = true; tw.hidden = false; hideTip(); bChart.setAttribute("aria-pressed", "false"); bTable.setAttribute("aria-pressed", "true"); });
+
+    card.append(cap, tools, chartBox, tw);
+    $("#charts").append(card);
+  }
+  // a value label that would run past its track loses the time (still in the tooltip and the table)
+  const fit = () => { for (const v of $$(".val")) { v.classList.remove("tight"); if (v.offsetLeft + v.offsetWidth > v.parentElement.clientWidth) v.classList.add("tight"); } };
+  fit();
+  if ("ResizeObserver" in window) new ResizeObserver(fit).observe($("#charts"));
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+
+  // ------------------------------------------------------------ profiles table
+  const profs = [
+    ["store", "Store", "Packs files without compressing them. Useful for already-compressed media.", null],
+    ["fast", "Fast", "Zstandard level 3. Quick to make and to open.", null],
+    ["balanced", "Balanced", "A sensible pipeline per kind of data: LZMA, PPMd or Zstandard with filters. No trials.", null],
+    ["max", "Max", "Trial-compresses 4 candidates per group on a 1 MiB sample. No context mixing, so it still opens fast.", null],
+    ["ultra", "Ultra", "Allows context mixing. 10 candidates over two sample rounds, then 24 parameter evaluations.", null],
+    ["insane", "Insane", "Up to 40 candidates over four rounds, 48 parameter evaluations, a race between the top two on full blocks, chunk dedup.", null],
+    ["exhaustive", "Exhaustive", "Every candidate on the full data, then hill-climbed. Behind the Experimental switch; can take days.", "experimental"],
+  ];
+  const mixed = D.datasets[0];
+  const pr = $("#prof-rows");
+  for (const [id, name, what, flag] of profs) {
+    const r = find(mixed.id, "osmium-" + id);
+    const tr = el("tr");
+    const tdP = el("td", "p", name); if (flag) tdP.append(el("small", null, flag));
+    const tdD = el("td", "d", what);
+    const tdR = el("td", "r");
+    const tdX = el("td", "r");
+    if (r) {
+      const ratio = r.bytes / mixed.bytes;
+      tdR.append(document.createTextNode(pct(ratio) + " of original"));
+      tdR.append(el("span", "m", mib(r.bytes) + " in " + secs(r.c)));
+      const m = el("span", "meter"); m.title = "share of the original size"; const i = el("i"); i.style.width = (ratio * 100) + "%"; m.append(i); tdR.append(m);
+      tdX.append(document.createTextNode(secs(r.d)));
+      tdX.append(el("span", "m", (mixed.bytes / 1048576 / r.d).toFixed(1) + " MiB/s"));
+    } else {
+      tdR.append(el("span", "m", id === "store" ? "100 % (by design)" : "not measured"));
+      tdX.append(el("span", "m", id === "store" ? "as fast as copying" : "same as Insane"));
+    }
+    tr.append(tdP, tdD, tdR, tdX);
+    pr.append(tr);
+  }
+
+  // ------------------------------------------------------------ screenshot gallery (tabs; all panels visible without script)
+  const tabs = $$('.tabs [role="tab"]'), panels = $$('.panel[role="tabpanel"]');
+  function select(i) {
+    tabs.forEach((t, k) => { t.setAttribute("aria-selected", k === i ? "true" : "false"); t.tabIndex = k === i ? 0 : -1; });
+    panels.forEach((p, k) => { p.hidden = k !== i; });
+  }
+  if (tabs.length) {
+    tabs.forEach((t, i) => {
+      t.addEventListener("click", () => select(i));
+      t.addEventListener("keydown", e => {
+        const n = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!n) return;
+        e.preventDefault();
+        const j = (i + n + tabs.length) % tabs.length;
+        select(j); tabs[j].focus();
+      });
+    });
+    select(0);
+  }
+
+  // ------------------------------------------------------------ copy buttons
+  for (const b of $$(".copy")) b.addEventListener("click", () => {
+    const pre = document.getElementById(b.dataset.copy);
+    const done = () => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1600); };
+    const select = () => { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = "Selected"; };
+    try { navigator.clipboard.writeText(pre.textContent).then(done, select); } catch (e) { select(); }
+  });
+})();
+</script>
+</body>
+</html>

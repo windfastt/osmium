@@ -19,7 +19,7 @@ original ([docs/BENCHMARKS.md](docs/BENCHMARKS.md), [raw results](docs/benchmark
 | xz -9e | 28.81 % |
 
 Osmium Ultra stored about 112 MiB of that folder as one `x86+cm(…,models=4095)` block. On the mixed test folder
-Osmium wins (Insane 29.5 % against lrzip 31.7 %), so the gap is specific to machine code.
+Osmium made the smallest archive (Insane 29.5 % against lrzip 31.7 %), so the gap is specific to machine code.
 
 - **Where:** `src/Osmium.Core/Codecs/Cm/CmCodec.cs` (models, mixer, APMs) and
   `src/Osmium.Core/Filters/BinaryFilters.cs` (x86 E8/E9 filter).
@@ -33,7 +33,7 @@ Osmium wins (Insane 29.5 % against lrzip 31.7 %), so the gap is specific to mach
 
 ### Faster parameter search for Ultra and Insane
 
-Ultra spends 292 of its 346 seconds on the 16 MiB mixed folder planning, most of it trying parameter variations of
+In a separate timing run (IMPROVISATION.md §5.4), Ultra spent 292 of its 346 seconds on the 16 MiB mixed folder planning, most of it trying parameter variations of
 context-mixing pipelines on the largest sample. The search is worth keeping: it shrinks the chosen pipeline by
 2–8 % per group ([IMPROVISATION.md](docs/IMPROVISATION.md) §5.4).
 
@@ -50,7 +50,8 @@ context-mixing pipelines on the largest sample. The search is worth keeping: it 
   recovery records, append/update, multi-volume archives.
 - **Windows integration.** Top-level Windows 11 context menu (signed sparse package), notifications with actions,
   an out-of-process job host so the tray app never blocks.
-- **Signed builds** once a code-signing certificate is available, so SmartScreen stops warning.
+- **Signed builds** once a code-signing certificate is available, so Windows can verify the publisher (SmartScreen
+  warnings also depend on download reputation).
 - **Smarter grouping.** Similarity ordering of files inside a block, different pipelines for different regions of
   one file, persistent analysis and trial caches.
 

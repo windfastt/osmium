@@ -5,7 +5,7 @@
 Osmium (named after the densest natural element) picks a compression pipeline *per group of files*: it detects what
 each file is, applies reversible pre-processing (x86/ARM64 branch converters, delta/transpose for records, audio and
 image predictors, a text dictionary), races candidate codecs on samples, hill-climbs their parameters, and can bring
-in an original context-mixing codec and other PCs on your network when you ask for the smallest possible output.
+in an original context-mixing codec and other PCs on your network when you ask for the smallest output it can find.
 
 | | |
 |---|---|
@@ -18,7 +18,7 @@ in an original context-mixing codec and other PCs on your network when you ask f
 | **Rules** | JSON rules: force/forbid pipelines, override parameters (`"lzma.dict": "256M"`), store, exclude, own block |
 | **Dedup** | whole-file (SHA-256 confirmed) and content-defined chunking (FastCDC) |
 | **Multi-PC** | lend idle PCs as workers; trials and heavy blocks are distributed over an authenticated, encrypted channel |
-| **Safety** | every block decoded and compared before writing; atomic writes; hashes on every block and file; AES-256-GCM encryption |
+| **Safety** | by default every block is decoded and compared before writing; atomic writes; hashes on every block and file; AES-256-GCM encryption |
 | **Settings** | 63 settings in 11 categories (searchable, [reference](docs/SETTINGS.md)) plus 37 codec/filter parameters; an *Experimental* page behind a master switch |
 
 ## Results
@@ -37,12 +37,12 @@ compared file by file. Full tables, commands and versions: [docs/BENCHMARKS.md](
 | Osmium **Ultra** | 29.6 % · 5 min 40 s | 27.3 % · 18 min 47 s |
 | Osmium **Insane** | **29.5 %** · 17 min 29 s | not run |
 
-* On mixed data Osmium is the smallest: Insane is 18.9 % smaller than `xz -9e` and 6.8 % smaller than lrzip, because
+* In our mixed-folder test Osmium made the smallest archive: Insane is 18.9 % smaller than `xz -9e` and 6.8 % smaller than lrzip, because
   every kind of data gets its own pipeline (text, x64 code, .NET IL, records, audio, images).
 * On a folder of program files ZPAQ -m5 and lrzip are still 6.2 % and 3.0 % smaller than Ultra: their x86 models are
   stronger than Osmium CM's today. Max matches `xz -9e` there, since both are LZMA with a branch filter.
 * Ultra and Insane may choose context mixing, which extracts about as slowly as it compresses (one thread per
-  block). Osmium tells you the expected extraction time and memory before and after compressing.
+  block). After compressing, Osmium reports the expected extraction time and memory; `osmium info` shows them for any archive.
 
 ## Install
 
@@ -101,7 +101,8 @@ osmium a big.osa D:\data --profile insane --workers auto --cluster-key OSM1-…
 
 Workers authenticate with the key (mutual HMAC over an ECDH handshake, AES-256-GCM traffic), must run the same engine
 version, and never receive file names — but they do see file **contents**, so only pair machines you trust. Every
-remote result is re-verified locally; a worker that returns a wrong result is quarantined. Ports: TCP 46510, UDP 46511.
+block a worker compresses is decoded and compared locally before it is written, and trial results from workers are
+spot-checked; a worker that returns a wrong result is quarantined. Ports: TCP 46510, UDP 46511.
 
 ## How it works
 
@@ -134,7 +135,7 @@ pwsh build/publish.ps1 -Arch x64            # Windows: publish + portable ZIP + 
 ```
 
 CI (`.github/workflows/ci.yml`) runs the tests on Linux and Windows (including a golden-hash test that proves the
-context-mixing codec produces identical output on both), publishes x64 and ARM64, renders every window of the app to
+context-mixing codec produces identical output on both), publishes x64 and ARM64, renders the app's pages and dialogs to
 PNG with `Osmium.App.exe --selftest-ui` (light and dark), smoke-tests the CLI, builds the installers and publishes a
 release for `v*` tags.
 
@@ -151,4 +152,11 @@ release for `v*` tags.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+MIT — see [LICENSE](LICENSE). Osmium is provided "as is", without warranty of any kind; keep backups and test archives
+(`osmium t`) before deleting originals. The downloads include third-party components under their own licenses, listed
+with their full texts in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); every download carries that file and
+`osmium license` prints it.
+
+Windows and .NET are trademarks of the Microsoft group of companies. 7-Zip, ZPAQ, xz, Zstandard, Brotli, bzip2, lrzip
+and Info-ZIP are names of their respective owners, used here only to identify those products in the benchmarks.
+Osmium is an independent project, not affiliated with or endorsed by any of them.

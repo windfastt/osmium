@@ -2,3 +2,5 @@
 # docs/index.html is the product page; the Markdown documents are rendered with the default theme.
 # Every page asks search engines not to index it (docs/_includes/head-custom.html, and a meta tag in index.html).
 title: Osmium
+# Named explicitly so the noindex tag in _includes/head-custom.html is applied to the rendered Markdown pages.
+theme: jekyll-theme-primer

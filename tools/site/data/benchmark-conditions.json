@@ -1,0 +1,15 @@
+{
+  "date": "24 November 2026",
+  "machine": "4 vCPU Intel Xeon at 2.3 GHz, 16 GB RAM, Linux 6.18, .NET 10",
+  "versions": {
+    "Osmium": "0.1.1",
+    "Info-ZIP zip": "3.0",
+    "bzip2": "1.0.8",
+    "Brotli": "1.1.0",
+    "Zstandard": "1.5.5",
+    "xz": "5.4.5",
+    "7-Zip": "23.01",
+    "lrzip": "0.651",
+    "ZPAQ": "7.15"
+  }
+}

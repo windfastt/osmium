@@ -3,15 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Osmium is a Windows file compressor that lives in the notification area and plans a pipeline per kind of data, with context mixing and multi-PC compression for the smallest archives.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%233a2a96'/><stop offset='1' stop-color='%2314a0d2'/></linearGradient></defs><rect x='1.3' y='1.3' width='29.4' height='29.4' rx='7' fill='url(%23g)'/><polygon points='16,5.8 25.1,11 16,16.3 6.9,11' fill='%23f0f4ff'/><polygon points='25.1,11 25.1,21.6 16,26.9 16,16.3' fill='%23aab6d7'/><polygon points='6.9,11 16,16.3 16,26.9 6.9,21.6' fill='%237884af'/></svg>">
-<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
-<title>Osmium</title>
+<!-- The project keeps a low profile: please do not index. -->
 <meta name="robots" content="noindex, nofollow">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anybody:wdth,wght@50..150,100..900&family=Instrument+Sans:wdth,wght@75..100,400..700&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
+<meta name="description" content="Osmium is an MIT-licensed file compressor for Windows that plans a compression pipeline for each kind of data.">
+<title>Osmium</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%233a2a96'/><stop offset='1' stop-color='%2314a0d2'/></linearGradient></defs><rect x='1.3' y='1.3' width='29.4' height='29.4' rx='7' fill='url(%23g)'/><polygon points='16,5.8 25.1,11 16,16.3 6.9,11' fill='%23f0f4ff'/><polygon points='25.1,11 25.1,21.6 16,26.9 16,16.3' fill='%23aab6d7'/><polygon points='6.9,11 16,16.3 16,26.9 6.9,21.6' fill='%237884af'/></svg>">
 <style>
+/* Fonts are served from this site (SIL Open Font License 1.1, see fonts/*-OFL.txt): no requests to other hosts. */
+@font-face { font-family: "Anybody"; font-style: normal; font-weight: 100 900; font-stretch: 50% 150%; font-display: swap; src: url("fonts/anybody-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Anybody"; font-style: normal; font-weight: 100 900; font-stretch: 50% 150%; font-display: swap; src: url("fonts/anybody-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; src: url("fonts/instrument-sans-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; src: url("fonts/instrument-sans-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Martian Mono"; font-style: normal; font-weight: 100 800; font-stretch: 75% 112.5%; font-display: swap; src: url("fonts/martian-mono-latin-ext.woff2") format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Martian Mono"; font-style: normal; font-weight: 100 800; font-stretch: 75% 112.5%; font-display: swap; src: url("fonts/martian-mono-latin.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+
 /* Layout: one 1200px column. Every section opens with a mono spec line that states its facts, then lets one exhibit
    (a mock-up, a chart, a diagram) run wide. The hero headline is set wide and condenses to its resting width on load. */
 :root {
@@ -36,25 +45,6 @@
   --ok: #0f7a3d;
   --code: #f6f7f9;
   --shadow: 0 1px 2px rgba(20, 21, 27, .06), 0 10px 32px rgba(20, 21, 27, .09);
-  /* the tray app's own palette (src/Osmium.App/Platform.cs) */
-  --w-bg: #f3f3f3;
-  --w-surface: #ffffff;
-  --w-border: #e5e5e5;
-  --w-text: #1b1b1b;
-  --w-muted: #5f5f5f;
-  --w-accent: #3a2a96;
-  --w-accent-ink: #ffffff;
-  --w-hover: #e8e8f0;
-  --w-sel: #dedcf3;
-  --w-exp: #c2410c;
-  --w-menu: #f9f9f9;
-  --w-bar: rgba(240, 242, 246, .94);
-  --w-shadow: 0 10px 30px rgba(0, 0, 0, .16), 0 0 0 1px rgba(0, 0, 0, .07);
-  --ring-track: rgba(0, 0, 0, .27);
-  --ring-fill: #28aae6;
-  --ring-core: #3a2a96;
-  --desk: #d8dde8;
-  --desk-dot: rgba(58, 42, 150, .14);
   --font-display: "Anybody", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
   --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "Martian Mono", ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
@@ -66,11 +56,6 @@
     --line: #2a2c35; --line-soft: #202229; --accent: #b3a9ff; --btn: #b3a9ff; --btn-ink: #121218; --btn-hover: #cbc4ff;
     --mark: #9085e9; --mark-rest: #666b7a; --grid: #23252d; --axis: #3d404b; --live: #3bb8ee; --exp: #f0702a;
     --ok: #3ccf7a; --code: #121318; --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 32px rgba(0, 0, 0, .38);
-    --w-bg: #202020; --w-surface: #2b2b2b; --w-border: #3c3c3c; --w-text: #f0f0f0; --w-muted: #a0a0a0;
-    --w-accent: #608cff; --w-accent-ink: #ffffff; --w-hover: #373737; --w-sel: #3b3f57; --w-exp: #f0702a;
-    --w-menu: #2c2c2c; --w-bar: rgba(30, 30, 33, .94); --w-shadow: 0 10px 30px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .08);
-    --ring-track: rgba(255, 255, 255, .35); --ring-fill: #28aae6; --ring-core: #dce4ff;
-    --desk: #1a1e2b; --desk-dot: rgba(170, 180, 255, .13);
     color-scheme: dark;
   }
 }
@@ -79,11 +64,6 @@
   --line: #2a2c35; --line-soft: #202229; --accent: #b3a9ff; --btn: #b3a9ff; --btn-ink: #121218; --btn-hover: #cbc4ff;
   --mark: #9085e9; --mark-rest: #666b7a; --grid: #23252d; --axis: #3d404b; --live: #3bb8ee; --exp: #f0702a;
   --ok: #3ccf7a; --code: #121318; --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 32px rgba(0, 0, 0, .38);
-  --w-bg: #202020; --w-surface: #2b2b2b; --w-border: #3c3c3c; --w-text: #f0f0f0; --w-muted: #a0a0a0;
-  --w-accent: #608cff; --w-accent-ink: #ffffff; --w-hover: #373737; --w-sel: #3b3f57; --w-exp: #f0702a;
-  --w-menu: #2c2c2c; --w-bar: rgba(30, 30, 33, .94); --w-shadow: 0 10px 30px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .08);
-  --ring-track: rgba(255, 255, 255, .35); --ring-fill: #28aae6; --ring-core: #dce4ff;
-  --desk: #1a1e2b; --desk-dot: rgba(170, 180, 255, .13);
   color-scheme: dark;
 }
 
@@ -172,58 +152,10 @@ h3 { font-size: 21px; font-weight: 680; font-stretch: 86%; line-height: 1.2; }
 .hero-grid {
   display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: clamp(32px, 5vw, 64px); align-items: center;
 }
-@media (max-width: 920px) { .hero-grid { grid-template-columns: minmax(0, 1fr); } .desk { justify-self: stretch; max-width: 100%; } }
+@media (max-width: 920px) { .hero-grid { grid-template-columns: minmax(0, 1fr); } }
 .hero-copy { display: grid; gap: 24px; align-content: center; min-width: 0; }
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
 .meta { color: var(--muted); font-size: 14.5px; }
-
-/* desktop mock-up: everything inside is sized in em, and the em follows the mock's width */
-.desk {
-  position: relative; container-type: inline-size; aspect-ratio: 29 / 30; width: 100%; max-width: 560px; justify-self: end;
-  border-radius: 14px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--line);
-  background-color: var(--desk);
-  background-image: radial-gradient(circle, var(--desk-dot) 1.15px, transparent 1.6px), radial-gradient(circle, var(--desk-dot) 1.15px, transparent 1.6px);
-  background-size: 16px 27.71px; background-position: 0 0, 8px 13.86px;
-}
-.desk .s { position: absolute; inset: 0; font: 400 clamp(6.4px, 2.3cqw, 13px)/1.32 var(--font-win); color: var(--w-text); }
-.icon-d { position: absolute; left: 1.4em; display: grid; justify-items: center; gap: .35em; width: 7em; text-align: center; font-size: .92em; color: var(--ink); }
-.icon-d svg { width: 3.2em; height: 3.2em; }
-.icon-d span { padding: .1em .35em; border-radius: .25em; line-height: 1.25; }
-.icon-d.sel span { background: var(--w-accent); color: var(--w-accent-ink); }
-.toast {
-  position: absolute; right: 1.1em; top: 1.2em; width: 24em; padding: 1em 1.1em 1.05em; border-radius: .7em;
-  background: var(--w-menu); box-shadow: var(--w-shadow); display: grid; gap: .3em;
-}
-.toast .app { display: flex; align-items: center; gap: .5em; font-size: .86em; color: var(--w-muted); }
-.toast .app svg { width: 1.3em; height: 1.3em; }
-.toast .app i { margin-left: auto; font-style: normal; }
-.toast b { font-weight: 600; font-size: 1.04em; }
-.toast p { color: var(--w-text); }
-.menu {
-  position: absolute; right: 6.4em; bottom: 4.35em; width: 22.5em; padding: .32em; border-radius: .65em;
-  background: var(--w-menu); box-shadow: var(--w-shadow);
-}
-.mi { position: relative; display: flex; align-items: center; height: 2.2em; padding: 0 .9em 0 2.3em; border-radius: .35em; white-space: nowrap; }
-.mi.hd { padding-left: .9em; color: var(--w-muted); overflow: hidden; text-overflow: ellipsis; display: block; line-height: 2.2em; }
-.mi.b { font-weight: 600; }
-.mi.on { background: var(--w-hover); }
-.mi.ck::before { content: ""; position: absolute; left: .95em; top: .72em; width: .42em; height: .7em; border: solid currentColor; border-width: 0 .13em .13em 0; transform: rotate(42deg); }
-.mi .arr { margin-left: auto; width: .45em; height: .45em; border: solid currentColor; border-width: .12em .12em 0 0; transform: rotate(45deg); }
-.mi.dim { color: var(--w-muted); }
-.sep { height: 1px; margin: .3em .25em; background: var(--w-border); }
-.menu .sub { position: absolute; right: calc(100% + .15em); top: -.32em; width: 8.6em; padding: .32em; border-radius: .65em; background: var(--w-menu); box-shadow: var(--w-shadow); }
-.taskbar {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 3.85em; display: flex; align-items: center; justify-content: center; gap: .5em;
-  background: var(--w-bar); border-top: 1px solid var(--w-border);
-}
-.tb-app { width: 2.6em; height: 2.6em; border-radius: .4em; display: grid; place-items: center; }
-.tb-app svg { width: 1.6em; height: 1.6em; }
-.tb-app.act { background: var(--w-hover); }
-.tray { position: absolute; right: .5em; top: 0; bottom: 0; display: flex; align-items: center; gap: .1em; }
-.ti { min-width: 2.25em; height: 2.7em; padding: 0 .3em; border-radius: .35em; display: grid; place-items: center; color: var(--w-text); }
-.ti.on { background: var(--w-hover); }
-.ti svg { width: 1.25em; height: 1.25em; }
-.clock { text-align: right; font-size: .86em; line-height: 1.25; padding: 0 .5em; }
 
 /* ---------------------------------------------------------------- results */
 .tiles {
@@ -319,90 +251,29 @@ table.plan td.n { white-space: nowrap; font-variant-numeric: tabular-nums; text-
 table.plan code { font-size: 12px; word-break: break-word; color: var(--ink); }
 table.plan .k { color: var(--muted); font-size: 13px; display: block; }
 
-/* ---------------------------------------------------------------- app window mock-up */
-.app-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
-.win {
-  container: win / inline-size; background: var(--w-bg); color: var(--w-text); border-radius: 10px; overflow: hidden;
-  box-shadow: var(--w-shadow); font: 400 13px/1.35 var(--font-win);
-}
-.w-title { height: 34px; display: flex; align-items: center; gap: 9px; padding-left: 12px; font-size: 12px; }
-.w-title svg { width: 16px; height: 16px; }
-.w-caps { margin-left: auto; display: flex; }
-.w-caps span { width: 46px; height: 34px; display: grid; place-items: center; }
-.w-caps svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1; }
-.w-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 500px; }
-.w-rail { display: flex; flex-direction: column; gap: 2px; padding: 6px 5px 10px; }
-.w-brand { font-weight: 700; font-size: 17px; padding: 6px 12px 14px; }
-.w-nav {
-  position: relative; display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 12px; border: 0; border-radius: 5px;
-  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
-}
-.w-nav:hover { background: var(--w-hover); }
-.w-nav svg { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
-.w-nav[aria-current="page"] { background: var(--w-hover); font-weight: 600; }
-.w-nav[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--w-accent); }
-.w-nav:focus-visible { outline: 2px solid var(--w-accent); outline-offset: -2px; }
-.w-main { display: flex; flex-direction: column; min-width: 0; background: var(--w-surface); border: 1px solid var(--w-border); border-right: 0; border-bottom: 0; border-top-left-radius: 8px; }
-.w-page { flex: 1; display: flex; flex-direction: column; gap: 11px; padding: 16px 18px 18px; min-width: 0; }
-.w-h { font-size: 20px; font-weight: 600; }
-.w-sub { color: var(--w-muted); max-width: 70em; }
-.w-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.wb, .wsel, .wtxt {
-  display: inline-flex; align-items: center; height: 28px; padding: 0 11px; border: 1px solid var(--w-border); border-radius: 4px;
-  background: var(--w-surface); color: var(--w-text); white-space: nowrap;
-}
-.wb { box-shadow: 0 1px 0 rgba(0, 0, 0, .05); }
-.wb.acc { background: var(--w-accent); color: var(--w-accent-ink); border-color: transparent; font-weight: 600; }
-.wsel { gap: 22px; }
-.wsel::after { content: ""; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.2px 1.2px 0; transform: translateY(-2px) rotate(45deg); }
-.wtxt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--w-text); }
-.w-lbl { color: var(--w-text); margin-left: 8px; }
-.w-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.lvw { border: 1px solid var(--w-border); border-radius: 4px; overflow: hidden; min-width: 0; }
-table.lv { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.lv th { font-weight: 400; color: var(--w-muted); text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--w-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lv td { padding: 5px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lv tr.sel td { background: var(--w-sel); }
-.lv td.num { font-variant-numeric: tabular-nums; }
-.lv .mono { font-size: 11.5px; }
-.w-log {
-  border: 1px solid var(--w-border); border-radius: 4px; padding: 8px 10px; font-size: 11px; line-height: 1.6; overflow: auto;
-  white-space: pre; color: var(--w-text); background: var(--w-surface); max-height: 170px;
-}
-.w-check { display: inline-flex; align-items: center; gap: 8px; }
-.w-check .box { width: 15px; height: 15px; border: 1px solid var(--w-muted); border-radius: 3px; display: inline-grid; place-items: center; flex: none; }
-.w-check .box.on { background: var(--w-accent); border-color: var(--w-accent); }
-.w-check .box.on::after { content: ""; width: 4px; height: 8px; border: solid var(--w-accent-ink); border-width: 0 1.6px 1.6px 0; transform: translateY(-1px) rotate(42deg); }
-.w-foot { margin-top: auto; display: flex; justify-content: flex-end; gap: 6px; }
-.w-status { height: 26px; display: flex; align-items: center; padding: 0 12px; color: var(--w-muted); font-size: 12px; border-top: 1px solid var(--w-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.w-split { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 0; flex: 1; min-height: 0; border-top: 1px solid var(--w-border); margin: 0 -18px -18px; }
-.w-cats { padding: 8px 6px; border-right: 1px solid var(--w-border); display: grid; align-content: start; gap: 1px; }
-.w-cats span { padding: 5px 10px; border-radius: 4px; }
-.w-cats span.on { background: var(--w-sel); }
-.w-set { padding: 12px 18px; display: grid; gap: 12px; align-content: start; min-width: 0; }
-.w-banner { padding: 8px; color: var(--w-exp); border: 1px solid var(--w-exp); border-radius: 4px; }
-.w-setting { display: grid; gap: 3px; }
-.w-setting .t { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-weight: 600; }
-.w-setting .t em { font-style: normal; font-weight: 400; font-size: 10.5px; color: var(--w-exp); letter-spacing: .02em; }
-.w-setting .d { color: var(--w-muted); }
-.w-json { border: 1px solid var(--w-border); border-radius: 4px; padding: 8px 10px; font-size: 11.5px; line-height: 1.55; white-space: pre; overflow: auto; background: var(--w-surface); color: var(--w-text); max-height: 190px; }
-.lvl-w { color: var(--w-exp); }
-.app-note { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 24px; color: var(--muted); font-size: 14px; }
-@container win (max-width: 760px) {
-  .w-body { grid-template-columns: 50px minmax(0, 1fr); }
-  .w-nav { padding: 0; justify-content: center; }
-  .w-nav span, .w-brand { display: none; }
-  .w-nav[aria-current="page"]::before { left: 2px; }
-  .sm-hide { display: none; }
-  .w-split { grid-template-columns: minmax(0, 1fr); }
-  .w-cats { display: none; }
-}
-@container win (max-width: 480px) {
-  .xs-hide { display: none; }
-  .w-page { padding: 12px 12px 14px; }
-  .w-split { margin: 0 -12px -14px; }
-  .w-caps span { width: 34px; }
-}
+/* ---------------------------------------------------------------- screenshots */
+.shot { margin: 0; display: grid; gap: 10px; min-width: 0; }
+.shot img { display: block; width: 100%; height: auto; border-radius: 10px; box-shadow: var(--shadow); background: var(--surface); }
+.shot figcaption { font-size: 13.5px; color: var(--muted); }
+.hero-shot { position: relative; justify-self: end; max-width: 620px; width: 100%; }
+.hero-shot .inset { position: absolute; right: -12px; bottom: 34px; width: 38%; max-width: 230px; }
+.hero-shot .inset img { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+@media (max-width: 920px) { .hero-shot { justify-self: stretch; max-width: 100%; } .hero-shot .inset { right: 8px; } }
+.gallery { display: grid; gap: 16px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tabs button { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 8px; padding: 8px 13px;
+  font: 500 14px/1 var(--font-body); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--btn); border-color: var(--btn); color: var(--btn-ink); }
+.tabs button:hover { border-color: var(--axis); }
+.panel { display: grid; gap: 10px; }
+.panel .shot img { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.shot-note { color: var(--muted); font-size: 14px; }
+.menu-list { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.menu-list li { border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 13.5px; color: var(--ink-2); background: var(--sunk); }
+.legal { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 22px 36px; margin-bottom: 34px; }
+.legal h4 { font: 650 14px/1.3 var(--font-body); color: var(--ink); margin: 0 0 6px; }
+.legal p { font-size: 13.5px; line-height: 1.55; color: var(--muted); margin: 0; }
+.legal a { color: var(--ink-2); }
 
 /* ---------------------------------------------------------------- per-file control */
 .ctl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
@@ -415,10 +286,6 @@ pre.code {
 }
 .code .c { color: var(--muted); }
 .code .k { color: var(--accent); }
-.ctxmenu { justify-self: start; width: min(100%, 270px); padding: 4px; border-radius: 8px; background: var(--w-menu); box-shadow: var(--w-shadow); font: 400 13px/1.3 var(--font-win); color: var(--w-text); }
-.ctxmenu div { padding: 7px 12px; border-radius: 4px; }
-.ctxmenu .on { background: var(--w-hover); }
-.ctxmenu hr { border: 0; height: 1px; background: var(--w-border); margin: 4px 2px; }
 
 /* ---------------------------------------------------------------- profiles */
 table.prof { width: 100%; border-collapse: collapse; font-size: 15px; }
@@ -514,13 +381,14 @@ ol.howto pre.code { margin-top: 6px; }
 .copy { position: absolute; top: 8px; right: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 6px; padding: 4px 10px; font: 500 12.5px/1.4 var(--font-body); cursor: pointer; }
 .copy:hover { color: var(--ink); }
 
-footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 14px; }
+footer { padding-block: 44px 56px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 14px; }
 .foot { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; justify-content: space-between; }
 .foot nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
 .foot a { color: var(--ink-2); }
 </style>
 </head>
 <body>
+
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
   <defs>
     <linearGradient id="g-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a2a96"/><stop offset="1" stop-color="#14a0d2"/></linearGradient>
@@ -532,17 +400,6 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
       <polygon points="16,12.16 19.6,14.24 16,16.32 12.4,14.24" fill="#3c328c"/>
       <polygon points="19.6,14.24 19.6,18.4 16,20.48 16,16.32" fill="#286eaa"/>
       <polygon points="12.4,14.24 16,16.32 16,20.48 12.4,18.4" fill="#1e4682"/>
-    </symbol>
-    <symbol id="i-osa" viewBox="0 0 32 32">
-      <polygon points="5.12,1.28 20.48,1.28 26.88,7.68 26.88,30.72 5.12,30.72" fill="#f6f8fc" stroke="#7882a0" stroke-width=".9"/>
-      <polygon points="20.48,1.28 20.48,7.68 26.88,7.68" fill="#cdd4e6" stroke="#7882a0" stroke-width=".9" stroke-linejoin="round"/>
-      <polygon points="16,11.52 22.65,15.36 16,19.2 9.35,15.36" fill="#3a2a96"/>
-      <polygon points="22.65,15.36 22.65,23.04 16,26.88 16,19.2" fill="#14a0d2"/>
-      <polygon points="9.35,15.36 16,19.2 16,26.88 9.35,23.04" fill="#2060b4"/>
-    </symbol>
-    <symbol id="i-folder" viewBox="0 0 32 32">
-      <path d="M3 8.5a2 2 0 0 1 2-2h7l3 3h12a2 2 0 0 1 2 2V24a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#e8b14a"/>
-      <path d="M3 12.5h26V24a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#f4c662"/>
     </symbol>
   </defs>
 </svg>
@@ -571,7 +428,7 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
       <div class="hero-copy">
         <div class="eyebrow">
           <div class="tile" aria-hidden="true"><span>76</span><b>Os</b><span>190.23</span></div>
-          <p class="spec">File compressor for Windows 10 and 11<br>Named after the densest natural element, 22.59 g/cm³</p>
+          <p class="spec">File compressor for Windows<br>Named after the densest natural element, 22.59 g/cm³</p>
         </div>
         <h1 class="h1"><span class="ln">As small as</span><span class="ln">you have time for.</span></h1>
         <p class="lede">Osmium lives in the notification area and packs files into <code>.osa</code> archives. It works out what each
@@ -581,62 +438,15 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
           <a class="btn btn-primary" href="https://github.com/windfastt/osmium/releases/latest">Download for Windows</a>
           <a class="btn btn-ghost" href="#bench">See the benchmarks</a>
         </div>
-        <p class="meta">Version 0.1.1 · x64 and ARM64 · no separate .NET install · MIT license</p>
+        <p class="meta">Version 0.1.1 · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64 · MIT license, no warranty</p>
       </div>
 
-      <figure class="desk" aria-label="Mock-up of the Windows notification area: Osmium's tray icon shows a ring that is 64 % full, its menu is open with the Default profile submenu, and a notification reports a finished job.">
-        <div class="s" aria-hidden="true">
-          <div class="icon-d" style="top:1.4em"><svg><use href="#i-folder"/></svg><span>Projects</span></div>
-          <div class="icon-d sel" style="top:7.8em"><svg><use href="#i-osa"/></svg><span>mixed-folder.osa</span></div>
-
-          <div class="toast">
-            <div class="app"><svg><use href="#i-logo"/></svg>Osmium<i>now</i></div>
-            <b>Compression finished</b>
-            <p id="toast-body">mixed-folder — 16.0 MB → 4.7 MB (71% smaller) in 9m 48s</p>
-          </div>
-
-          <div class="menu">
-            <div class="mi hd">Osmium — compressing 64%: Projects</div>
-            <div class="sep"></div>
-            <div class="mi b">Open Osmium</div>
-            <div class="mi">Compress files…</div>
-            <div class="mi">Compress folder…</div>
-            <div class="mi">Extract archive…</div>
-            <div class="sep"></div>
-            <div class="mi on">Default profile<span class="arr"></span>
-              <div class="sub">
-                <div class="mi">Store</div><div class="mi">Fast</div><div class="mi">Balanced</div><div class="mi">Max</div>
-                <div class="mi ck on">Ultra</div><div class="mi">Insane</div>
-              </div>
-            </div>
-            <div class="mi">Recent jobs<span class="arr"></span></div>
-            <div class="sep"></div>
-            <div class="mi">Pause all jobs</div>
-            <div class="mi ck">Watch folders</div>
-            <div class="mi">Lend this PC to the cluster</div>
-            <div class="sep"></div>
-            <div class="mi">Settings…</div>
-            <div class="mi">Exit</div>
-          </div>
-
-          <div class="taskbar">
-            <div class="tb-app"><svg viewBox="0 0 16 16"><rect x="1" y="1" width="6.5" height="6.5" rx=".6" fill="#2b88d8"/><rect x="8.5" y="1" width="6.5" height="6.5" rx=".6" fill="#2b88d8"/><rect x="1" y="8.5" width="6.5" height="6.5" rx=".6" fill="#2b88d8"/><rect x="8.5" y="8.5" width="6.5" height="6.5" rx=".6" fill="#2b88d8"/></svg></div>
-            <div class="tb-app"><svg><use href="#i-folder"/></svg></div>
-            <div class="tb-app act"><svg><use href="#i-logo"/></svg></div>
-            <div class="tray">
-              <div class="ti"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 10l4-4 4 4"/></svg></div>
-              <div class="ti on" title="Osmium — compressing 64%: Projects">
-                <svg viewBox="0 0 16 16">
-                  <circle cx="8" cy="8" r="6.35" fill="none" stroke="var(--ring-track)" stroke-width="2.3"/>
-                  <circle cx="8" cy="8" r="6.35" fill="none" stroke="var(--ring-fill)" stroke-width="2.3" stroke-linecap="round" stroke-dasharray="25.54 39.9" transform="rotate(-90 8 8)"/>
-                  <rect x="6.24" y="6.24" width="3.52" height="3.52" fill="var(--ring-core)"/>
-                </svg>
-              </div>
-              <div class="ti"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.2 8.6a5.3 5.3 0 0 1 7.6 0M6.4 11a2.2 2.2 0 0 1 3.2 0"/></svg></div>
-              <div class="ti"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" stroke-linecap="round"/></svg></div>
-              <div class="clock">21:47<br>24/11/2026</div>
-            </div>
-          </div>
+      <figure class="shot hero-shot">
+        <div class="card" style="display:grid;gap:10px">
+          <h3>What it does</h3>
+          <p class="body">Seven profiles from Store to Exhaustive · per-kind pipelines with x86/x64, ARM64, delta, record,
+            audio, image and text filters · LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate and Osmium's own context-mixing
+            codec · whole-file and chunk deduplication · AES-256-GCM encryption · optional help from other PCs.</p>
         </div>
       </figure>
     </div>
@@ -648,10 +458,10 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
   <div class="wrap">
     <div class="sec-head">
       <p class="spec" id="bench-spec">Benchmarks · 2 folders · 8 other tools in 9 settings · every archive unpacked and compared</p>
-      <h2 id="bench-h">Smallest on mixed data</h2>
+      <h2 id="bench-h">Smallest in our mixed-folder test</h2>
       <p class="lede" id="bench-lede">Each tool compressed the same two folders at the strongest setting people commonly use,
-        and every archive was unpacked and compared with the original, file by file. On the mixed folder Osmium is the
-        smallest; on a folder of program files, ZPAQ and lrzip still are. Bars show the archive size as a share of the
+        and every archive was unpacked and compared with the original, file by file. In this test Osmium made the smallest
+        archive of the mixed folder; on the folder of program files, ZPAQ and lrzip made smaller ones. Bars show the archive size as a share of the
         original; shorter is better.</p>
     </div>
     <div class="charts" id="charts"></div>
@@ -662,7 +472,9 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
         than Osmium's today, and closing that gap is next on the list. Max only matches xz on machine code, since both are
         LZMA with a branch filter, and Fast is larger than zip on the mixed folder.</p></div>
       <div class="note"><h4>The cost of the smallest file</h4><p id="cost">Context mixing decompresses about as slowly as it
-        compresses. Osmium shows the expected extraction time and memory before it starts, and Max keeps LZMA's fast extraction.</p></div>
+        compresses. After compressing, Osmium reports the expected extraction time and memory, and <code>osmium info</code>
+        shows them for any archive. Max keeps LZMA's fast extraction.</p></div>
+      <div class="note"><h4>Conditions</h4><p id="conditions">Measured on 24 November 2026 on one machine (4 vCPU Intel Xeon at 2.3 GHz, 16 GB RAM, Linux 6.18, .NET 10) with Osmium 0.1.1, Info-ZIP zip 3.0, bzip2 1.0.8, Brotli 1.1.0, Zstandard 1.5.5, xz 5.4.5, 7-Zip 23.01, lrzip 0.651, ZPAQ 7.15. Times are wall-clock seconds on that machine. Full tables and commands: <a href="https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a>.</p></div>
     </div>
   </div>
 </section>
@@ -716,195 +528,8 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--line-soft); color
       <p class="lede">Osmium starts with Windows and waits in the notification area. The ring fills while a job runs; hover it for
         the phase and percentage, right-click it for everything else. Drop files on the window, or right-click them in Explorer.</p>
     </div>
-    <div class="app-grid">
-      <div class="win" id="win">
-        <div class="w-title"><svg aria-hidden="true"><use href="#i-logo"/></svg>Osmium
-          <div class="w-caps" aria-hidden="true">
-            <span><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></span>
-            <span><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></span>
-            <span><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></span>
-          </div>
-        </div>
-        <div class="w-body">
-          <nav class="w-rail" aria-label="Osmium pages (mock-up)">
-            <div class="w-brand">Osmium</div>
-            <button class="w-nav" type="button" data-go="compress" aria-current="page"><svg viewBox="0 0 16 16"><path d="M2.5 3.5h11v2.5h-11zM3.5 6v6.5h9V6M6.5 8.5h3"/></svg><span>Compress</span></button>
-            <button class="w-nav" type="button" data-go="jobs"><svg viewBox="0 0 16 16"><path d="M2.5 4h1M2.5 8h1M2.5 12h1M6 4h7.5M6 8h7.5M6 12h5"/></svg><span>Jobs</span></button>
-            <button class="w-nav" type="button" data-go="archives"><svg viewBox="0 0 16 16"><path d="M1.5 4.5a1 1 0 0 1 1-1h3.5l1.5 1.5h6a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg><span>Archives</span></button>
-            <button class="w-nav" type="button" data-go="lab"><svg viewBox="0 0 16 16"><path d="M6 1.5h4M6.8 1.5v4.3L3 12.6a1.2 1.2 0 0 0 1 1.9h8a1.2 1.2 0 0 0 1-1.9L9.2 5.8V1.5M4.6 10h6.8"/></svg><span>Lab</span></button>
-            <button class="w-nav" type="button" data-go="rules"><svg viewBox="0 0 16 16"><path d="M2 4h7M12 4h2M10.5 2.5v3M2 8h2M7 8h7M5.5 6.5v3M2 12h8M13 12h1M11.5 10.5v3"/></svg><span>Rules</span></button>
-            <button class="w-nav" type="button" data-go="cluster"><svg viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="2"/><circle cx="3.5" cy="12" r="2"/><circle cx="12.5" cy="12" r="2"/><path d="M7 5.3 4.5 10.2M9 5.3l2.5 4.9M5.5 12h5"/></svg><span>Cluster</span></button>
-            <button class="w-nav" type="button" data-go="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><circle cx="8" cy="8" r="5.4" stroke-dasharray="2.1 1.45"/></svg><span>Settings</span></button>
-            <button class="w-nav" type="button" data-go="log"><svg viewBox="0 0 16 16"><path d="M4 1.5h5.5l3 3v10H4zM9.5 1.5v3h3M6 8h4.5M6 10.5h4.5M6 13h2.5"/></svg><span>Log</span></button>
-          </nav>
-          <div class="w-main">
-
-            <section class="w-page" data-page="compress" aria-label="Compress page">
-              <div class="w-h">Compress</div><p class="w-sub">Drop files or folders here. Right-click a file to tune its pipeline by hand (a “patch”) or let Osmium search for the best one.</p>
-              <div class="w-bar">
-                <span class="wb">Add files…</span><span class="wb">Add folder…</span><span class="wb sm-hide">Remove</span><span class="wb sm-hide">Clear</span>
-                <span class="w-lbl">Profile:</span><span class="wsel">ultra</span><span class="wb">Analyze</span>
-              </div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:24%">Name</th><th class="sm-hide" style="width:9%">Folder</th><th class="sm-hide" style="width:9%">Size</th><th style="width:26%">Detected type</th><th class="xs-hide">Plan</th></tr></thead>
-                <tbody>
-                  <tr><td>Microsoft.Build.dll</td><td class="sm-hide">bin</td><td class="sm-hide num">6.3 MB</td><td>PE None (.NET) → Binary</td><td class="xs-hide">auto: trials among 10 pipelines</td></tr>
-                  <tr><td>libcrypto.so.3</td><td class="sm-hide">bin</td><td class="sm-hide num">5.1 MB</td><td>ELF X64 → CodeX86</td><td class="xs-hide">auto: trials among 10 pipelines</td></tr>
-                  <tr class="sel"><td>telemetry.dat</td><td class="sm-hide">bin</td><td class="sm-hide num">1.1 MB</td><td>binary → Structured</td><td class="xs-hide">✎ patched: delta(stride=12)+cm(mem=24,stride=12)</td></tr>
-                  <tr><td>data.csv</td><td class="sm-hide">docs</td><td class="sm-hide num">1.3 MB</td><td>text (UTF-8/ASCII) → Text</td><td class="xs-hide">auto: trials among 10 pipelines</td></tr>
-                  <tr><td>tone.wav</td><td class="sm-hide">media</td><td class="sm-hide num">1.0 MB</td><td>WAV PCM 16-bit ×2 → Audio</td><td class="xs-hide">auto: trials among 9 pipelines</td></tr>
-                  <tr><td>gradient.bmp</td><td class="sm-hide">media</td><td class="sm-hide num">351.6 KB</td><td>BMP 400×300 24-bit → Image</td><td class="xs-hide">auto: trials among 8 pipelines</td></tr>
-                  <tr><td>GPL-3</td><td class="sm-hide">docs</td><td class="sm-hide num">34.3 KB</td><td>text (UTF-8/ASCII) → Text</td><td class="xs-hide">auto: trials among 10 pipelines</td></tr>
-                  <tr><td>changelog.gz</td><td class="sm-hide">media</td><td class="sm-hide num">166.2 KB</td><td>gzip → Incompressible</td><td class="xs-hide">auto: trials among 2 pipelines</td></tr>
-                  <tr><td>gnupg-module-overview.png</td><td class="sm-hide">media</td><td class="sm-hide num">119.9 KB</td><td>PNG → Incompressible</td><td class="xs-hide">auto: trials among 2 pipelines</td></tr>
-                </tbody>
-              </table></div>
-              <div class="w-row"><span class="w-lbl" style="margin-left:0">Archive:</span><span class="wtxt">D:\Backups\mixed-folder.osa</span><span class="wb">Browse…</span></div>
-              <span class="w-check"><span class="box"></span>Encrypt (AES-256, names hidden)</span>
-              <p class="w-sub">Context mixing allowed, two sample rungs and parameter search.</p>
-              <div class="w-foot"><span class="wb acc">Compress</span></div>
-            </section>
-
-            <section class="w-page" data-page="jobs" aria-label="Jobs page" hidden>
-              <div class="w-h">Jobs</div><p class="w-sub">Queued, running and finished jobs. Jobs run one at a time; each uses all configured threads.</p>
-              <div class="w-bar"><span class="wb">Pause</span><span class="wb">Resume</span><span class="wb">Cancel</span><span class="wb sm-hide">Show output</span><span class="wb sm-hide">Clear finished</span></div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:15%">Name</th><th class="sm-hide" style="width:10%">Kind</th><th style="width:12%">State</th><th style="width:18%">Progress</th><th class="xs-hide" style="width:10%">Input</th><th class="sm-hide" style="width:10%">Output</th><th class="sm-hide" style="width:7%">Ratio</th><th class="xs-hide" style="width:9%">Elapsed</th><th class="sm-hide">ETA</th></tr></thead>
-                <tbody>
-                  <tr class="sel"><td>Projects</td><td class="sm-hide">Compress</td><td>Running</td><td>64% Compressing</td><td class="xs-hide num">2.41 GB</td><td class="sm-hide num">618.4 MB</td><td class="sm-hide num">25.1%</td><td class="xs-hide num">21m 08s</td><td class="sm-hide num">11m 52s</td></tr>
-                  <tr><td>Downloads</td><td class="sm-hide">Compress</td><td>Queued</td><td>Queued</td><td class="xs-hide num"></td><td class="sm-hide num"></td><td class="sm-hide"></td><td class="xs-hide num">0s</td><td class="sm-hide"></td></tr>
-                  <tr><td id="job-done-name">mixed-folder</td><td class="sm-hide">Compress</td><td>Completed</td><td>Done</td><td class="xs-hide num" id="job-done-in">16.0 MB</td><td class="sm-hide num" id="job-done-out">4.7 MB</td><td class="sm-hide num" id="job-done-ratio">29.4%</td><td class="xs-hide num" id="job-done-time">9m 48s</td><td class="sm-hide"></td></tr>
-                  <tr><td>photos-2025.osa</td><td class="sm-hide">Test</td><td>Completed</td><td>Done</td><td class="xs-hide num">1.21 GB</td><td class="sm-hide num"></td><td class="sm-hide"></td><td class="xs-hide num">3m 41s</td><td class="sm-hide"></td></tr>
-                </tbody>
-              </table></div>
-              <pre class="w-log mono" id="job-log">group 1: CodeX86, 2 unit(s), 5,398,408 bytes, e.g. ELF X64
-  rung 1,048,576 B: x86+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) = 286,408, x86+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0) = 289,350, …
-  rung 4,194,304 B: x86+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) = 1,072,224, x86+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=767,stride=0) = 1,087,135, …
-  search: x86+cm(apm=7,limit=127,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,072,224 → 1,064,251
-  search: x86+cm(apm=7,limit=60,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,064,251 → 1,052,716
-  search: x86+cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,052,716 → 1,049,271
-  chose x86+cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0)
-group 4: Binary, 1 unit(s), 6,559,744 bytes, e.g. PE None (.NET)
-  rung 1,048,576 B: cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) = 369,634, cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0) = 373,026, …
-  rung 4,194,304 B: cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) = 1,363,945, cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0) = 1,383,639, …
-  search: cm(apm=7,limit=127,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,363,945 → 1,353,118
-  search: cm(apm=7,limit=60,lr=16,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,353,118 → 1,337,373
-  search: cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0) improves 1,337,373 → 1,333,882
-  chose cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0)</pre>
-            </section>
-
-            <section class="w-page" data-page="archives" aria-label="Archives page" hidden>
-              <div class="w-h">Archives</div><p class="w-sub">Browse, test and extract .osa archives. Every extracted file is verified against its stored hash.</p>
-              <div class="w-bar"><span class="wb">Open…</span><span class="wb">Extract all…</span><span class="wb sm-hide">Extract selected…</span><span class="wb">Test</span><span class="wb">Explain</span></div>
-              <div class="w-row" style="color:var(--w-muted)" id="arch-sum">D:\Backups\mixed-folder.osa</div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:36%">Path</th><th style="width:12%">Size</th><th class="sm-hide" style="width:17%">Modified</th><th class="xs-hide">Pipeline</th></tr></thead>
-                <tbody id="arch-rows">
-<tr><td>docs\data.csv</td><td class="num">1.3 MB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="cm(apm=7,limit=127,lr=16,lr2=10,mem=22,minlen=4,models=767,stride=0)">cm</td></tr>
-<tr><td>bin\libcrypto.so.3</td><td class="num">5.1 MB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="x86+cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0)">x86+cm</td></tr>
-<tr><td>media\gradient.bmp</td><td class="num">351.6 KB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="image(bpp=3,green=1,offset=54,rowbytes=1200,rows=300,width=400)+cm(apm=7,limit=255,lr=12,lr2=10,mem=22,minlen=8,models=975,stride=1200)">image+cm</td></tr>
-<tr><td>bin\telemetry.dat</td><td class="num">1.1 MB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="delta(stride=12)+transpose(stride=12)+lzma(dict=128M,fb=273,lc=2,lp=0,mf=1,pb=0)">delta+transpose+lzma</td></tr>
-<tr><td>bin\Microsoft.Build.dll</td><td class="num">6.3 MB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="cm(apm=7,limit=60,lr=24,lr2=10,mem=22,minlen=6,models=4095,stride=0)">cm</td></tr>
-<tr><td>media\preview.png</td><td class="num">31.6 KB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="store">store</td></tr>
-<tr><td>media\tone.wav</td><td class="num">1.0 MB</td><td class="sm-hide num">24/11/2026 01:12</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=32,offset=44,split=1)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0)">pcm16+cm</td></tr>
-</tbody>
-              </table></div>
-            </section>
-
-            <section class="w-page" data-page="lab" aria-label="Lab page" hidden>
-              <div class="w-h">Lab</div><p class="w-sub">Benchmark: compress and decompress a sample with each candidate, verify the round trip, and compare size against speed.</p>
-              <div class="w-bar"><span class="wb">Choose file…</span><span class="wtxt" style="flex:0 1 auto">D:\Projects\mixed-folder\media\tone.wav</span><span class="w-lbl">Candidates from:</span><span class="wsel">ultra</span><span class="wb acc">Run</span><span class="wb sm-hide">Stop</span><span class="wb sm-hide">Save best as rule</span></div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:13%">Size</th><th style="width:11%">Ratio</th><th class="sm-hide" style="width:15%">Compress MB/s</th><th class="sm-hide" style="width:14%">Extract MB/s</th><th class="xs-hide">Pipeline</th></tr></thead>
-                <tbody id="lab-rows">
-<tr class="sel"><td class="num">602,711</td><td class="num">56.94%</td><td class="sm-hide num">0.41</td><td class="sm-hide num">0.44</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=32,offset=44,split=1)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0)">pcm16(channels=2,length=1058400,lms=32,offset=44,split=1)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0)</td></tr>
-<tr><td class="num">603,258</td><td class="num">56.99%</td><td class="sm-hide num">0.41</td><td class="sm-hide num">0.41</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=16,offset=44,split=1)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0)">pcm16(channels=2,length=1058400,lms=16,offset=44,split=1)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=0)</td></tr>
-<tr><td class="num">603,379</td><td class="num">57.01%</td><td class="sm-hide num">0.32</td><td class="sm-hide num">0.32</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=16,offset=44,split=0)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=4)">pcm16(channels=2,length=1058400,lms=16,offset=44,split=0)+cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=4)</td></tr>
-<tr><td class="num">619,109</td><td class="num">58.49%</td><td class="sm-hide num">0.31</td><td class="sm-hide num">0.29</td><td class="xs-hide mono" title="cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=4)">cm(apm=7,limit=255,lr=16,lr2=10,mem=22,minlen=6,models=975,stride=4)</td></tr>
-<tr><td class="num">619,785</td><td class="num">58.56%</td><td class="sm-hide num">1.08</td><td class="sm-hide num">10.74</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=16,offset=44,split=1)+lzma(dict=128M,fb=273,lc=0,lp=0,mf=1,pb=0)">pcm16(channels=2,length=1058400,lms=16,offset=44,split=1)+lzma(dict=128M,fb=273,lc=0,lp=0,mf=1,pb=0)</td></tr>
-<tr><td class="num">621,327</td><td class="num">58.70%</td><td class="sm-hide num">2.15</td><td class="sm-hide num">7.68</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=16,offset=44,split=0)+lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)">pcm16(channels=2,length=1058400,lms=16,offset=44,split=0)+lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)</td></tr>
-<tr><td class="num">662,258</td><td class="num">62.57%</td><td class="sm-hide num">1.36</td><td class="sm-hide num">13.15</td><td class="xs-hide mono" title="pcm16(channels=2,length=1058400,lms=0,offset=44,split=1)+lzma(dict=128M,fb=273,lc=0,lp=0,mf=1,pb=0)">pcm16(channels=2,length=1058400,lms=0,offset=44,split=1)+lzma(dict=128M,fb=273,lc=0,lp=0,mf=1,pb=0)</td></tr>
-<tr><td class="num">711,431</td><td class="num">67.21%</td><td class="sm-hide num">2.40</td><td class="sm-hide num">10.05</td><td class="xs-hide mono" title="delta(stride=4)+lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)">delta(stride=4)+lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)</td></tr>
-<tr><td class="num">805,005</td><td class="num">76.06%</td><td class="sm-hide num">3.10</td><td class="sm-hide num">10.23</td><td class="xs-hide mono" title="lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)">lzma(dict=128M,fb=273,lc=0,lp=1,mf=1,pb=1)</td></tr>
-</tbody>
-              </table></div>
-              
-            </section>
-
-            <section class="w-page" data-page="rules" aria-label="Rules page" hidden>
-              <div class="w-h">Rules &amp; patches</div><p class="w-sub">Rules apply per file: force or forbid pipelines, override parameters ("lzma.dict": "256M"), store, exclude, or give a file its own block. Later and higher-priority rules win; forbids always apply.</p>
-              <div class="w-bar"><span class="wb">Reload</span><span class="wb">Validate</span><span class="wb acc">Save</span><span class="wb sm-hide">Add example</span><span class="wtxt xs-hide" style="color:var(--w-muted);max-width:260px">e.g. photos/raw/img001.bmp</span><span class="wb xs-hide">Explain</span></div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:18%">Id</th><th style="width:7%">On</th><th class="sm-hide" style="width:10%">Priority</th><th style="width:30%">Match</th><th class="xs-hide">Action</th></tr></thead>
-                <tbody>
-                  <tr><td>logs</td><td>✓</td><td class="sm-hide num">0</td><td>**/*.log, ≥ 1 MiB</td><td class="xs-hide mono">ppmd.order=16, lzma.dict=256M</td></tr>
-                  <tr class="sel"><td>game-data</td><td>✓</td><td class="sm-hide num">0</td><td>data/level01.pak</td><td class="xs-hide mono">delta(stride=4)+cm(mem=24), own block</td></tr>
-                  <tr><td>no-cm-for-exe</td><td>✓</td><td class="sm-hide num">0</td><td>kind CodeX86</td><td class="xs-hide mono">forbid cm</td></tr>
-                  <tr><td>skip-temp</td><td>✓</td><td class="sm-hide num">0</td><td>**/*.tmp, node_modules/**</td><td class="xs-hide mono">exclude</td></tr>
-                </tbody>
-              </table></div>
-<pre class="w-json mono">{ "rules": [
-  { "id": "game-data", "match": { "path": "data/level01.pak" },
-    "actions": { "pipeline": "delta(stride=4)+cm(mem=24)", "solid": "own" } },
-  { "id": "no-cm-for-exe", "match": { "kinds": ["CodeX86"] },
-    "actions": { "forbidCodecs": ["cm"] } }
-] }</pre>
-            </section>
-
-            <section class="w-page" data-page="cluster" aria-label="Cluster page" hidden>
-              <div class="w-h">Cluster</div><p class="w-sub">PCs that share the same key can split compression work. Workers receive file contents (never names or passwords). Workers are refused if they run a different engine version; every remote result is re-verified here.</p>
-              <div class="w-row"><span class="w-lbl" style="margin-left:0">Cluster key:</span><span class="wtxt">●●●●●●●●●●●●●●●●●●●●●●●●</span><span class="wb xs-hide">Show</span><span class="wb sm-hide">Generate</span><span class="wb sm-hide">Copy</span><span class="wb acc">Save</span></div>
-              <div class="w-bar"><span class="wb">Find workers on this network</span><span class="wb">Lend this PC</span></div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:20%">Name</th><th class="sm-hide" style="width:26%">Address</th><th style="width:10%">Slots</th><th>Status</th></tr></thead>
-                <tbody>
-                  <tr><td>STUDIO-PC</td><td class="sm-hide mono">192.168.1.20:46510</td><td class="num">16</td><td>OK — authenticated, 32.0 GB memory</td></tr>
-                  <tr><td>LAPTOP</td><td class="sm-hide mono">192.168.1.34:46510</td><td class="num">8</td><td>OK — authenticated, 16.0 GB memory</td></tr>
-                  <tr><td>MEDIA-PC</td><td class="sm-hide mono">192.168.1.41:46510</td><td class="num">4</td><td>error: Worker runs a different Osmium engine version.</td></tr>
-                </tbody>
-              </table></div>
-              <p class="w-sub">This PC is not lending its CPU. Use “Lend this PC” to start the worker.</p>
-            </section>
-
-            <section class="w-page" data-page="settings" aria-label="Settings page" hidden>
-              <div class="w-h">Settings</div><p class="w-sub">Every option Osmium has. Settings marked EXPERIMENTAL need the master switch on the Experimental page.</p>
-              <div class="w-bar"><span class="wtxt" style="flex:0 1 260px;color:var(--w-muted)">Search settings</span></div>
-              <div class="w-split">
-                <div class="w-cats"><span>General</span><span>Compression</span><span>Codecs</span><span>Filters</span><span>Analysis</span><span>Performance</span><span>Security</span><span>Integration</span><span>Watch folders</span><span>Cluster</span><span class="on">Experimental</span></div>
-                <div class="w-set">
-                  <div class="w-banner">⚠ Experimental features may take days, use many GB of RAM, or produce archives that need this exact Osmium version's experimental support. Archives made with them are flagged.</div>
-                  <div class="w-setting"><div class="t">Enable experimental features</div><div class="d">Master switch for everything on this page.</div><span class="w-check"><span class="box on"></span>Enabled</span></div>
-                  <div class="w-setting"><div class="t">Offer the Exhaustive profile <em>EXPERIMENTAL</em></div><div class="d">Every candidate compressed on the full data, then hill-climbed.</div><span class="w-check"><span class="box"></span>Enabled</span></div>
-                  <div class="w-setting"><div class="t">CM: all context models <em>EXPERIMENTAL</em></div><div class="d">Adds order-5/8 and sparse models to every CM candidate (slower, sometimes smaller).</div><span class="w-check"><span class="box on"></span>Enabled</span></div>
-                  <div class="w-setting"><div class="t">Huge CM tables (4 GiB) <em>EXPERIMENTAL</em></div><div class="d">Allows model memory 26. Extraction needs the same memory.</div><span class="w-check"><span class="box"></span>Enabled</span></div>
-                  <div class="w-setting"><div class="t">Distribute symmetric codecs <em>EXPERIMENTAL</em></div><div class="d">Send CM/PPMd blocks to workers too (verification then costs as much as compressing).</div><span class="w-check"><span class="box"></span>Enabled</span></div>
-                  <div class="w-bar" style="justify-content:flex-end"><span class="wb acc">Apply</span><span class="wb">Revert</span><span class="wb sm-hide">Restore defaults</span><span class="wb sm-hide">Repair Explorer integration</span></div>
-                </div>
-              </div>
-            </section>
-
-            <section class="w-page" data-page="log" aria-label="Log page" hidden>
-              <div class="w-h">Log</div><p class="w-sub">Application events, shell invocations, worker activity and errors.</p>
-              <div class="w-bar"><span class="wb">Open log folder</span><span class="wb">Copy all</span></div>
-              <div class="lvw"><table class="lv">
-                <thead><tr><th style="width:15%">Time</th><th style="width:11%">Level</th><th>Message</th></tr></thead>
-                <tbody>
-                  <tr><td class="num">08:58:02</td><td>Info</td><td>Osmium started (installed), engine fingerprint F2518CF3</td></tr>
-                  <tr><td class="num">08:58:02</td><td>Info</td><td>Explorer integration updated (All)</td></tr>
-                  <tr><td class="num">21:26:01</td><td>Info</td><td>shell: compress-dialog (1 item(s))</td></tr>
-                  <tr><td class="num">21:26:03</td><td>Info</td><td>ultra: context mixing may be chosen — extraction will be roughly as slow as compression.</td></tr>
-                  <tr><td class="num" id="log-done-time">21:31:43</td><td>Info</td><td>job mixed-folder: Completed</td></tr>
-                  <tr><td class="num">21:40:17</td><td>Info</td><td>window hidden; Osmium keeps running in the notification area</td></tr>
-                </tbody>
-              </table></div>
-            </section>
-
-            <div class="w-status">1 running, 1 queued   ·   Profile: Ultra   ·   Worker: off</div>
-          </div>
-        </div>
-      </div>
-      <div class="app-note"><span>A working model of the main window, drawn in the app's own light and dark palettes. Use the page list on the left.</span><span>Real labels, columns and messages from <code>src/Osmium.App</code>.</span></div>
-    </div>
+    <p class="body">The app has eight pages — Compress, Jobs, Archives, Lab, Rules, Cluster, Settings and Log — and a tray
+      menu with the default profile, recent jobs, pause, watch folders and lending this PC to a cluster.</p>
   </div>
 </section>
 
@@ -921,10 +546,10 @@ group 4: Binary, 1 unit(s), 6,559,744 bytes, e.g. PE None (.NET)
       <div class="card">
         <h3>Patch a file</h3>
         <p>Right-click a file on the Compress page. <em>Tune…</em> builds its pipeline stage by stage; <em>Deep auto-tune…</em> searches for it.</p>
-        <div class="ctxmenu" aria-hidden="true">
-          <div class="on">Tune…</div><div>Deep auto-tune…</div><div>Store as-is</div><div>Exclude</div><div>Clear patch</div><hr>
-          <div>Save patch as global rule</div><div>Open containing folder</div>
-        </div>
+        <ul class="menu-list" aria-label="Right-click menu of the Compress page">
+          <li>Tune…</li><li>Deep auto-tune…</li><li>Store as-is</li><li>Exclude</li><li>Clear patch</li>
+          <li>Save patch as global rule</li><li>Open containing folder</li>
+        </ul>
       </div>
       <div class="card">
         <h3>Write the pipeline</h3>
@@ -980,19 +605,18 @@ osmium a out.osa data ^
     </div>
     <div class="cl">
       <div>
-        <div class="net" role="img" aria-label="Your PC sends blocks and pipelines to three workers and receives compressed payloads with hashes; it verifies everything.">
-          <div class="node"><b>Your PC</b><span>Plans, verifies every result, writes the archive</span><span class="mono">coordinator</span></div>
+        <div class="net" role="img" aria-label="Your PC sends blocks and pipelines to worker PCs and receives compressed payloads with hashes, which it verifies.">
+          <div class="node"><b>Your PC</b><span>Plans, verifies returned blocks, writes the archive</span><span class="mono">coordinator</span></div>
           <div class="wire"><span>blocks + pipeline<br>no file names</span><i class="r"></i><i class="l"></i><span>payload + hash</span></div>
           <div class="workers">
-            <div class="node"><b>STUDIO-PC</b><span>16 slots · 32 GB</span><span class="mono">worker</span></div>
-            <div class="node"><b>LAPTOP</b><span>8 slots · 16 GB</span><span class="mono">worker</span></div>
-            <div class="node"><b>OFFICE-PC</b><span>4 slots · 8 GB</span><span class="mono">worker</span></div>
+            <div class="node"><b>Worker PC</b><span>Compresses what it is sent</span><span class="mono">worker</span></div>
+            <div class="node"><b>Worker PC</b><span>Same engine version, same key</span><span class="mono">worker</span></div>
           </div>
         </div>
         <ul class="facts">
           <li>Workers authenticate with the shared key (mutual HMAC over an ECDH handshake) and must run the same engine version.</li>
           <li>They see the contents of the blocks they compress, never file names. Pair only machines you trust.</li>
-          <li>Every remote result is decoded and compared on your PC. A worker that returns a wrong result is quarantined.</li>
+          <li>Every block a worker compresses is decoded and compared on your PC before it is written; trial results from workers are spot-checked. A worker that returns a wrong result is quarantined.</li>
         </ul>
       </div>
       <ol class="howto">
@@ -1012,9 +636,10 @@ osmium a out.osa data ^
   <div class="wrap">
     <div class="sec-head">
       <p class="spec">Safety · .osa format 1.0 · XXH128 per block and file · CRC32 per frame header</p>
-      <h2>Nothing is written until it has been read back</h2>
-      <p class="lede">Smaller files are worthless if they do not come back intact. Each block is decoded and compared before it
-        reaches the disk, and the finished archive is read again before it replaces anything.</p>
+      <h2>Checked before it is written</h2>
+      <p class="lede">Smaller files are worthless if they do not come back intact. By default, each block is decoded and compared
+        before it reaches the disk, and the finished archive is read again before it replaces anything. Verification can be
+        switched off (Settings, or <code>--no-verify</code>); we recommend leaving it on.</p>
     </div>
     <div class="fmt" role="img" aria-label="Layout of an .osa file: header, block frames, index, footer.">
       <div class="h"><b>Header</b><span>Magic, format version, TLV extensions, CRC32</span></div>
@@ -1026,12 +651,12 @@ osmium a out.osa data ^
     </div>
     <p class="fmt-cap">Layout of an <code>.osa</code> file, not to scale. Every frame header carries its own magic, number and CRC, so damage is reported block by block and never decoded silently.</p>
     <div class="guar">
-      <div><h3>Verified before written</h3><p>Every block is decoded and compared with its input. A remote worker's block is checked the same way.</p></div>
+      <div><h3>Verified by default</h3><p>Every block is decoded and compared with its input before it is written, including blocks compressed by a worker.</p></div>
       <div><h3>Atomic and change-aware</h3><p>Archives are written to a temporary file, re-read, then renamed into place. A file that changes while it is read is detected.</p></div>
-      <div><h3>Encrypted, names too</h3><p>AES-256-GCM with PBKDF2-SHA512 and HKDF. With a password, file names, pipelines and contents are encrypted; only the block count and block sizes stay visible.</p></div>
+      <div><h3>Encrypted, names too</h3><p>AES-256-GCM with PBKDF2-SHA512 and HKDF. With a password, file names, pipelines and contents are encrypted. The block count, block sizes, the version of Osmium that wrote the archive and whether experimental features were used stay visible.</p></div>
       <div><h3>Safe extraction</h3><p>Paths that try to leave the target folder are refused, and the Mark of the Web is carried over to extracted files.</p></div>
       <div><h3>Same output everywhere</h3><p>The context-mixing codec is integer-only. CI checks a golden hash on Linux and Windows.</p></div>
-      <div><h3>Extraction cost up front</h3><p>Before and after compressing, Osmium tells you how long extraction will take and how much memory it needs.</p></div>
+      <div><h3>Extraction cost, stated</h3><p>After compressing, and for any archive in <code>osmium info</code> or on the Archives page, Osmium reports how long extraction will take and how much memory it needs.</p></div>
     </div>
   </div>
 </section>
@@ -1062,7 +687,7 @@ osmium a out.osa data ^
       <div class="card">
         <span class="tag">Next</span>
         <h3>Faster planning for Ultra and Insane</h3>
-        <p>Ultra spends 292 of its 346 seconds on the mixed folder planning, mostly trying parameter variations on the
+        <p>In a timing run on the mixed folder, Ultra spent 292 of its 346 seconds planning, mostly trying parameter variations on the
           largest sample. The search earns its keep, shrinking each group by 2–8 %, so it stays.</p>
         <p>The plan: try each variation on the previous, smaller sample first and send only the best few to the full sample.
           Insane, whose largest sample is 16 MiB, gains the most.</p>
@@ -1076,7 +701,7 @@ osmium a out.osa data ^
           <li><b>Recompress compressed files.</b> Bit-exact re-deflate for PNG, ZIP, DOCX and PDF, and lossless JPEG recompression. Today they are stored as-is.</li>
           <li><b>Repair and grow archives.</b> <code>osmium salvage</code>, recovery records, append and update, multi-volume.</li>
           <li><b>Deeper Windows integration.</b> A top-level Windows 11 context menu and notifications with actions.</li>
-          <li><b>Signed builds</b>, so SmartScreen stops warning.</li>
+          <li><b>Signed builds</b>, so Windows can verify who published them.</li>
         </ul>
       </div>
       <div>
@@ -1095,9 +720,10 @@ osmium a out.osa data ^
 <section class="sec" id="download">
   <div class="wrap">
     <div class="sec-head">
-      <p class="spec">Download · version 0.1.1 · Windows 10 1809 or later, Windows 11 · x64 and ARM64</p>
+      <p class="spec">Download · version 0.1.1 · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64</p>
       <h2>Download</h2>
-      <p class="lede">No separate .NET install is needed. Every file is on the GitHub release page with SHA-256 checksums.</p>
+      <p class="lede">No separate .NET install is needed. Every file is on the GitHub release page with SHA-256 checksums, and
+        every download includes the license and third-party notices.</p>
     </div>
     <div class="dl">
       <div class="card">
@@ -1139,21 +765,39 @@ pwsh build/publish.ps1 -Arch x64</pre>
 </main>
 
 <footer>
-  <div class="wrap foot">
-    <span>Osmium 0.1.1 · MIT license</span>
-    <nav aria-label="Project links">
-      <a href="https://github.com/windfastt/osmium">Source</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/CHANGELOG.md">Changelog</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/ROADMAP.md">Roadmap</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md">Benchmarks</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/docs/FORMAT.md">.osa format</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/docs/SETTINGS.md">Settings reference</a>
-      <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a>
-    </nav>
+  <div class="wrap">
+    <div class="legal">
+      <div><h4>License and warranty</h4><p>Osmium is free software under the <a href="https://github.com/windfastt/osmium/blob/main/LICENSE">MIT License</a>.
+        It is provided “as is”, without warranty of any kind, and its authors are not liable for any damages, including lost
+        data. Keep backups, and test archives with <code>osmium t</code> before you delete the originals.</p></div>
+      <div><h4>Third-party software</h4><p>The downloads include third-party components under their own licenses, listed with
+        their full license texts in <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES</a>.
+        Every download carries this file, and <code>osmium license</code> prints it.</p></div>
+      <div><h4>Trademarks</h4><p>Windows and .NET are trademarks of the Microsoft group of companies. 7-Zip, ZPAQ, xz, Zstandard,
+        Brotli, bzip2, lrzip and Info-ZIP are names of their respective owners and are used here only to identify those
+        products. Osmium is an independent project, not affiliated with, sponsored or endorsed by any of them.</p></div>
+      <div><h4>About the benchmarks</h4><p>The results come from two test folders measured once on one machine (4 vCPU Intel Xeon at 2.3 GHz, 16 GB RAM, Linux 6.18, .NET 10, 24 November 2026) with the tool versions and settings listed in <a href="https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a>. Other data, versions and hardware will give different results; rerun them with <code>tools/crosscheck.py</code>.</p></div>
+      <div><h4>Privacy</h4><p>This page sets no cookies, runs no analytics and loads nothing from other sites; its fonts are
+        served from this site. It is hosted on GitHub Pages, and GitHub may log visits as described in its
+        <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">privacy statement</a>.
+        The app sends nothing over the internet; it uses your local network only if you set up a cluster.</p></div>
+    </div>
+    <div class="foot">
+      <span>Osmium 0.1.1 · MIT license</span>
+      <nav aria-label="Project links">
+        <a href="https://github.com/windfastt/osmium">Source</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/ROADMAP.md">Roadmap</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md">Benchmarks</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/FORMAT.md">.osa format</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/docs/SETTINGS.md">Settings reference</a>
+        <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a>
+      </nav>
+    </div>
   </div>
 </footer>
 
-<script type="application/json" id="bench-data">{"datasets":[{"id":"mixed-folder","title":"Mixed folder","bytes":16749294,"files":33,"desc":"16.0 MiB, 33 files: license texts and a CSV, ELF and .NET binaries, a WAV and a BMP, PNG and gzip files, 12-byte telemetry records, duplicates."},{"id":"windows-app","title":"Windows application folder","bytes":129991486,"files":284,"desc":"124.0 MiB, 284 files: Osmium's own self-contained publish output, mostly .NET ReadyToRun DLLs and native x64 DLLs and EXEs, the kind of payload an installer ships."}],"rows":[{"ds":"mixed-folder","tool":"zip -9","setting":"zip -r -9","fam":"zip","bytes":7988941,"c":1.67,"d":0.09,"ok":true},{"ds":"mixed-folder","tool":"bzip2 -9","setting":"tar | bzip2 -9","fam":"bzip2","bytes":7975689,"c":1.11,"d":0.79,"ok":true},{"ds":"mixed-folder","tool":"Brotli 11","setting":"tar | brotli -q 11 -w 24","fam":"brotli","bytes":6490625,"c":37.95,"d":0.09,"ok":true},{"ds":"mixed-folder","tool":"Zstandard 22","setting":"tar | zstd --ultra -22 --long=31 -T1","fam":"zstd","bytes":7009249,"c":5.57,"d":0.04,"ok":true},{"ds":"mixed-folder","tool":"xz -9e","setting":"tar | xz -9e -T1","fam":"xz","bytes":6097804,"c":6.02,"d":0.33,"ok":true},{"ds":"mixed-folder","tool":"7-Zip LZMA2","setting":"7z a -mx=9 -m0=lzma2 -mfb=273 -md=256m -ms=on","fam":"7z","bytes":5831544,"c":2.0,"d":0.29,"ok":true},{"ds":"mixed-folder","tool":"7-Zip PPMd","setting":"7z a -m0=PPMd:mem=1024m:o=32 -ms=on","fam":"7z-ppmd","bytes":7384240,"c":3.91,"d":3.91,"ok":true},{"ds":"mixed-folder","tool":"lrzip -z","setting":"tar | lrzip -z -L 9 (ZPAQ back end)","fam":"lrzip","bytes":5303256,"c":24.34,"d":26.4,"ok":true},{"ds":"mixed-folder","tool":"ZPAQ -m5","setting":"zpaq a -m5","fam":"zpaq","bytes":5322286,"c":40.94,"d":42.41,"ok":true},{"ds":"mixed-folder","tool":"Osmium Fast","setting":"osmium a --profile fast","fam":"osmium-fast","bytes":8227600,"c":0.53,"d":0.19,"ok":true},{"ds":"mixed-folder","tool":"Osmium Balanced","setting":"osmium a --profile balanced","fam":"osmium-balanced","bytes":5604115,"c":6.93,"d":0.7,"ok":true},{"ds":"mixed-folder","tool":"Osmium Max","setting":"osmium a --profile max","fam":"osmium-max","bytes":5407507,"c":10.54,"d":0.5,"ok":true},{"ds":"mixed-folder","tool":"Osmium Ultra","setting":"osmium a --profile ultra","fam":"osmium-ultra","bytes":4965074,"c":339.54,"d":28.0,"ok":true},{"ds":"mixed-folder","tool":"Osmium Insane","setting":"osmium a --profile insane","fam":"osmium-insane","bytes":4944191,"c":1049.11,"d":33.91,"ok":true},{"ds":"windows-app","tool":"zip -9","setting":"zip -r -9","fam":"zip","bytes":53310076,"c":10.63,"d":0.94,"ok":true},{"ds":"windows-app","tool":"bzip2 -9","setting":"tar | bzip2 -9","fam":"bzip2","bytes":53246143,"c":9.35,"d":4.43,"ok":true},{"ds":"windows-app","tool":"Brotli 11","setting":"tar | brotli -q 11 -w 24","fam":"brotli","bytes":39687784,"c":309.36,"d":0.47,"ok":true},{"ds":"windows-app","tool":"Zstandard 22","setting":"tar | zstd --ultra -22 --long=31 -T1","fam":"zstd","bytes":40574485,"c":53.81,"d":0.25,"ok":true},{"ds":"windows-app","tool":"xz -9e","setting":"tar | xz -9e -T1","fam":"xz","bytes":37456232,"c":65.37,"d":2.08,"ok":true},{"ds":"windows-app","tool":"7-Zip LZMA2","setting":"7z a -mx=9 -m0=lzma2 -mfb=273 -md=256m -ms=on","fam":"7z","bytes":36645043,"c":32.98,"d":1.85,"ok":true},{"ds":"windows-app","tool":"7-Zip PPMd","setting":"7z a -m0=PPMd:mem=1024m:o=32 -ms=on","fam":"7z-ppmd","bytes":46207473,"c":27.79,"d":27.99,"ok":true},{"ds":"windows-app","tool":"lrzip -z","setting":"tar | lrzip -z -L 9 (ZPAQ back end)","fam":"lrzip","bytes":34431228,"c":68.2,"d":63.84,"ok":true},{"ds":"windows-app","tool":"ZPAQ -m5","setting":"zpaq a -m5","fam":"zpaq","bytes":33297191,"c":157.82,"d":150.94,"ok":true},{"ds":"windows-app","tool":"Osmium Fast","setting":"osmium a --profile fast","fam":"osmium-fast","bytes":50583901,"c":1.26,"d":0.31,"ok":true},{"ds":"windows-app","tool":"Osmium Balanced","setting":"osmium a --profile balanced","fam":"osmium-balanced","bytes":37771434,"c":69.39,"d":2.97,"ok":true},{"ds":"windows-app","tool":"Osmium Max","setting":"osmium a --profile max","fam":"osmium-max","bytes":37474430,"c":136.93,"d":5.24,"ok":true},{"ds":"windows-app","tool":"Osmium Ultra","setting":"osmium a --profile ultra","fam":"osmium-ultra","bytes":35483188,"c":1127.36,"d":459.21,"ok":true}],"tiles":[{"v":"−18.9 %","l":"vs xz -9e on the mixed folder","c":"Osmium Insane: 29.5 % of the original, against 36.4 %"},{"v":"−6.8 %","l":"vs lrzip -z, the smallest other tool on the mixed folder","c":"Osmium Insane 4,944,191 bytes, lrzip -z 5,303,256 bytes"},{"v":"−5.3 %","l":"vs xz -9e on the windows application folder","c":"Osmium Ultra: 27.3 % of the original, against 28.8 %. ZPAQ -m5 is smaller still: 25.6 %"},{"v":"27 of 27","l":"archives unpacked byte-identical","c":"every tool and every profile, checked file by file"}],"toastFam":"osmium-ultra"}</script>
+<script type="application/json" id="bench-data">{"datasets":[{"id":"mixed-folder","title":"Mixed folder","bytes":16749294,"files":33,"desc":"16.0 MiB, 33 files: license texts and a CSV, ELF and .NET binaries, a WAV and a BMP, PNG and gzip files, 12-byte telemetry records, duplicates."},{"id":"windows-app","title":"Folder of program files","bytes":129991486,"files":284,"desc":"124.0 MiB, 284 files: Osmium's own self-contained Windows build, mostly .NET runtime DLLs (ReadyToRun) and native x64 DLLs and EXEs, the kind of payload an installer ships."}],"rows":[{"ds":"mixed-folder","tool":"zip -9","setting":"zip -r -9","fam":"zip","bytes":7988941,"c":1.67,"d":0.09,"ok":true},{"ds":"mixed-folder","tool":"bzip2 -9","setting":"tar | bzip2 -9","fam":"bzip2","bytes":7975689,"c":1.11,"d":0.79,"ok":true},{"ds":"mixed-folder","tool":"Brotli 11","setting":"tar | brotli -q 11 -w 24","fam":"brotli","bytes":6490625,"c":37.95,"d":0.09,"ok":true},{"ds":"mixed-folder","tool":"Zstandard 22","setting":"tar | zstd --ultra -22 --long=31 -T1","fam":"zstd","bytes":7009249,"c":5.57,"d":0.04,"ok":true},{"ds":"mixed-folder","tool":"xz -9e","setting":"tar | xz -9e -T1","fam":"xz","bytes":6097804,"c":6.02,"d":0.33,"ok":true},{"ds":"mixed-folder","tool":"7-Zip LZMA2","setting":"7z a -mx=9 -m0=lzma2 -mfb=273 -md=256m -ms=on","fam":"7z","bytes":5831544,"c":2.0,"d":0.29,"ok":true},{"ds":"mixed-folder","tool":"7-Zip PPMd","setting":"7z a -m0=PPMd:mem=1024m:o=32 -ms=on","fam":"7z-ppmd","bytes":7384240,"c":3.91,"d":3.91,"ok":true},{"ds":"mixed-folder","tool":"lrzip -z","setting":"tar | lrzip -z -L 9 (ZPAQ back end)","fam":"lrzip","bytes":5303256,"c":24.34,"d":26.4,"ok":true},{"ds":"mixed-folder","tool":"ZPAQ -m5","setting":"zpaq a -m5","fam":"zpaq","bytes":5322286,"c":40.94,"d":42.41,"ok":true},{"ds":"mixed-folder","tool":"Osmium Fast","setting":"osmium a --profile fast","fam":"osmium-fast","bytes":8227600,"c":0.53,"d":0.19,"ok":true},{"ds":"mixed-folder","tool":"Osmium Balanced","setting":"osmium a --profile balanced","fam":"osmium-balanced","bytes":5604115,"c":6.93,"d":0.7,"ok":true},{"ds":"mixed-folder","tool":"Osmium Max","setting":"osmium a --profile max","fam":"osmium-max","bytes":5407507,"c":10.54,"d":0.5,"ok":true},{"ds":"mixed-folder","tool":"Osmium Ultra","setting":"osmium a --profile ultra","fam":"osmium-ultra","bytes":4965074,"c":339.54,"d":28.0,"ok":true},{"ds":"mixed-folder","tool":"Osmium Insane","setting":"osmium a --profile insane","fam":"osmium-insane","bytes":4944191,"c":1049.11,"d":33.91,"ok":true},{"ds":"windows-app","tool":"zip -9","setting":"zip -r -9","fam":"zip","bytes":53310076,"c":10.63,"d":0.94,"ok":true},{"ds":"windows-app","tool":"bzip2 -9","setting":"tar | bzip2 -9","fam":"bzip2","bytes":53246143,"c":9.35,"d":4.43,"ok":true},{"ds":"windows-app","tool":"Brotli 11","setting":"tar | brotli -q 11 -w 24","fam":"brotli","bytes":39687784,"c":309.36,"d":0.47,"ok":true},{"ds":"windows-app","tool":"Zstandard 22","setting":"tar | zstd --ultra -22 --long=31 -T1","fam":"zstd","bytes":40574485,"c":53.81,"d":0.25,"ok":true},{"ds":"windows-app","tool":"xz -9e","setting":"tar | xz -9e -T1","fam":"xz","bytes":37456232,"c":65.37,"d":2.08,"ok":true},{"ds":"windows-app","tool":"7-Zip LZMA2","setting":"7z a -mx=9 -m0=lzma2 -mfb=273 -md=256m -ms=on","fam":"7z","bytes":36645043,"c":32.98,"d":1.85,"ok":true},{"ds":"windows-app","tool":"7-Zip PPMd","setting":"7z a -m0=PPMd:mem=1024m:o=32 -ms=on","fam":"7z-ppmd","bytes":46207473,"c":27.79,"d":27.99,"ok":true},{"ds":"windows-app","tool":"lrzip -z","setting":"tar | lrzip -z -L 9 (ZPAQ back end)","fam":"lrzip","bytes":34431228,"c":68.2,"d":63.84,"ok":true},{"ds":"windows-app","tool":"ZPAQ -m5","setting":"zpaq a -m5","fam":"zpaq","bytes":33297191,"c":157.82,"d":150.94,"ok":true},{"ds":"windows-app","tool":"Osmium Fast","setting":"osmium a --profile fast","fam":"osmium-fast","bytes":50583901,"c":1.26,"d":0.31,"ok":true},{"ds":"windows-app","tool":"Osmium Balanced","setting":"osmium a --profile balanced","fam":"osmium-balanced","bytes":37771434,"c":69.39,"d":2.97,"ok":true},{"ds":"windows-app","tool":"Osmium Max","setting":"osmium a --profile max","fam":"osmium-max","bytes":37474430,"c":136.93,"d":5.24,"ok":true},{"ds":"windows-app","tool":"Osmium Ultra","setting":"osmium a --profile ultra","fam":"osmium-ultra","bytes":35483188,"c":1127.36,"d":459.21,"ok":true}],"tiles":[{"v":"−18.9 %","l":"vs xz -9e on the mixed folder in our test","c":"Osmium Insane: 29.5 % of the original, against 36.4 %"},{"v":"−6.8 %","l":"vs lrzip -z, the smallest other result on the mixed folder","c":"Osmium Insane 4,944,191 bytes, lrzip -z 5,303,256 bytes"},{"v":"−5.3 %","l":"vs xz -9e on the folder of program files in our test","c":"Osmium Ultra: 27.3 % of the original, against 28.8 %. ZPAQ -m5 is smaller still: 25.6 %"},{"v":"27 of 27","l":"benchmark archives unpacked byte-identical","c":"every run in the table below, checked file by file"}]}</script>
 <script>
 (() => {
   "use strict";
@@ -1318,26 +962,25 @@ pwsh build/publish.ps1 -Arch x64</pre>
     pr.append(tr);
   }
 
-  // ------------------------------------------------------------ mock-up text from the same numbers
-  const best = find(mixed.id, D.toastFam);
-  if (best) {
-    const ratio = best.bytes / mixed.bytes;
-    $("#toast-body").textContent = "mixed-folder — " + tBytes(mixed.bytes) + " → " + tBytes(best.bytes) + " (" + Math.round((1 - ratio) * 100) + "% smaller) in " + tDur(best.c);
-    $("#job-done-in").textContent = tBytes(mixed.bytes);
-    $("#job-done-out").textContent = tBytes(best.bytes);
-    $("#job-done-ratio").textContent = (ratio * 100).toFixed(1) + "%";
-    $("#job-done-time").textContent = tDur(best.c);
-    const t0 = 21 * 3600 + 26 * 60 + 3 + Math.round(best.c);   // the job was queued at 21:26:03
-    $("#log-done-time").textContent = [Math.floor(t0 / 3600), Math.floor(t0 / 60) % 60, t0 % 60].map(n => String(n).padStart(2, "0")).join(":");
+  // ------------------------------------------------------------ screenshot gallery (tabs; all panels visible without script)
+  const tabs = $$('.tabs [role="tab"]'), panels = $$('.panel[role="tabpanel"]');
+  function select(i) {
+    tabs.forEach((t, k) => { t.setAttribute("aria-selected", k === i ? "true" : "false"); t.tabIndex = k === i ? 0 : -1; });
+    panels.forEach((p, k) => { p.hidden = k !== i; });
   }
-
-  // ------------------------------------------------------------ app window pages
-  const navs = $$(".w-nav"), pages = $$(".w-page");
-  for (const b of navs) b.addEventListener("click", () => {
-    for (const n of navs) n.removeAttribute("aria-current");
-    b.setAttribute("aria-current", "page");
-    for (const p of pages) p.hidden = p.dataset.page !== b.dataset.go;
-  });
+  if (tabs.length) {
+    tabs.forEach((t, i) => {
+      t.addEventListener("click", () => select(i));
+      t.addEventListener("keydown", e => {
+        const n = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!n) return;
+        e.preventDefault();
+        const j = (i + n + tabs.length) % tabs.length;
+        select(j); tabs[j].focus();
+      });
+    });
+    select(0);
+  }
 
   // ------------------------------------------------------------ copy buttons
   for (const b of $$(".copy")) b.addEventListener("click", () => {
