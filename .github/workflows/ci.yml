@@ -31,6 +31,8 @@ jobs:
       - run: dotnet build Osmium.sln -c Release
       - run: dotnet test -c Release --project tests/Osmium.Core.Tests
       - run: dotnet test -c Release --project tests/Osmium.Desktop.Tests
+      - name: Product page matches tools/site (python3 tools/site/build.py regenerates it)
+        run: python3 tools/site/build.py --check
 
   windows:
     name: Windows ${{ matrix.arch }}
@@ -60,27 +62,33 @@ jobs:
         run: dotnet build Osmium.sln -c Release -p:Version=${{ env.VER }}
 
       # Same tests as Linux, on Windows: includes the CM golden hash, proving byte-identical output across OSes.
+      # (pwsh only fails a step on the last command's exit code, so each one is checked.)
       - name: Test
         if: matrix.arch == 'x64'
         run: |
-          dotnet test -c Release --project tests/Osmium.Core.Tests
-          dotnet test -c Release --project tests/Osmium.Desktop.Tests
+          dotnet test -c Release --project tests/Osmium.Core.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet test -c Release --project tests/Osmium.Desktop.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Publish, portable ZIP, installer
         shell: pwsh
         run: ./build/publish.ps1 -Arch ${{ matrix.arch }} -Version $env:VER
 
-      - name: UI self-test (renders every page, light and dark)
+      # Real work on a generated sample folder (Analyze, a max job, Lab, Tune), every page and dialog rendered to PNG
+      # with manifest.json / manifest-dark.json; the screenshots job below publishes them for the product page.
+      - name: UI self-test (real work, every page and dialog, light and dark)
         if: matrix.arch == 'x64'
         shell: pwsh
+        timeout-minutes: 15
         run: |
           $exe = "artifacts/publish/win-x64/Osmium.App.exe"
           foreach ($mode in @('', 'dark')) {
             $argv = @('--selftest-ui', 'artifacts/selftest') + @($mode | Where-Object { $_ })
             $p = Start-Process -FilePath $exe -ArgumentList $argv -Wait -PassThru
-            Get-Content artifacts/selftest/selftest.log
+            $log = if ($mode) { "artifacts/selftest/selftest-$mode.log" } else { 'artifacts/selftest/selftest.log' }
+            if (Test-Path $log) { Get-Content $log } else { Write-Host "::warning::$log was not written" }
             if ($p.ExitCode -ne 0) { throw "UI self-test failed ($mode): exit $($p.ExitCode)" }
           }
+          Get-ChildItem artifacts/selftest | Format-Table Name, Length
 
       - name: CLI smoke test (compress, test, extract, compare)
         if: matrix.arch == 'x64'
@@ -113,6 +121,75 @@ jobs:
         with:
           name: ui-selftest-screenshots
           path: artifacts/selftest/
+
+  # The arm64 leg above is cross-built on x64 (it makes the arm64 installer and ZIP); this job runs on ARM64 itself.
+  arm64:
+    name: Windows ARM64 (native)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Osmium.sln -c Release
+
+      - name: Test
+        run: |
+          dotnet test -c Release --project tests/Osmium.Core.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet test -c Release --project tests/Osmium.Desktop.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Publish (no installer)
+        shell: pwsh
+        run: ./build/publish.ps1 -Arch arm64 -SkipInstaller
+
+      - name: CLI smoke test (compress, test, extract, compare)
+        shell: pwsh
+        run: |
+          $cli = "artifacts/publish/win-arm64/osmium.exe"
+          New-Item -ItemType Directory -Force smoke/in/sub | Out-Null
+          Copy-Item README.md, docs/*.md smoke/in/
+          Copy-Item artifacts/publish/win-arm64/Osmium.Core.dll smoke/in/sub/
+          & $cli a smoke/test.osa smoke/in --profile max; if ($LASTEXITCODE) { throw 'compress failed' }
+          & $cli t smoke/test.osa; if ($LASTEXITCODE) { throw 'test failed' }
+          & $cli x smoke/test.osa smoke/out; if ($LASTEXITCODE) { throw 'extract failed' }
+          $a = Get-ChildItem -Recurse -File smoke/in | ForEach-Object { (Get-FileHash $_.FullName).Hash } | Sort-Object
+          $b = Get-ChildItem -Recurse -File smoke/out/in | ForEach-Object { (Get-FileHash $_.FullName).Hash } | Sort-Object
+          if (Compare-Object $a $b) { throw 'extracted files differ' }
+          & $cli info smoke/test.osa
+
+  # The x64 self-test's screenshots on the orphan branch "screenshots", for tools/site/fetch_screenshots.py.
+  # Pushes to main only (never pull requests); each run replaces the branch with one commit naming its source.
+  screenshots:
+    name: Publish UI screenshots
+    needs: windows
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency: screenshots
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ui-selftest-screenshots
+          path: screenshots
+      - name: Force-push to the screenshots branch
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cd screenshots
+          ls -l
+          test -f manifest.json || { echo "::error::the self-test artifact has no manifest.json"; exit 1; }
+          git init -q -b screenshots
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -q -m "UI self-test screenshots of $SHA" -m "Rendered by $RUN_URL"
+          git push -q --force "https://x-access-token:${TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/screenshots
 
   release:
     name: Release
