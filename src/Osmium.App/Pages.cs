@@ -59,7 +59,7 @@ internal sealed class CompressPage : UserControl, IPage
             Ui.Button("Remove", (_, _) => RemoveSelected()),
             Ui.Button("Clear", (_, _) => { _list.Items.Clear(); _patches.Clear(); UpdateOutputName(); }),
             new Label { Text = "Profile:", AutoSize = true, Padding = new Padding(12, 6, 0, 0) }, _profile,
-            Ui.Button("Analyze", (_, _) => Analyze()));
+            Ui.Button("Analyze", (_, _) => _ = AnalyzeAsync()));
 
         var bottom = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Bottom, Padding = new Padding(0, 8, 0, 0) };
         var outRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
@@ -73,7 +73,7 @@ internal sealed class CompressPage : UserControl, IPage
         bottom.Controls.Add(outRow);
         bottom.Controls.Add(_encrypt);
         bottom.Controls.Add(_estimate);
-        bottom.Controls.Add(Ui.Bar(Ui.Button("Compress", (_, _) => Start(), accent: true)));
+        bottom.Controls.Add(Ui.Bar(Ui.Button("Compress", (_, _) => StartCompression(), accent: true)));
 
         var body = new Panel();
         body.Controls.Add(_list);
@@ -228,10 +228,11 @@ internal sealed class CompressPage : UserControl, IPage
         _estimate.Text = profile.Description;
     }
 
-    private void Analyze()
+    /// <summary>The Analyze button: detects each file's type and shows the plan. Completes when the list shows it.</summary>
+    internal Task AnalyzeAsync()
     {
         var files = _list.Items.Cast<ListViewItem>().Select(i => (string)i.Tag!).Where(File.Exists).ToList();
-        Ui.RunSafe(this, async () =>
+        return Ui.RunSafeAsync(this, async () =>
         {
             var results = await Task.Run(() => files.AsParallel().Select(f => (f, a: Sniffer.Analyze(f, 16))).ToList());
             foreach (var (f, a) in results) _analysis[f] = a;
@@ -241,40 +242,48 @@ internal sealed class CompressPage : UserControl, IPage
         });
     }
 
-    private void Start()
+    /// <summary>Selects a profile in the Profile list (as if picked there).</summary>
+    internal void SelectProfile(string name)
+    {
+        if (_profile.Items.Contains(name)) _profile.SelectedItem = name;
+    }
+
+    /// <summary>The Compress button: queues the job and shows the Jobs page. Null when nothing was started.</summary>
+    internal Guid? StartCompression()
     {
         var paths = _list.Items.Cast<ListViewItem>().Select(i => (string)i.Tag!).ToList();
-        if (paths.Count == 0) { Ui.Info("Add some files or folders first."); return; }
+        if (paths.Count == 0) { Ui.Info("Add some files or folders first."); return null; }
         var output = _output.Text.Trim();
-        if (output.Length == 0) { Ui.Error("Choose where to save the archive."); return; }
+        if (output.Length == 0) { Ui.Error("Choose where to save the archive."); return null; }
         if (_app.Settings.General.Output == OutputLocation.Ask)
         {
             using var d = new SaveFileDialog { Filter = "Osmium archive (*.osa)|*.osa", FileName = Path.GetFileName(output), InitialDirectory = SafeDir(output) };
-            if (d.ShowDialog(this) != DialogResult.OK) return;
+            if (d.ShowDialog(this) != DialogResult.OK) return null;
             output = d.FileName;
         }
         if (!output.EndsWith(".osa", StringComparison.OrdinalIgnoreCase)) output += ".osa";
         bool overwrite = false;
         if (File.Exists(output))
         {
-            if (!Ui.Confirm($"{output} already exists. Replace it (only after the new archive is verified)?")) return;
+            if (!Ui.Confirm($"{output} already exists. Replace it (only after the new archive is verified)?")) return null;
             overwrite = true;
         }
         string? password = null;
         if (_encrypt.Checked)
         {
             password = PasswordDialog.Ask("Password for the new archive", confirm: true);
-            if (password is null) return;
+            if (password is null) return null;
         }
         var profile = _profile.SelectedItem?.ToString() ?? "balanced";
         if (profile is "insane" or "exhaustive" or "ultra" && _app.Settings.Codecs.AllowCm)
             AppLog.Info($"{profile}: context mixing may be chosen — extraction will be roughly as slow as compression.");
-        _app.Jobs.Enqueue(new JobRequest
+        var id = _app.Jobs.Enqueue(new JobRequest
         {
             Kind = JobKind.Compress, Inputs = paths, Output = output, Profile = profile, Password = password, Overwrite = overwrite,
             Patches = _patches.Select(kv => MakeRule(kv.Key, kv.Value, global: false)).ToList(),
         });
         _app.Main?.Navigate("Jobs");
+        return id;
     }
 }
 
@@ -308,6 +317,21 @@ internal sealed class JobsPage : UserControl, IPage
     }
 
     public void Activated() => RefreshList();
+
+    /// <summary>Selects a job's row, which shows its log below the list.</summary>
+    internal void SelectJob(Guid id)
+    {
+        RefreshList();
+        foreach (ListViewItem i in _list.Items)
+        {
+            bool match = (Guid)i.Tag! == id;
+            i.Selected = match;
+            if (!match) continue;
+            _list.FocusedItem = i;
+            i.EnsureVisible();
+        }
+        ShowLog();
+    }
 
     private void Each(Action<Guid> a) { foreach (ListViewItem i in _list.SelectedItems) a((Guid)i.Tag!); }
 
@@ -479,11 +503,11 @@ internal sealed class LabPage : UserControl, IPage
             Ui.Button("Choose file…", (_, _) =>
             {
                 using var d = new OpenFileDialog();
-                if (d.ShowDialog(this) == DialogResult.OK) { _path = d.FileName; _file.Text = d.FileName; }
+                if (d.ShowDialog(this) == DialogResult.OK) SetFile(d.FileName);
             }),
             new Label { Text = "Candidates from:", AutoSize = true, Padding = new Padding(8, 6, 0, 0) }, _profile,
             new Label { Text = "Sample (MiB):", AutoSize = true, Padding = new Padding(8, 6, 0, 0) }, _sample,
-            Ui.Button("Run", (_, _) => Run(), accent: true),
+            Ui.Button("Run", (_, _) => _ = RunAsync(), accent: true),
             Ui.Button("Stop", (_, _) => _cts?.Cancel()),
             Ui.Button("Save best as rule", (_, _) => SaveBest()));
         Controls.Add(Ui.Page("Lab", "Benchmark: compress and decompress a sample with each candidate, verify the round trip, and compare size against speed.", _list, tools, _file));
@@ -491,9 +515,23 @@ internal sealed class LabPage : UserControl, IPage
 
     public void Activated() { }
 
-    private void Run()
+    /// <summary>The file to benchmark (as chosen with "Choose file…").</summary>
+    internal void SetFile(string path)
     {
-        if (_path is null) { Ui.Info("Choose a file first."); return; }
+        _path = path;
+        _file.Text = path;
+    }
+
+    /// <summary>Selects the profile whose candidates are benchmarked.</summary>
+    internal void SelectProfile(string name)
+    {
+        if (_profile.Items.Contains(name)) _profile.SelectedItem = name;
+    }
+
+    /// <summary>The Run button. Completes when every candidate has been benchmarked (or the run stopped).</summary>
+    internal Task RunAsync()
+    {
+        if (_path is null) { Ui.Info("Choose a file first."); return Task.CompletedTask; }
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
@@ -501,7 +539,7 @@ internal sealed class LabPage : UserControl, IPage
         var profile = Profile.ByName(_profile.SelectedItem!.ToString()!);
         long sampleLen = (long)_sample.Value << 20;
         _list.Items.Clear();
-        Ui.RunSafe(this, async () =>
+        return Ui.RunSafeAsync(this, async () =>
         {
             var (an, data) = await Task.Run(() =>
             {
@@ -684,7 +722,8 @@ internal sealed class RulesPage : UserControl, IPage
         RefreshList();
     }
 
-    private void AddExample()
+    /// <summary>The "Add example" button: appends the example rule to the editor (not saved).</summary>
+    internal void AddExample()
     {
         var rs = Parse() ?? new RuleSet();
         rs.Rules.Add(new Rule

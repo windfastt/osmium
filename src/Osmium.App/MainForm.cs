@@ -60,6 +60,9 @@ internal sealed class MainForm : Form
     public CompressPage CompressPage => (CompressPage)GetPage("Compress");
     public ArchivesPage ArchivesPage => (ArchivesPage)GetPage("Archives");
 
+    /// <summary>A page by its navigation name, created if needed.</summary>
+    internal T Page<T>(string name) where T : Control => (T)GetPage(name);
+
     private Control GetPage(string name)
     {
         if (_pages.TryGetValue(name, out var p)) return p;

@@ -356,17 +356,20 @@ internal sealed class TrayApp : ApplicationContext
 
     public void ShowMain(string? page = null)
     {
-        if (_main is null || _main.IsDisposed)
-        {
-            _main = new MainForm(this);
-        }
-        if (!_main.Visible) _main.Show();
-        if (_main.WindowState == FormWindowState.Minimized) _main.WindowState = FormWindowState.Normal;
-        _main.Activate();
-        if (page is not null) _main.Navigate(page);
+        var main = EnsureMain();
+        if (!main.Visible) main.Show();
+        if (main.WindowState == FormWindowState.Minimized) main.WindowState = FormWindowState.Normal;
+        main.Activate();
+        if (page is not null) main.Navigate(page);
     }
 
+    /// <summary>The main window, created if needed but not shown (the UI self-test hosts it in a window of its own).</summary>
+    internal MainForm EnsureMain() => _main is { IsDisposed: false } ? _main : _main = new MainForm(this);
+
     public MainForm? Main => _main;
+
+    /// <summary>The notification-area menu; it rebuilds its items each time it opens.</summary>
+    internal ContextMenuStrip TrayMenu => _menu;
 
     private void BuildMenu()
     {

@@ -93,12 +93,36 @@ internal static class Ui
 
     public static string Bytes(long b) => Osmium.Desktop.Tray.TrayText.Bytes(b);
 
-    public static void Info(string text, string title = "Osmium") => MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-    public static void Error(string text, string title = "Osmium") => MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
-    public static bool Confirm(string text, string title = "Osmium") => MessageBox.Show(text, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+    /// <summary>
+    /// Set only by the UI self-test, which runs unattended in CI: a message box would wait for a click that never
+    /// comes, so its text is reported here instead (and a question is answered No).
+    /// </summary>
+    internal static Action<string>? Unattended { get; set; }
+
+    public static void Info(string text, string title = "Osmium")
+    {
+        if (Unattended is { } report) { report($"{title}: {text}"); return; }
+        MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    public static void Error(string text, string title = "Osmium")
+    {
+        if (Unattended is { } report) { report($"{title}: {text}"); return; }
+        MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    public static bool Confirm(string text, string title = "Osmium")
+    {
+        if (Unattended is { } report) { report($"{title}: {text}"); return false; }
+        return MessageBox.Show(text, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+    }
 
     /// <summary>Runs work off the UI thread and marshals the result back; exceptions are shown, never crash the tray.</summary>
-    public static async void RunSafe(Control owner, Func<Task> work)
+    public static async void RunSafe(Control owner, Func<Task> work) => await RunSafeAsync(owner, work);
+
+    /// <summary>As <see cref="RunSafe"/>, for callers that wait: the task completes (never faults) when the work has
+    /// finished, its error shown.</summary>
+    public static async Task RunSafeAsync(Control owner, Func<Task> work)
     {
         try { await work(); }
         catch (OperationCanceledException) { }
