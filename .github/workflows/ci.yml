@@ -137,7 +137,15 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      # PowerShell on the ARM64 runner image occasionally crashes at startup ("Internal CLR error" in its taskbar
+      # jump list) while setup-dotnet runs its installer; one retry gets past it.
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
