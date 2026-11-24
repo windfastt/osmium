@@ -9,3 +9,4 @@ TestResults/
 
 # Claude Code session data (agent worktrees)
 .claude/
+__pycache__/

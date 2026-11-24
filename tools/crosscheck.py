@@ -7,6 +7,7 @@ Results are written as JSON after every run (so partial results survive) and as 
 
 Usage:
   python3 tools/crosscheck.py --osmium "dotnet path/to/osmium.dll" --json results.json --md BENCHMARKS.part.md DIR [DIR...]
+  python3 tools/crosscheck.py ... --profiles ultra --only zpaq,osmium-ultra DIR    # just these tool families
 
 Tools are skipped (and reported) when not installed. Timings are wall-clock on whatever machine runs the script;
 every tool runs with its own default threading except xz/zstd, which are pinned to one thread because their
@@ -101,10 +102,20 @@ def main():
     ap.add_argument("--osmium", required=True, help='command prefix, e.g. "dotnet src/Osmium.Cli/bin/Release/net10.0/osmium.dll"')
     ap.add_argument("--profiles", default="fast,balanced,max,ultra,insane")
     ap.add_argument("--insane-max-mib", type=int, default=64, help="skip Osmium insane on folders larger than this")
+    ap.add_argument("--only", help="comma-separated tool families to run, e.g. zpaq,osmium-ultra (default: all)")
     ap.add_argument("--json", required=True)
     ap.add_argument("--md", required=True)
     ap.add_argument("dirs", nargs="+")
     a = ap.parse_args()
+    # Tools run from each folder's parent directory, so make paths in the Osmium command absolute.
+    a.osmium = shlex.join(os.path.abspath(t) if os.path.exists(t) else t for t in shlex.split(a.osmium))
+    selected = tools(a.osmium, a.profiles.split(","))
+    if a.only:
+        wanted = set(a.only.split(","))
+        unknown = wanted - {t[1] for t in selected}
+        if unknown:
+            ap.error(f"unknown --only families {sorted(unknown)}; choose from {[t[1] for t in selected]}")
+        selected = [t for t in selected if t[1] in wanted]
 
     results = json.load(open(a.json)) if os.path.exists(a.json) else []
     done = {(r["dataset"], r["tool"]) for r in results if r.get("ok")}
@@ -119,7 +130,7 @@ def main():
             subprocess.run(["tar", "-cf", tar, "-C", parent, name], check=True)
             tar_sha = file_sha(tar)
             original = tree_digest(d)
-            for label, fam, need, kind, ext, comp, decomp in tools(a.osmium, a.profiles.split(",")):
+            for label, fam, need, kind, ext, comp, decomp in selected:
                 if (name, label) in done:
                     continue
                 rec = {"dataset": name, "dataset_bytes": size, "files": files, "tool": label, "family": fam}
