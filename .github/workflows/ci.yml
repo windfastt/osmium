@@ -11,6 +11,11 @@ on:
         description: 'Attach a build of this commit to an existing release, e.g. v0.1.1 (leave empty for a normal CI run)'
         required: false
         default: ''
+      screenshots:
+        description: 'Publish the UI self-test screenshots to the "screenshots" branch (for tools/site/fetch_screenshots.py)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +38,8 @@ jobs:
       - run: dotnet test -c Release --project tests/Osmium.Desktop.Tests
       - name: Product page matches tools/site (python3 tools/site/build.py regenerates it)
         run: python3 tools/site/build.py --check
+      - name: Settings reference matches the code (tools/settingsdoc regenerates docs/SETTINGS.md)
+        run: dotnet run --project tools/settingsdoc -c Release -- --check
 
   windows:
     name: Windows ${{ matrix.arch }}
@@ -160,11 +167,12 @@ jobs:
           & $cli info smoke/test.osa
 
   # The x64 self-test's screenshots on the orphan branch "screenshots", for tools/site/fetch_screenshots.py.
-  # Pushes to main only (never pull requests); each run replaces the branch with one commit naming its source.
+  # Only when requested by hand on main (never on pull requests or ordinary pushes); each run replaces the branch with
+  # one commit naming its source. Delete the branch after importing the screenshots.
   screenshots:
     name: Publish UI screenshots
     needs: windows
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && inputs.screenshots && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

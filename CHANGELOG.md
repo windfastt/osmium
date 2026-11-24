@@ -64,6 +64,12 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   (`tools/bench`) are in the repository. ROADMAP lists what 0.2.0 is building.
 - **Tools:** `tools/crosscheck.py --only` runs selected tool families and accepts a relative path to Osmium;
   `tools/site/fetch_screenshots.py` imports the screenshots CI renders with the real app.
+- **CI:** tests also run natively on Windows ARM64 (with a CLI round trip on the ARM64 build); a failing test suite
+  on Windows could pass unnoticed when another suite ran after it, now every suite's result counts; the UI self-test
+  does real work on a generated sample folder (analysis, a compression job, the Lab, the Tune dialog) and renders
+  every page and dialog at a fixed size in light and dark; the product page and the settings reference are checked
+  against their generators.
+- **Rules files** keep `&`, `<`, `+` and non-ASCII characters readable instead of writing `&`-style escapes.
 
 ## [0.1.1] — 2026-11-24 — patch release
 

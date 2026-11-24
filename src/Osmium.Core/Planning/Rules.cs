@@ -175,6 +175,9 @@ public sealed class RuleSet
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        // rules.json is a file people edit: keep '&', '<', '+', quotes in globs and non-ASCII names readable instead of
+        // writing &-style escapes (it is never embedded in HTML).
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
     public static RuleSet Load(string path, int layer = LayerGlobal)

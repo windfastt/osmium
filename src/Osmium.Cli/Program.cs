@@ -115,7 +115,7 @@ namespace Osmium.Cli
               tune <file> [--profile insane] [--export-rule rules.json]   Search the best pipeline for a file
               methods | profiles     List codecs/filters with parameters, or profiles
               rules check <rules.json>
-              worker [--port 46510] [--key OSM1-…] [--slots N] [--mem 4G]   Lend this machine to a cluster
+              worker --key OSM1-… [--port 46510] [--slots N] [--mem 4G]   Lend this machine to a cluster
               keygen                 Create a cluster pairing key
               license                Show the license and third-party notices
               version                Show the version
