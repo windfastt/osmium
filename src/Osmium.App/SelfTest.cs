@@ -30,8 +30,11 @@ internal static partial class SelfTest
     [LibraryImport("kernel32.dll", EntryPoint = "GetLongPathNameW", StringMarshalling = StringMarshalling.Utf16)]
     private static unsafe partial uint GetLongPathName(string shortPath, char* longPath, uint size);
 
-    /// <summary>The main window's client area (navigation rail and page), whatever the size of the runner's desktop.</summary>
-    private static readonly Size MainClient = new(1180, 760);
+    /// <summary>
+    /// The main window's client area (navigation rail and page). Windows limits a window to the desktop plus its frame
+    /// (1044 × 788 on a 1024 × 768 test machine), so a wider client area would be laid out wider than it is captured.
+    /// </summary>
+    private static readonly Size MainClient = new(1040, 760);
     // Measured on a 4-core Linux machine: the job ~2 s, the Lab run ~10 s (it benchmarks CM candidates too).
     private static readonly TimeSpan JobTimeout = TimeSpan.FromSeconds(120), LabTimeout = TimeSpan.FromSeconds(120),
         WorkTimeout = TimeSpan.FromSeconds(60);

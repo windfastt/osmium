@@ -58,10 +58,12 @@ jobs:
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          SCREENSHOTS: ${{ inputs.screenshots }}
         run: |
           $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Select-Object -First 1
           if ($env:RELEASE_TAG -match '^v\d') { $v = $env:RELEASE_TAG.Substring(1) }
           elseif ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) }
+          elseif ($env:SCREENSHOTS -eq 'true') { $v = $base }   # screenshots for the product page show the plain version
           else { $v = "$base-ci.$env:GITHUB_RUN_NUMBER" }
           "VER=$v" >> $env:GITHUB_ENV
 
