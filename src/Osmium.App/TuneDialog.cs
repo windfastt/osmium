@@ -15,7 +15,7 @@ internal sealed class TuneDialog : Form
 {
     private readonly TrayApp _app;
     private readonly string _path;
-    private readonly TextBox _pipeline = new() { Width = 620 };
+    private readonly EditBox _pipeline = new() { Width = 620 };
     private readonly Label _valid = Ui.Text("", muted: true);
     private readonly CheckedListBox _filters = new() { Height = 130, Width = 220, CheckOnClick = true, IntegralHeight = false };
     private readonly ComboBox _codec;
@@ -77,6 +77,8 @@ internal sealed class TuneDialog : Form
         var ok = Ui.Button("Use this pipeline", (_, _) => Accept(), accent: true);
         var cancel = Ui.Button("Cancel", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
         root.Controls.Add(Ui.Bar(ok, cancel));
+        AcceptButton = ok;     // Enter
+        CancelButton = cancel; // Esc
         Controls.Add(root);
         Theme.Apply(this);
 
@@ -189,6 +191,7 @@ internal sealed class TuneDialog : Form
 
     private void Accept()
     {
+        Validate(); // commits a number still being typed (Enter can arrive before the box loses focus)
         try
         {
             Pipeline = PipelineSpec.Parse(_pipeline.Text, MethodRegistry.Default).ToString();

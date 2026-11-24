@@ -90,7 +90,13 @@ internal sealed class MainForm : Form
         foreach (var (n, b) in _buttons) b.Selected = n == name;
         CurrentPage = name;
         if (page is IPage ip) ip.Activated();
+        // Keyboard users continue in the page (its first control), not on the navigation button.
+        if (Visible && !page.ContainsFocus) page.SelectNextControl(null, forward: true, tabStopOnly: true, nested: true, wrap: false);
     }
+
+    /// <summary>Names of the pages that hold unsaved edits, in navigation order.</summary>
+    public IReadOnlyList<string> PagesWithUnsavedChanges() =>
+        Nav.Select(n => n.Name).Where(n => _pages.TryGetValue(n, out var p) && p is IPage ip && ip.HasUnsavedChanges).ToList();
 
     private void UpdateStatus()
     {
@@ -137,13 +143,18 @@ internal sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Ctrl+1..8 with the top-row digits or the numeric keypad
         int idx = keyData switch
         {
-            Keys.Control | Keys.D1 => 0, Keys.Control | Keys.D2 => 1, Keys.Control | Keys.D3 => 2, Keys.Control | Keys.D4 => 3,
-            Keys.Control | Keys.D5 => 4, Keys.Control | Keys.D6 => 5, Keys.Control | Keys.D7 => 6, Keys.Control | Keys.D8 => 7, _ => -1,
+            Keys.Control | Keys.D1 or Keys.Control | Keys.NumPad1 => 0, Keys.Control | Keys.D2 or Keys.Control | Keys.NumPad2 => 1,
+            Keys.Control | Keys.D3 or Keys.Control | Keys.NumPad3 => 2, Keys.Control | Keys.D4 or Keys.Control | Keys.NumPad4 => 3,
+            Keys.Control | Keys.D5 or Keys.Control | Keys.NumPad5 => 4, Keys.Control | Keys.D6 or Keys.Control | Keys.NumPad6 => 5,
+            Keys.Control | Keys.D7 or Keys.Control | Keys.NumPad7 => 6, Keys.Control | Keys.D8 or Keys.Control | Keys.NumPad8 => 7,
+            _ => -1,
         };
         if (idx >= 0) { Navigate(Nav[idx].Name); return true; }
         if (keyData == (Keys.Control | Keys.Oemcomma)) { Navigate("Settings"); return true; }
+        // Exit asks first when jobs run or a page holds unsaved edits (see TrayApp.ExitApp).
         if (keyData == (Keys.Control | Keys.Q)) { _app.ExitApp(confirm: true); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
     }
@@ -205,7 +216,7 @@ internal sealed class SettingsRenderer : Panel
             if (d.Group is not null && d.Group != group)
             {
                 group = d.Group;
-                _flow.Controls.Add(new Label { Text = group, Font = Theme.Bold, AutoSize = true, Margin = new Padding(0, 12, 0, 4) });
+                _flow.Controls.Add(new Label { Text = group, Font = Theme.Bold, AutoSize = true, Margin = new Padding(0, 12, 0, 4), UseMnemonic = false });
             }
             var (row, editor) = BuildRow(d);
             _rows.Add((d, row, editor));
@@ -221,14 +232,14 @@ internal sealed class SettingsRenderer : Panel
     {
         var row = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = Math.Max(300, ClientSize.Width - 30), Margin = new Padding(0, 4, 0, 8) };
         var title = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
-        title.Controls.Add(new Label { Text = d.Label, AutoSize = true, Font = Theme.Bold, Margin = new Padding(0, 0, 6, 0) });
+        title.Controls.Add(new Label { Text = d.Label, AutoSize = true, Font = Theme.Bold, Margin = new Padding(0, 0, 6, 0), UseMnemonic = false });
         if (d.Experimental) title.Controls.Add(new Label { Text = "EXPERIMENTAL", AutoSize = true, Font = Theme.Small, Tag = "experimental" });
         if (d.Dangerous) title.Controls.Add(new Label { Text = "CAUTION", AutoSize = true, Font = Theme.Small, Tag = "experimental" });
         if (d.Advanced) title.Controls.Add(new Label { Text = "advanced", AutoSize = true, Font = Theme.Small, Tag = "muted" });
         if (d.RequiresRestart) title.Controls.Add(new Label { Text = "restart required", AutoSize = true, Font = Theme.Small, Tag = "muted" });
         row.Controls.Add(title);
         if (!string.IsNullOrEmpty(d.Description))
-            row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3) });
+            row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3), UseMnemonic = false });
         var error = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(760, 0), Tag = "danger", Margin = new Padding(0, 3, 0, 0), UseMnemonic = false };
         _errorLabels[d] = error;
         var editor = BuildEditor(d);
@@ -287,11 +298,11 @@ internal sealed class SettingsRenderer : Panel
         }
         if (t == typeof(List<string>))
         {
-            var tb = new TextBox { Multiline = true, Width = 420, Height = 80, ScrollBars = ScrollBars.Vertical, Text = string.Join(Environment.NewLine, value as List<string> ?? []) };
+            var tb = new EditBox { Multiline = true, AcceptsReturn = true, Width = 420, Height = 80, ScrollBars = ScrollBars.Vertical, Text = string.Join(Environment.NewLine, value as List<string> ?? []) };
             tb.TextChanged += (_, _) => Commit(d, tb.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList());
             return tb;
         }
-        var text = new TextBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
+        var text = new EditBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
         text.TextChanged += (_, _) => Commit(d, text.Text);
         if (d.Editor == SettingEditor.ByteSize)
         {

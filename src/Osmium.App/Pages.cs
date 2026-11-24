@@ -19,7 +19,7 @@ internal sealed class CompressPage : UserControl, IPage
     private readonly TrayApp _app;
     private readonly FastList _list = Ui.List(("Name", 240), ("Folder", 220), ("Size", 90), ("Detected type", 170), ("Plan", 320));
     private readonly ComboBox _profile;
-    private readonly TextBox _output = new() { Width = 520 };
+    private readonly EditBox _output = new() { Width = 520 };
     private readonly CheckBox _encrypt = new() { Text = "Encrypt (AES-256, names hidden)", AutoSize = true };
     private readonly Label _estimate = Ui.Text("", muted: true);
     /// <summary>Per-input manual patches: full path → pipeline text, "store", or "exclude".</summary>
@@ -39,7 +39,7 @@ internal sealed class CompressPage : UserControl, IPage
         _list.AllowDrop = true;
         _list.DragEnter += (_, e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
         _list.DragDrop += (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] files) AddPaths(files); };
-        _list.KeyDown += (_, e) => { if (e.KeyCode == Keys.Delete) RemoveSelected(); };
+        _list.KeyDown += (_, e) => { if (e.KeyData == Keys.Delete) RemoveSelected(); };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Tune…", null, (_, _) => Tune(deep: false));
@@ -51,7 +51,7 @@ internal sealed class CompressPage : UserControl, IPage
         menu.Items.Add("Save patch as global rule", null, (_, _) => SavePatchAsRule());
         menu.Items.Add("Open containing folder", null, (_, _) => { if (Selected().FirstOrDefault() is { } p) Shell.Reveal(p); });
         _list.ContextMenuStrip = menu;
-        _list.DoubleClick += (_, _) => Tune(deep: false);
+        _list.DefaultAction = () => Tune(deep: false); // Enter or double-click
 
         var tools = Ui.Bar(
             Ui.Button("Add files…", (_, _) => BrowseFiles()),
@@ -83,6 +83,28 @@ internal sealed class CompressPage : UserControl, IPage
     }
 
     public void Activated() { }
+
+    /// <summary>Ctrl+V adds files and folders copied in Explorer; in the archive box it pastes text as usual.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.V) && ActiveControl is not TextBoxBase && PasteFiles()) return true;
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Adds the files and folders on the clipboard; false when it holds none.</summary>
+    internal bool PasteFiles()
+    {
+        List<string> paths;
+        try
+        {
+            if (!Clipboard.ContainsFileDropList()) return false;
+            paths = Clipboard.GetFileDropList().Cast<string>().Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
+        }
+        catch (System.Runtime.InteropServices.ExternalException) { return false; } // another program holds the clipboard
+        if (paths.Count == 0) return false;
+        AddPaths(paths);
+        return true;
+    }
 
     private static string SafeDir(string p) { try { return Path.GetDirectoryName(p) ?? ""; } catch (ArgumentException) { return ""; } }
 
@@ -536,8 +558,8 @@ internal sealed class RulesPage : UserControl, IPage
 {
     private readonly TrayApp _app;
     private readonly FastList _list = Ui.List(("Id", 160), ("On", 40), ("Priority", 60), ("Match", 300), ("Action", 360));
-    private readonly TextBox _json = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true };
-    private readonly TextBox _testPath = new() { Width = 360, PlaceholderText = "e.g. photos/raw/img001.bmp" };
+    private readonly EditBox _json = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true };
+    private readonly EditBox _testPath = new() { Width = 360, PlaceholderText = "e.g. photos/raw/img001.bmp" };
     private readonly Label _testResult = Ui.Text("", muted: true, maxWidth: 900);
     /// <summary>The editor holds changes that are not in rules.json (typed, or added with "Add example").</summary>
     private bool _dirty;
@@ -548,6 +570,7 @@ internal sealed class RulesPage : UserControl, IPage
         _app = app;
         _json.Font = Theme.Mono;
         _json.TextChanged += (_, _) => { if (!_loading) _dirty = true; };
+        _testPath.EnterAction = TestPath;
         var tools = Ui.Bar(
             Ui.Button("Reload", (_, _) =>
             {
@@ -691,7 +714,7 @@ internal sealed class RulesPage : UserControl, IPage
 internal sealed class ClusterPage : UserControl, IPage
 {
     private readonly TrayApp _app;
-    private readonly TextBox _key = new() { UseSystemPasswordChar = true };
+    private readonly EditBox _key = new() { UseSystemPasswordChar = true };
     private readonly Button _reveal;
     private readonly FastList _list = Ui.List(("Name", 180), ("Address", 200), ("Slots", 60), ("Status", 400));
     private readonly Label _local = Ui.Text("", muted: true, maxWidth: 900);
@@ -709,6 +732,7 @@ internal sealed class ClusterPage : UserControl, IPage
         _key.Font = Theme.Mono;
         _key.Width = _key.LogicalToDeviceUnits(560);
         _key.TextChanged += (_, _) => { if (!_loadingKey) _keyEdited = true; };
+        _key.EnterAction = SaveKey;
         LoadKey();
         _reveal = Ui.RevealButton(_key);
         var keyRow = Ui.Bar(new Label { Text = "Cluster key:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) }, _key,
@@ -858,7 +882,7 @@ internal sealed class SettingsPage : UserControl, IPage
 {
     private readonly TrayApp _app;
     private readonly ListBox _categories = new() { Dock = DockStyle.Left, Width = 190, IntegralHeight = false, BorderStyle = BorderStyle.None };
-    private readonly TextBox _search = new() { Width = 260, PlaceholderText = "Search settings" };
+    private readonly EditBox _search = new() { Width = 260, PlaceholderText = "Search settings" };
     private readonly SettingsRenderer _renderer = new() { Dock = DockStyle.Fill };
     private readonly Panel _watchPanel = new() { Dock = DockStyle.Bottom, Height = 0 };
     /// <summary>Copy of the settings being edited. Only the entries in <see cref="_edited"/> are saved.</summary>
@@ -879,6 +903,7 @@ internal sealed class SettingsPage : UserControl, IPage
         _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; RenderNow(); };
         _searchDelay.Tick += (_, _) => RenderNow();
         _search.TextChanged += (_, _) => { _searchDelay.Stop(); _searchDelay.Start(); };
+        _search.EnterAction = RenderNow;
         Disposed += (_, _) => _searchDelay.Dispose();
         _renderer.Changed += d => MarkEdited(d.Key);
         var tools = Ui.Bar(_search,
@@ -1062,10 +1087,7 @@ internal sealed class LogPage : UserControl, IPage
         _list.Font = Theme.Mono;
         var tools = Ui.Bar(Ui.Button("Open log folder", (_, _) => AppLog.OpenFolder()),
             Ui.Button("Copy all", (_, _) =>
-            {
-                var text = string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}"));
-                if (text.Length > 0) Clipboard.SetText(text); // SetText throws on an empty string
-            }));
+                Ui.CopyToClipboard(string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}")))));
         Controls.Add(Ui.Page("Log", "Application events, shell invocations, worker activity and errors.", _list, tools));
         _timer.Tick += (_, _) => { if (Visible) Fill(); };
         _timer.Start();

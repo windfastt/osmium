@@ -9,6 +9,24 @@ public static class TrayText
 
     public static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 
+    /// <summary>Text for a menu item: '&amp;' would otherwise underline the next letter instead of showing (file names).</summary>
+    public static string MenuText(string s) => s.Replace("&", "&&", StringComparison.Ordinal);
+
+    /// <summary>The question asked before Osmium exits, or null when nothing would be lost.</summary>
+    /// <param name="jobsRunning">Jobs are queued or running (and "Confirm exit while jobs run" is on).</param>
+    /// <param name="unsavedPages">Pages with unsaved edits, e.g. "Settings", "Rules".</param>
+    public static string? ExitQuestion(bool jobsRunning, IReadOnlyList<string> unsavedPages)
+    {
+        var lines = new List<string>();
+        if (jobsRunning) lines.Add("Jobs are still running. Exiting cancels them.");
+        if (unsavedPages.Count > 0)
+        {
+            string names = unsavedPages.Count == 1 ? unsavedPages[0] : string.Join(", ", unsavedPages.Take(unsavedPages.Count - 1)) + " and " + unsavedPages[^1];
+            lines.Add($"Unsaved changes on the {names} {(unsavedPages.Count == 1 ? "page" : "pages")} will be lost.");
+        }
+        return lines.Count == 0 ? null : string.Join("\n", lines) + "\n\nExit Osmium?";
+    }
+
     public static string Bytes(long b) => b switch
     {
         < 1024 => $"{b} B",

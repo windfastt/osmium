@@ -372,7 +372,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         _menu.Items.Clear();
         var jobs = Jobs.Snapshot();
-        var header = new ToolStripMenuItem(TrayText.Tooltip(jobs)) { Enabled = false };
+        // Job names are file names: '&' must be doubled in menu text (it would underline the next letter).
+        var header = new ToolStripMenuItem(TrayText.MenuText(TrayText.Tooltip(jobs))) { Enabled = false };
         _menu.Items.Add(header);
         _menu.Items.Add(new ToolStripSeparator());
         var open = new ToolStripMenuItem("Open Osmium", null, (_, _) => ShowMain()) { Font = _boldMenuFont };
@@ -401,7 +402,7 @@ internal sealed class TrayApp : ApplicationContext
             var text = j.State == JobState.Completed && j.Kind == JobKind.Compress
                 ? $"{j.Name} — {TrayText.Bytes(j.BytesIn)} → {TrayText.Bytes(j.BytesOut)}"
                 : $"{j.Name} — {j.State}";
-            var it = new ToolStripMenuItem(TrayText.Truncate(text, 70));
+            var it = new ToolStripMenuItem(TrayText.MenuText(TrayText.Truncate(text, 70)));
             if (j.Output is { Length: > 0 } output) it.Click += (_, _) => Shell.Reveal(output);
             recent.DropDownItems.Add(it);
         }
@@ -523,12 +524,14 @@ internal sealed class TrayApp : ApplicationContext
         t.Start();
     }
 
+    /// <param name="confirm">Ask first when jobs are running (if "Confirm exit while jobs run" is on) or a page of
+    /// the main window holds unsaved edits.</param>
     public void ExitApp(bool confirm)
     {
         if (_exiting) return;
-        if (confirm && Settings.General.ConfirmExit && Jobs.AnyActive)
+        if (confirm && TrayText.ExitQuestion(Settings.General.ConfirmExit && Jobs.AnyActive, _main?.PagesWithUnsavedChanges() ?? []) is { } question)
         {
-            var r = MessageBox.Show("Jobs are still running. Exit and cancel them?", "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            var r = MessageBox.Show(question, "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (r != DialogResult.Yes) return;
         }
         _exiting = true;

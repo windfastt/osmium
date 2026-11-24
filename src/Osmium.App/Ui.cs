@@ -1,4 +1,5 @@
 using System.Globalization;
+using Osmium.Desktop;
 using Osmium.Desktop.Settings;
 
 namespace Osmium.App;
@@ -6,11 +7,13 @@ namespace Osmium.App;
 /// <summary>Small factory helpers so code-built layouts stay readable and DPI-safe (no absolute pixel layouts).</summary>
 internal static class Ui
 {
-    public static Label Heading(string text) => new() { Text = text, Font = Theme.Heading, AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
+    // Headings and text show '&' as is ("Rules & patches", file names): with mnemonics on, it would underline the
+    // next letter instead.
+    public static Label Heading(string text) => new() { Text = text, Font = Theme.Heading, AutoSize = true, Margin = new Padding(0, 0, 0, 6), UseMnemonic = false };
 
     public static Label Text(string text, bool muted = false, int maxWidth = 0) => new()
     {
-        Text = text, AutoSize = true, Tag = muted ? "muted" : null,
+        Text = text, AutoSize = true, Tag = muted ? "muted" : null, UseMnemonic = false,
         MaximumSize = maxWidth > 0 ? new Size(maxWidth, 0) : Size.Empty,
         Margin = new Padding(0, 2, 0, 2),
     };
@@ -107,10 +110,82 @@ internal static class Ui
     }
 }
 
-/// <summary>Flicker-free details ListView.</summary>
+/// <summary>
+/// TextBox with the keyboard behaviour Osmium wants on top of WinForms (which already makes Ctrl+Backspace delete the
+/// previous word): Enter in a single-line box runs <see cref="EnterAction"/> instead of the edit control's error
+/// beep, and Ctrl+Backspace in a masked box deletes everything before the caret, so it does not reveal where the
+/// words of a password are.
+/// </summary>
+internal sealed class EditBox : TextBox
+{
+    /// <summary>What Enter does in a single-line box (null: nothing, but no beep). Multi-line boxes keep Enter.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? EnterAction { get; set; }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (UseSystemPasswordChar && !ReadOnly && keyData is (Keys.Control | Keys.Back) or (Keys.Control | Keys.Shift | Keys.Back))
+        {
+            if (SelectionLength == 0) Select(0, SelectionStart);
+            SelectedText = "";
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Handled || Multiline || e.KeyData != Keys.Enter) return;
+        e.SuppressKeyPress = true; // no WM_CHAR, so no beep
+        EnterAction?.Invoke();
+    }
+}
+
+/// <summary>
+/// Flicker-free details ListView with list shortcuts: Ctrl+A selects every row, Ctrl+C copies the selected rows
+/// (tab-separated, so they paste into a spreadsheet), Enter and double-click run <see cref="DefaultAction"/>.
+/// </summary>
 internal sealed class FastList : ListView
 {
     private int _scaledFor = 96;
+
+    /// <summary>The page's default action for the selected rows (Enter, double-click), if it has one.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? DefaultAction { get; set; }
+
+    /// <summary>The selected rows, one per line, columns separated by tabs.</summary>
+    public string SelectionAsText() => string.Join(Environment.NewLine, SelectedItems.Cast<ListViewItem>()
+        .Select(i => string.Join("\t", i.SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => s.Text))));
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Handled) return;
+        switch (e.KeyData)
+        {
+            case Keys.Control | Keys.A when MultiSelect:
+                BeginUpdate();
+                foreach (ListViewItem i in Items) i.Selected = true;
+                EndUpdate();
+                e.SuppressKeyPress = true;
+                break;
+            case Keys.Control | Keys.C:
+                Ui.CopyToClipboard(SelectionAsText());
+                e.SuppressKeyPress = true;
+                break;
+            case Keys.Enter when DefaultAction is not null && SelectedItems.Count > 0:
+                DefaultAction();
+                e.SuppressKeyPress = true;
+                break;
+        }
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Left && DefaultAction is not null && HitTest(e.Location).Item is not null) DefaultAction();
+    }
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -189,13 +264,13 @@ internal static class PasswordDialog
         };
         var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
         t.Controls.Add(Ui.Text(prompt));
-        var p1 = new TextBox { UseSystemPasswordChar = true, Width = 280 };
+        var p1 = new EditBox { UseSystemPasswordChar = true, Width = 280 };
         t.Controls.Add(p1);
         TextBox? p2 = null;
         if (confirm)
         {
             t.Controls.Add(Ui.Text("Confirm password"));
-            p2 = new TextBox { UseSystemPasswordChar = true, Width = 280 };
+            p2 = new EditBox { UseSystemPasswordChar = true, Width = 280 };
             t.Controls.Add(p2);
         }
         var ok = Ui.Button("OK", accent: true);
@@ -210,9 +285,11 @@ internal static class PasswordDialog
         while (true)
         {
             if (f.ShowDialog() != DialogResult.OK) return null;
-            if (p1.Text.Length == 0) { Ui.Error("The password cannot be empty."); continue; }
-            if (p2 is not null && p2.Text != p1.Text) { Ui.Error("The passwords do not match."); continue; }
-            return p1.Text;
+            // Control characters (a pasted tab or line break) are invisible here and could never be typed again.
+            string pw = TextInput.StripControlChars(p1.Text);
+            if (pw.Length == 0) { Ui.Error("The password cannot be empty."); continue; }
+            if (p2 is not null && TextInput.StripControlChars(p2.Text) != pw) { Ui.Error("The passwords do not match."); continue; }
+            return pw;
         }
     }
 }
