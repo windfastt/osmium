@@ -112,9 +112,14 @@ def main():
         out.append({"file": f"{sid}.webp", "width": w, "height": h, "theme": theme, "caption": caption})
         print(f"{sid}.webp  {w}x{h}  {len(files[name]) // 1024} KiB png -> {len(buf.getvalue()) // 1024} KiB webp")
 
-    keep = {e["file"] for e in out} | {"manifest.json"}
-    for p in out_dir.iterdir():
-        if p.is_file() and p.suffix in (".webp", ".png") and p.name not in keep:
+    # Remove only screenshots an earlier import wrote (listed in SOURCE.json) that this import did not write again;
+    # other images in the folder (the logo, the social preview) are not ours to delete.
+    keep = {e["file"] for e in out}
+    previous = out_dir / "SOURCE.json"
+    managed = json.loads(previous.read_text()).get("screenshots", []) if previous.exists() else []
+    for name in managed:
+        p = out_dir / name
+        if name not in keep and NAME.match(name.replace(".webp", ".png")) and p.is_file():
             p.unlink()
     meta = {"rendered_from": source.group(0) if source else None, "screenshots": out}
     (out_dir / "manifest.json").write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
