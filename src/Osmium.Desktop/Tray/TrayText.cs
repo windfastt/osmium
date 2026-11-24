@@ -32,6 +32,18 @@ public static class TrayText
         return Truncate(s, TooltipMax);
     }
 
+    /// <summary>
+    /// The tooltip with a problem that needs attention (e.g. an invalid cluster key) as a second line. The job
+    /// line is shortened first, so the warning stays readable within <see cref="TooltipMax"/>.
+    /// </summary>
+    public static string Tooltip(IReadOnlyList<JobSnapshot> jobs, string? warning)
+    {
+        string tip = Tooltip(jobs);
+        if (string.IsNullOrWhiteSpace(warning)) return tip;
+        string w = Truncate(warning.Trim(), 70);
+        return Truncate(tip, TooltipMax - 1 - w.Length) + "\n" + w;
+    }
+
     public static (string Title, string Body, bool Error) Completion(JobSnapshot j) => j.State switch
     {
         JobState.Completed when j.Kind == JobKind.Compress => (

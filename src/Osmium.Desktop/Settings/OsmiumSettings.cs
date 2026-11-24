@@ -176,10 +176,34 @@ public sealed class ClusterSettings
     public int WorkerSlots { get; set; }
     [Setting("Worker memory limit", Description = "0 = automatic.", Min = 0, Max = 1_048_576, Unit = " MiB", Order = 6)]
     public int WorkerMemoryMiB { get; set; }
-    [Setting("Cluster key", Description = "Shared secret (OSM1-…). Generate one on the Cluster page.", Editor = SettingEditor.Password, Order = 7)]
+    [Setting("Cluster key", Description = "Shared secret (OSM1-…). Generate one on the Cluster page.", Editor = SettingEditor.Password, Order = 7,
+        Validator = nameof(ValidateClusterKey))]
     public string ClusterKey { get; set; } = "";
     [Setting("Use workers for encrypted archives", Description = "Workers would see the plaintext of encrypted jobs.", Dangerous = true, Order = 8)]
     public bool AllowEncryptedJobs { get; set; }
+
+    /// <summary>Null for an empty value (no key) or a key that ClusterKey.Parse accepts, else the parse error.</summary>
+    public static string? ValidateClusterKey(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try
+        {
+            global::Osmium.Core.Distributed.ClusterKey.Parse(value);
+            return null;
+        }
+        catch (FormatException e) { return e.Message; }
+    }
+
+    /// <summary>
+    /// The canonical text (OSM1-XXXXX-…) of a valid key and "" for a blank one. An invalid key is returned
+    /// unchanged, so the error is reported where the key is used instead of the key silently disappearing.
+    /// </summary>
+    public static string NormalizeClusterKey(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        try { return global::Osmium.Core.Distributed.ClusterKey.Parse(value).ToString(); }
+        catch (FormatException) { return value; }
+    }
 }
 
 [SettingsCategory("Experimental", Order = 10, Glyph = "", Description = "Features that may be very slow, use huge memory, or change in future versions. Archives made with them are flagged.")]

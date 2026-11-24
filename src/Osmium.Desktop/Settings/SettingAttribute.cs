@@ -37,6 +37,11 @@ public sealed class SettingAttribute(string label) : Attribute
     public string? EnabledWhen { get; set; }
     public SettingEditor Editor { get; set; } = SettingEditor.Auto;
     public string? Keywords { get; set; }
+    /// <summary>
+    /// For string settings: the name of a <c>public static string? Name(string value)</c> method on the settings
+    /// class that returns an error message for an invalid value, or null for a valid one.
+    /// </summary>
+    public string? Validator { get; set; }
 }
 
 /// <summary>A renderable setting: either a reflected property or an engine codec parameter.</summary>
@@ -65,6 +70,8 @@ public sealed class SettingDescriptor
     public required Func<object?> Get { get; init; }
     public required Action<object?> Set { get; init; }
     public IReadOnlyList<string>? Choices { get; init; }
+    /// <summary>Checks a string value: an error message, or null when it is valid (see <see cref="SettingAttribute.Validator"/>).</summary>
+    public Func<string, string?>? TextValidator { get; init; }
 
     public bool Matches(string query) =>
         string.IsNullOrWhiteSpace(query) ||
@@ -83,6 +90,7 @@ public sealed class SettingDescriptor
             if (!double.IsNaN(Min) && d < Min) return $"Must be at least {Min}{Unit}.";
             if (!double.IsNaN(Max) && d > Max) return $"Must be at most {Max}{Unit}.";
         }
+        if (value is string s && TextValidator is not null) return TextValidator(s);
         return null;
     }
 
@@ -114,11 +122,17 @@ public static class SettingReflector
                     Keywords = a.Keywords, Default = p.GetValue(defaults),
                     Get = () => pp.GetValue(section), Set = v => pp.SetValue(section, Coerce(v, pp.PropertyType)),
                     Choices = p.PropertyType.IsEnum ? Enum.GetNames(p.PropertyType) : null,
+                    TextValidator = a.Validator is null ? null : ValidatorOf(catProp.PropertyType, a.Validator),
                 });
             }
         }
         return list;
     }
+
+    private static Func<string, string?> ValidatorOf(Type section, string method) =>
+        (section.GetMethod(method, BindingFlags.Public | BindingFlags.Static, [typeof(string)]) is { } m && m.ReturnType == typeof(string)
+            ? m.CreateDelegate<Func<string, string?>>()
+            : throw new InvalidOperationException($"{section.Name}.{method}: expected public static string? {method}(string)."));
 
     public static IReadOnlyList<(string Name, int Order, string? Glyph, string? Description)> Categories(object root) =>
         root.GetType().GetProperties()

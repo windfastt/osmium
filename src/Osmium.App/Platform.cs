@@ -129,6 +129,9 @@ internal static class Theme
             case Label l when l.Tag as string == "muted":
                 l.ForeColor = P.Muted;
                 break;
+            case Label l when l.Tag as string == "danger":
+                l.ForeColor = P.Danger;
+                break;
             case Label l when l.Tag as string == "experimental":
                 l.ForeColor = P.Experimental;
                 break;

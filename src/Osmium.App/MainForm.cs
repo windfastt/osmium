@@ -99,7 +99,8 @@ internal sealed class MainForm : Form
         var w = _app.LocalWorker?.Stats;
         _status.Text = $"{(running + queued == 0 ? "Idle" : $"{running} running, {queued} queued")}   ·   " +
                        $"Profile: {_app.Settings.Compression.Profile}   ·   " +
-                       (w is null ? "Worker: off" : $"Worker: {w.Connections} coordinator(s), {w.TasksDone} task(s) done") +
+                       (w is not null ? $"Worker: {w.Connections} coordinator(s), {w.TasksDone} task(s) done"
+                           : _app.WorkerError is not null ? "Worker: not running (see Cluster)" : "Worker: off") +
                        (Osmium.Desktop.Settings.AppPaths.Portable ? "   ·   portable mode" : "");
     }
 
@@ -164,8 +165,10 @@ internal interface IPage
 internal sealed class SettingsRenderer : Panel
 {
     private readonly FlowLayoutPanel _flow = new() { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
-    private readonly ErrorProvider _errors = new() { BlinkStyle = ErrorBlinkStyle.NeverBlink };
     private readonly List<(SettingDescriptor D, Control Row, Control Editor)> _rows = [];
+    /// <summary>The error line under each editor, and the errors shown now (that input was not applied).</summary>
+    private readonly Dictionary<SettingDescriptor, Label> _errorLabels = [];
+    private readonly Dictionary<SettingDescriptor, string> _errors = [];
     private IReadOnlyList<SettingDescriptor> _all = [];
     private Func<bool> _experimentalEnabled = () => true;
 
@@ -189,6 +192,8 @@ internal sealed class SettingsRenderer : Panel
         _flow.Controls.Clear();
         foreach (var c in old) c.Dispose();
         _rows.Clear();
+        _errorLabels.Clear();
+        _errors.Clear();
         if (banner is not null)
         {
             var b = new Label { Text = banner, AutoSize = true, MaximumSize = new Size(Math.Max(300, ClientSize.Width - 40), 0), Padding = new Padding(8), Tag = "experimental", Margin = new Padding(0, 0, 0, 10) };
@@ -224,10 +229,16 @@ internal sealed class SettingsRenderer : Panel
         row.Controls.Add(title);
         if (!string.IsNullOrEmpty(d.Description))
             row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3) });
+        var error = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(760, 0), Tag = "danger", Margin = new Padding(0, 3, 0, 0), UseMnemonic = false };
+        _errorLabels[d] = error;
         var editor = BuildEditor(d);
         row.Controls.Add(editor);
+        row.Controls.Add(error);
         return (row, editor);
     }
+
+    /// <summary>Settings whose last input was rejected, as "label: reason". The rejected input was not applied.</summary>
+    public IReadOnlyList<string> Errors => _errors.Select(kv => $"{kv.Key.Label}: {kv.Value}").ToList();
 
     private Control BuildEditor(SettingDescriptor d)
     {
@@ -239,7 +250,7 @@ internal sealed class SettingsRenderer : Panel
             cb.CheckedChanged += (_, _) =>
             {
                 if (cb.Checked && d.WarningText is not null && !Ui.Confirm(d.WarningText + "\n\nContinue?")) { cb.Checked = false; return; }
-                Commit(d, cb, cb.Checked);
+                Commit(d, cb.Checked);
             };
             return cb;
         }
@@ -247,7 +258,7 @@ internal sealed class SettingsRenderer : Panel
         {
             var combo = Ui.Combo(d.Choices ?? [], value?.ToString());
             combo.Width = 220;
-            combo.SelectedIndexChanged += (_, _) => Commit(d, combo, combo.SelectedItem?.ToString());
+            combo.SelectedIndexChanged += (_, _) => Commit(d, combo.SelectedItem?.ToString());
             return combo;
         }
         if (SettingDescriptor.IsNumeric(t))
@@ -259,7 +270,7 @@ internal sealed class SettingsRenderer : Panel
                 Increment = (decimal)d.Step, Width = 160, ThousandsSeparator = true,
             };
             n.Value = Math.Clamp(Convert.ToDecimal(value ?? 0, CultureInfo.InvariantCulture), n.Minimum, n.Maximum);
-            n.ValueChanged += (_, _) => Commit(d, n, t == typeof(int) ? (object)(int)n.Value : t == typeof(long) ? (long)n.Value : (double)n.Value);
+            n.ValueChanged += (_, _) => Commit(d, t == typeof(int) ? (object)(int)n.Value : t == typeof(long) ? (long)n.Value : (double)n.Value);
             if (d.Unit is null) return n;
             var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             p.Controls.Add(n);
@@ -269,11 +280,11 @@ internal sealed class SettingsRenderer : Panel
         if (t == typeof(List<string>))
         {
             var tb = new TextBox { Multiline = true, Width = 420, Height = 80, ScrollBars = ScrollBars.Vertical, Text = string.Join(Environment.NewLine, value as List<string> ?? []) };
-            tb.TextChanged += (_, _) => Commit(d, tb, tb.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList());
+            tb.TextChanged += (_, _) => Commit(d, tb.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList());
             return tb;
         }
         var text = new TextBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
-        text.TextChanged += (_, _) => Commit(d, text, text.Text);
+        text.TextChanged += (_, _) => Commit(d, text.Text);
         if (d.Editor is SettingEditor.FolderPath or SettingEditor.FilePath)
         {
             var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
@@ -296,15 +307,28 @@ internal sealed class SettingsRenderer : Panel
         return text;
     }
 
-    private void Commit(SettingDescriptor d, Control editor, object? value)
+    private void Commit(SettingDescriptor d, object? value)
     {
-        var err = d.Validate(value);
-        _errors.SetError(editor, err ?? "");
+        string? err = d.Validate(value);
+        if (err is null)
+        {
+            try { d.Set(value); }
+            catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException or OverflowException) { err = e.Message; }
+        }
+        SetError(d, err);
         if (err is not null) return;
-        try { d.Set(value); }
-        catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException) { _errors.SetError(editor, e.Message); return; }
         UpdateStates();
         Changed?.Invoke(d);
+    }
+
+    /// <summary>Shows (or clears) the error line under a setting's editor.</summary>
+    private void SetError(SettingDescriptor d, string? message)
+    {
+        if (message is null) _errors.Remove(d);
+        else _errors[d] = message;
+        if (!_errorLabels.TryGetValue(d, out var label)) return;
+        label.Text = message ?? "";
+        label.Visible = message is not null;
     }
 
     private void UpdateStates()

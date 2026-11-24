@@ -142,6 +142,7 @@ internal sealed class TrayApp : ApplicationContext
     /// </summary>
     public void SaveSettings(OsmiumSettings s)
     {
+        s.Cluster.ClusterKey = ClusterSettings.NormalizeClusterKey(s.Cluster.ClusterKey);
         var old = Settings;
         bool startupChanged = s.General.StartWithWindows != old.General.StartWithWindows;
         bool integrationChanged = s.Integration.ContextMenu != old.Integration.ContextMenu
@@ -181,36 +182,79 @@ internal sealed class TrayApp : ApplicationContext
         bool want = Settings.Cluster.LendThisPc && !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey);
         if (want && _worker is null) StartWorker();
         else if (!want && _worker is not null) StopWorker();
+        if (!want) ClearWorkerProblem();
         SetupWatchFolders();
     }
 
+    /// <summary>Why "Lend this PC" is on but no worker runs (invalid key, port in use…), or null.</summary>
+    public string? WorkerError { get; private set; }
+    private string? _workerWarning, _workerErrorNotified;
+
+    /// <summary>Raised on the UI thread when the local worker stopped on its own (settings changes raise
+    /// <see cref="SettingsChanged"/> instead).</summary>
+    public event Action? WorkerChanged;
+
     private void StartWorker()
     {
-        try
-        {
-            var key = ClusterKey.Parse(Settings.Cluster.ClusterKey);
-            _workerCts = new CancellationTokenSource();
-            _worker = new WorkerServer(new WorkerOptions
-            {
-                Key = key,
-                Port = Settings.Cluster.WorkerPort,
-                Slots = Settings.Cluster.WorkerSlots > 0 ? Settings.Cluster.WorkerSlots : Environment.ProcessorCount,
-                Memory = Settings.Cluster.WorkerMemoryMiB > 0 ? (long)Settings.Cluster.WorkerMemoryMiB << 20 : MemoryBudgets.Default() / 2,
-                Log = m => AppLog.Info("worker: " + m),
-            });
-            var w = _worker;
-            var token = _workerCts.Token;
-            _workerTask = Task.Run(async () =>
-            {
-                try { await w.RunAsync(token); }
-                catch (Exception e) { AppLog.Error("worker stopped: " + e.Message); }
-            });
-        }
+        ClusterKey key;
+        try { key = ClusterKey.Parse(Settings.Cluster.ClusterKey); }
         catch (FormatException e)
         {
-            AppLog.Error("cluster key invalid: " + e.Message);
             _worker = null;
+            ReportWorkerProblem("This PC is not lending itself: the saved cluster key is invalid. " + e.Message, "Not lending this PC: invalid cluster key");
+            return;
         }
+        ClearWorkerProblem();
+        _workerCts = new CancellationTokenSource();
+        _worker = new WorkerServer(new WorkerOptions
+        {
+            Key = key,
+            Port = Settings.Cluster.WorkerPort,
+            Slots = Settings.Cluster.WorkerSlots > 0 ? Settings.Cluster.WorkerSlots : Environment.ProcessorCount,
+            Memory = Settings.Cluster.WorkerMemoryMiB > 0 ? (long)Settings.Cluster.WorkerMemoryMiB << 20 : MemoryBudgets.Default() / 2,
+            Log = m => AppLog.Info("worker: " + m),
+        });
+        var w = _worker;
+        var token = _workerCts.Token;
+        _workerTask = Task.Run(async () =>
+        {
+            try { await w.RunAsync(token); }
+            catch (Exception e)
+            {
+                AppLog.Error("worker stopped: " + e.Message);
+                if (!token.IsCancellationRequested) _ui.Post(_ => OnWorkerFailed(w, e.Message), null);
+            }
+        });
+    }
+
+    /// <summary>The worker ended on its own (e.g. the port is in use): show that instead of claiming it runs.</summary>
+    private void OnWorkerFailed(WorkerServer w, string message)
+    {
+        if (!ReferenceEquals(_worker, w)) return;
+        _worker = null;
+        _workerTask = null;
+        _workerCts = null;
+        ReportWorkerProblem($"This PC is not lending itself: the worker stopped ({message}).", "Not lending this PC: the worker stopped");
+        WorkerChanged?.Invoke();
+    }
+
+    /// <summary>Shown on the Cluster page and in the tray tooltip; announced once per distinct problem.</summary>
+    private void ReportWorkerProblem(string message, string tooltip)
+    {
+        WorkerError = message;
+        _workerWarning = tooltip;
+        if (message == _workerErrorNotified) return; // every settings change retries; report a problem once
+        _workerErrorNotified = message;
+        AppLog.Error(message);
+        if (Settings.General.Notifications != NotificationMode.None)
+            _icon.ShowBalloonTip(8000, "Osmium is not lending this PC", TrayText.Truncate(message, TrayText.BalloonBodyMax), ToolTipIcon.Warning);
+    }
+
+    private void ClearWorkerProblem()
+    {
+        WorkerError = null;
+        _workerWarning = null;
+        _workerErrorNotified = null;
     }
 
     private Task? _workerTask;
@@ -375,12 +419,14 @@ internal sealed class TrayApp : ApplicationContext
             SaveSettings(s);
         }) { Checked = Settings.Watch.Enabled, Enabled = Settings.Watch.Folders.Count > 0 };
         _menu.Items.Add(watch);
-        var lend = new ToolStripMenuItem("Lend this PC to the cluster", null, (_, _) =>
+        // The check shows the setting; whether a worker really runs is in the text (and on the Cluster page).
+        bool lending = Settings.Cluster.LendThisPc;
+        var lend = new ToolStripMenuItem(lending && WorkerError is not null ? "Lend this PC to the cluster (not running)" : "Lend this PC to the cluster", null, (_, _) =>
         {
             var s = Settings.Clone();
             s.Cluster.LendThisPc = !s.Cluster.LendThisPc;
             SaveSettings(s);
-        }) { Checked = _worker is not null, Enabled = !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey) };
+        }) { Checked = lending, Enabled = lending || !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey) };
         _menu.Items.Add(lend);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Settings…", null, (_, _) => ShowMain("Settings"));
@@ -402,7 +448,7 @@ internal sealed class TrayApp : ApplicationContext
     private void Refresh()
     {
         var jobs = Jobs.Snapshot();
-        var tip = TrayText.Tooltip(jobs);
+        var tip = TrayText.Tooltip(jobs, _workerWarning);
         if (tip != _lastTooltip) { _icon.Text = tip; _lastTooltip = tip; }
         var active = jobs.FirstOrDefault(j => j.State is JobState.Running or JobState.Paused);
         var icon = active is null ? _icons.Idle : _icons.Progress(active.Fraction, active.State == JobState.Paused, false);
