@@ -40,8 +40,8 @@ public sealed class RemoteNode : IAsyncDisposable
     private RemoteNode(string endpoint, TcpClient client, SecureChannel ch, Action<string>? log)
     {
         Endpoint = endpoint; _client = client; _ch = ch; _log = log;
-        _ = ReadLoopAsync();
-        _ = HeartbeatAsync();
+        _ = Task.Run(ReadLoopAsync);
+        _ = Task.Run(HeartbeatAsync);
     }
 
     public static async Task<RemoteNode> ConnectAsync(string endpoint, ClusterKey key, Action<string>? log, CancellationToken ct)

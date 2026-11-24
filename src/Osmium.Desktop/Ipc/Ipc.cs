@@ -120,7 +120,7 @@ public sealed class IpcServer(string pipeName, Func<IpcMessage, Task> onMessage,
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        if (_loop is not null) try { await _loop; } catch (OperationCanceledException) { }
+        if (_loop is not null) try { await _loop.ConfigureAwait(false); } catch (OperationCanceledException) { }
     }
 }
 

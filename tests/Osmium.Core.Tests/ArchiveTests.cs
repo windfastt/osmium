@@ -187,10 +187,10 @@ public class ArchiveTests
     {
         // Freezes CM v1: any change to the predictor changes this hash and must become a new format version.
         var input = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Range(0, 2000).Select(i => $"golden vector {i * 7919 % 1000} osmium\n")));
-        var packed = CmCodec.Encode(input, new CmOptions { TableBits = 18, MatchBits = 16 });
+        var packed = CmCodec.Encode(input, new CmOptions { TableBits = 18, MatchBits = 16 }, Ct);
         Assert.Equal(Golden.CmHash, XxHash3.HashToUInt64(packed).ToString("X16"));
         var back = new byte[input.Length];
-        CmCodec.Decode(packed, back, new CmOptions { TableBits = 18, MatchBits = 16 });
+        CmCodec.Decode(packed, back, new CmOptions { TableBits = 18, MatchBits = 16 }, Ct);
         Assert.Equal(input, back);
     }
 

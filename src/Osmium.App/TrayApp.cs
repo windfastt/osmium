@@ -1,0 +1,450 @@
+using System.Diagnostics;
+using Osmium.Core.Container;
+using Osmium.Core.Distributed;
+using Osmium.Core.Planning;
+using Osmium.Desktop.Ipc;
+using Osmium.Desktop.Jobs;
+using Osmium.Desktop.Settings;
+using Osmium.Desktop.Shell;
+using Osmium.Desktop.Tray;
+using Osmium.Desktop.Watch;
+
+namespace Osmium.App;
+
+/// <summary>
+/// The notification-area application. Owns the NotifyIcon, the job manager, the IPC server, watch folders and
+/// the optional local worker. The main window is created lazily and only hidden when "closed".
+/// </summary>
+internal sealed class TrayApp : ApplicationContext
+{
+    public static TrayApp? Current { get; private set; }
+
+    private readonly SettingsStore _store;
+    private readonly NotifyIcon _icon;
+    private readonly ContextMenuStrip _menu = new();
+    private readonly TrayIcons _icons;
+    private readonly Icon _appIcon;
+    private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer _coalesce = new() { Interval = 100 };
+    private readonly SynchronizationContext _ui;
+    private readonly IpcServer _ipc;
+    private readonly InvocationCoalescer _coalescer;
+    private readonly WatchFolderEngine _watch = new();
+    private readonly List<FileSystemWatcher> _watchers = [];
+    private readonly List<JobSnapshot> _recentFinished = [];
+    private CancellationTokenSource? _workerCts;
+    private WorkerServer? _worker;
+    private MainForm? _main;
+    private string _lastTooltip = "";
+    private Icon? _lastIcon;
+    private bool _pausedForBattery, _exiting;
+
+    public OsmiumSettings Settings { get; private set; }
+    public JobManager Jobs { get; }
+    public WorkerServer? LocalWorker => _worker;
+    public RuleSet GlobalRules { get; private set; } = new();
+
+    private readonly Font _boldMenuFont;
+    private string? _lastTickError;
+
+    public TrayApp(SettingsStore store, OsmiumSettings settings, AppCommand startup, string pipeName, string? historyFile = null)
+    {
+        Current = this;
+        _store = store;
+        Settings = settings;
+        _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _appIcon = LoadAppIcon();
+        _icons = new TrayIcons(_appIcon);
+        LoadRules();
+
+        Jobs = new JobManager(() => Settings, () => GlobalRules, historyFile ?? AppPaths.HistoryFile);
+        Jobs.JobFinished += j => _ui.Post(_ => OnJobFinished(j), null);
+        Jobs.BusyChanged += busy => _ui.Post(_ => OnBusyChanged(busy), null);
+        Jobs.PasswordPrompt = archive =>
+        {
+            string? pw = null;
+            _ui.Send(_ => pw = PasswordDialog.Ask($"Password for {Path.GetFileName(archive)}", confirm: false), null);
+            return pw;
+        };
+
+        _boldMenuFont = new Font(_menu.Font, FontStyle.Bold);
+        // An empty ContextMenuStrip cancels its own opening unless the handler un-cancels it.
+        _menu.Opening += (_, e) => { Guard("menu", BuildMenu); e.Cancel = false; };
+        BuildMenu();
+        _icon = new NotifyIcon { Icon = _appIcon, Text = "Osmium", ContextMenuStrip = _menu, Visible = true };
+        _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowMain(); };
+        _icon.BalloonTipClicked += (_, _) => ShowMain("Jobs");
+
+        _coalescer = new InvocationCoalescer(TimeSpan.FromMilliseconds(Settings.Integration.CoalesceMs), TimeSpan.FromSeconds(4));
+        _coalesce.Tick += (_, _) => Guard("shell", () => { foreach (var b in _coalescer.Due()) HandleBatch(b); });
+        _coalesce.Start();
+        _refresh.Tick += (_, _) => Guard("refresh", Refresh);
+        _refresh.Start();
+
+        _ipc = new IpcServer(pipeName, m => { _ui.Post(_ => HandleMessage(m), null); return Task.CompletedTask; });
+        _ipc.Start();
+
+        ApplyRuntimeSettings();
+        Application.ApplicationExit += (_, _) => HideIcon();
+        Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => HideIcon();
+
+        if (startup.Kind == "invoke") HandleMessage(new IpcMessage { Verb = startup.Verb, Profile = startup.Profile, Args = startup.Paths ?? [] });
+        else if (startup.Kind != "tray") ShowMain();
+        AppLog.Info($"Osmium started ({(AppPaths.Portable ? "portable" : "installed")}), engine fingerprint {Convert.ToHexString(Protocol.EngineFingerprint())[..8]}");
+    }
+
+    private static Icon LoadAppIcon()
+    {
+        using var s = typeof(TrayApp).Assembly.GetManifestResourceStream("Osmium.App.osmium.ico");
+        return s is null ? SystemIcons.Application : new Icon(s);
+    }
+
+    public Icon AppIcon => _appIcon;
+
+    public void LoadRules()
+    {
+        try { GlobalRules = File.Exists(AppPaths.RulesFile) ? RuleSet.Load(AppPaths.RulesFile, RuleSet.LayerGlobal) : new RuleSet(); }
+        catch (Exception e) when (e is IOException or System.Text.Json.JsonException)
+        {
+            AppLog.Error("rules.json could not be read: " + e.Message);
+            GlobalRules = new RuleSet();
+        }
+    }
+
+    // ------------------------------------------------------------------ settings
+
+    public void SaveSettings(OsmiumSettings s)
+    {
+        bool startupChanged = s.General.StartWithWindows != Settings.General.StartWithWindows;
+        Settings = s;
+        _store.Save(s);
+        if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
+        ApplyRuntimeSettings();
+    }
+
+    private void ApplyRuntimeSettings()
+    {
+        // lend this PC as a worker
+        bool want = Settings.Cluster.LendThisPc && !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey);
+        if (want && _worker is null) StartWorker();
+        else if (!want && _worker is not null) StopWorker();
+        SetupWatchFolders();
+    }
+
+    private void StartWorker()
+    {
+        try
+        {
+            var key = ClusterKey.Parse(Settings.Cluster.ClusterKey);
+            _workerCts = new CancellationTokenSource();
+            _worker = new WorkerServer(new WorkerOptions
+            {
+                Key = key,
+                Port = Settings.Cluster.WorkerPort,
+                Slots = Settings.Cluster.WorkerSlots > 0 ? Settings.Cluster.WorkerSlots : Environment.ProcessorCount,
+                Memory = Settings.Cluster.WorkerMemoryMiB > 0 ? (long)Settings.Cluster.WorkerMemoryMiB << 20 : MemoryBudgets.Default() / 2,
+                Log = m => AppLog.Info("worker: " + m),
+            });
+            var w = _worker;
+            _ = Task.Run(async () =>
+            {
+                try { await w.RunAsync(_workerCts.Token); }
+                catch (Exception e) { AppLog.Error("worker stopped: " + e.Message); }
+            });
+        }
+        catch (FormatException e)
+        {
+            AppLog.Error("cluster key invalid: " + e.Message);
+            _worker = null;
+        }
+    }
+
+    private void StopWorker()
+    {
+        _workerCts?.Cancel();
+        _worker = null;
+    }
+
+    private void SetupWatchFolders()
+    {
+        foreach (var w in _watchers) w.Dispose();
+        _watchers.Clear();
+        if (!Settings.Watch.Enabled) return;
+        foreach (var cfg in Settings.Watch.Folders.Where(f => f.Enabled && Directory.Exists(f.Path)))
+        {
+            var fsw = new FileSystemWatcher(cfg.Path)
+            {
+                IncludeSubdirectories = cfg.IncludeSubfolders,
+                InternalBufferSize = 64 * 1024,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite,
+            };
+            void Touch(string path)
+            {
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (fi.Exists && (fi.Attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.Offline)) == 0)
+                        _watch.Touch(cfg, path, fi.Length, fi.LastWriteTimeUtc);
+                }
+                catch (IOException) { }
+            }
+            fsw.Created += (_, e) => Touch(e.FullPath);
+            fsw.Changed += (_, e) => Touch(e.FullPath);
+            fsw.Renamed += (_, e) => Touch(e.FullPath);
+            fsw.Error += (_, e) => AppLog.Warn($"watch folder {cfg.Path}: {e.GetException().Message}");
+            fsw.EnableRaisingEvents = true;
+            _watchers.Add(fsw);
+        }
+    }
+
+    // ------------------------------------------------------------------ IPC / shell verbs
+
+    private void HandleMessage(IpcMessage m)
+    {
+        switch (m.Type)
+        {
+            case "show": ShowMain(m.Page); break;
+            case "quit": ExitApp(confirm: false); break;
+            case "invoke": _coalescer.Add(m); break;
+        }
+    }
+
+    private void HandleBatch(InvocationBatch b)
+    {
+        AppLog.Info($"shell: {b.Verb} ({b.Paths.Count} item(s))");
+        switch (b.Verb)
+        {
+            case "compress-dialog" or "sendto":
+                ShowMain("Compress");
+                _main?.CompressPage.AddPaths(b.Paths);
+                break;
+            case "compress-quick":
+                Jobs.Enqueue(new JobRequest
+                {
+                    Kind = JobKind.Compress, Inputs = [.. b.Paths], Output = InvocationCoalescer.ArchiveNameFor(b.Paths),
+                    Profile = b.Profile, Origin = "shell",
+                });
+                break;
+            case "extract-here":
+                foreach (var a in b.Paths) Jobs.Enqueue(new JobRequest { Kind = JobKind.Extract, Inputs = [a], Output = Path.GetDirectoryName(a)! });
+                break;
+            case "extract-to":
+                foreach (var a in b.Paths)
+                    Jobs.Enqueue(new JobRequest { Kind = JobKind.Extract, Inputs = [a], Output = Path.Combine(Path.GetDirectoryName(a)!, Path.GetFileNameWithoutExtension(a)) });
+                break;
+            case "test":
+                foreach (var a in b.Paths) Jobs.Enqueue(new JobRequest { Kind = JobKind.Test, Inputs = [a] });
+                break;
+            case "open":
+                ShowMain("Archives");
+                if (b.Paths.Count > 0) _main?.ArchivesPage.OpenArchive(b.Paths[0]);
+                break;
+        }
+    }
+
+    // ------------------------------------------------------------------ UI
+
+    public void ShowMain(string? page = null)
+    {
+        if (_main is null || _main.IsDisposed)
+        {
+            _main = new MainForm(this);
+        }
+        if (!_main.Visible) _main.Show();
+        if (_main.WindowState == FormWindowState.Minimized) _main.WindowState = FormWindowState.Normal;
+        _main.Activate();
+        if (page is not null) _main.Navigate(page);
+    }
+
+    public MainForm? Main => _main;
+
+    private void BuildMenu()
+    {
+        _menu.Items.Clear();
+        var jobs = Jobs.Snapshot();
+        var header = new ToolStripMenuItem(TrayText.Tooltip(jobs)) { Enabled = false };
+        _menu.Items.Add(header);
+        _menu.Items.Add(new ToolStripSeparator());
+        var open = new ToolStripMenuItem("Open Osmium", null, (_, _) => ShowMain()) { Font = _boldMenuFont };
+        _menu.Items.Add(open);
+        _menu.Items.Add("Compress files…", null, (_, _) => { ShowMain("Compress"); _main?.CompressPage.BrowseFiles(); });
+        _menu.Items.Add("Compress folder…", null, (_, _) => { ShowMain("Compress"); _main?.CompressPage.BrowseFolder(); });
+        _menu.Items.Add("Extract archive…", null, (_, _) => { ShowMain("Archives"); _main?.ArchivesPage.Browse(); });
+        _menu.Items.Add(new ToolStripSeparator());
+
+        var profiles = new ToolStripMenuItem("Default profile");
+        foreach (ProfileName p in Enum.GetValues<ProfileName>())
+        {
+            var item = new ToolStripMenuItem(p.ToString(), null, (_, _) =>
+            {
+                var s = Settings.Clone();
+                s.Compression.Profile = p;
+                SaveSettings(s);
+            }) { Checked = Settings.Compression.Profile == p };
+            profiles.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(profiles);
+
+        var recent = new ToolStripMenuItem("Recent jobs");
+        foreach (var j in jobs.Where(j => !j.IsActive).TakeLast(6).Reverse())
+        {
+            var text = j.State == JobState.Completed && j.Kind == JobKind.Compress
+                ? $"{j.Name} — {TrayText.Bytes(j.BytesIn)} → {TrayText.Bytes(j.BytesOut)}"
+                : $"{j.Name} — {j.State}";
+            var it = new ToolStripMenuItem(TrayText.Truncate(text, 70));
+            if (j.Output is { Length: > 0 } output) it.Click += (_, _) => Shell.Reveal(output);
+            recent.DropDownItems.Add(it);
+        }
+        if (recent.DropDownItems.Count == 0) recent.DropDownItems.Add(new ToolStripMenuItem("(none)") { Enabled = false });
+        recent.DropDownItems.Add(new ToolStripSeparator());
+        recent.DropDownItems.Add("Show all jobs", null, (_, _) => ShowMain("Jobs"));
+        _menu.Items.Add(recent);
+        _menu.Items.Add(new ToolStripSeparator());
+
+        _menu.Items.Add(Jobs.PausedAll ? "Resume all jobs" : "Pause all jobs", null, (_, _) => { if (Jobs.PausedAll) Jobs.ResumeAll(); else Jobs.PauseAll(); });
+        var watch = new ToolStripMenuItem("Watch folders", null, (_, _) =>
+        {
+            var s = Settings.Clone();
+            s.Watch.Enabled = !s.Watch.Enabled;
+            SaveSettings(s);
+        }) { Checked = Settings.Watch.Enabled, Enabled = Settings.Watch.Folders.Count > 0 };
+        _menu.Items.Add(watch);
+        var lend = new ToolStripMenuItem("Lend this PC to the cluster", null, (_, _) =>
+        {
+            var s = Settings.Clone();
+            s.Cluster.LendThisPc = !s.Cluster.LendThisPc;
+            SaveSettings(s);
+        }) { Checked = _worker is not null, Enabled = !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey) };
+        _menu.Items.Add(lend);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add("Settings…", null, (_, _) => ShowMain("Settings"));
+        _menu.Items.Add("Exit", null, (_, _) => ExitApp(confirm: true));
+    }
+
+    /// <summary>Timer/menu handlers must never throw: an exception would reach Application.ThreadException and
+    /// show a dialog on every tick. Errors are logged once per distinct message instead.</summary>
+    private void Guard(string what, Action a)
+    {
+        try { a(); }
+        catch (Exception e)
+        {
+            string key = what + ":" + e.Message;
+            if (key != _lastTickError) { _lastTickError = key; AppLog.Error($"{what}: {e}"); }
+        }
+    }
+
+    private void Refresh()
+    {
+        var jobs = Jobs.Snapshot();
+        var tip = TrayText.Tooltip(jobs);
+        if (tip != _lastTooltip) { _icon.Text = tip; _lastTooltip = tip; }
+        var active = jobs.FirstOrDefault(j => j.State is JobState.Running or JobState.Paused);
+        var icon = active is null ? _icons.Idle : _icons.Progress(active.Fraction, active.State == JobState.Paused, false);
+        if (!ReferenceEquals(icon, _lastIcon)) { _icon.Icon = icon; _lastIcon = icon; }
+
+        // pause on battery
+        if (Settings.Performance.PauseOnBattery)
+        {
+            bool onBattery = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline;
+            if (onBattery && !_pausedForBattery && Jobs.AnyActive && !Jobs.PausedAll) { Jobs.PauseAll(); _pausedForBattery = true; AppLog.Info("paused: running on battery"); }
+            else if (!onBattery && _pausedForBattery) { Jobs.ResumeAll(); _pausedForBattery = false; AppLog.Info("resumed: back on AC power"); }
+        }
+
+        // settled watch-folder files become jobs
+        foreach (var (cfg, path) in _watch.Tick(p =>
+        {
+            var fi = new FileInfo(p);
+            return fi.Exists ? (fi.Length, fi.LastWriteTimeUtc) : null;
+        }))
+        {
+            var outDir = Path.Combine(cfg.Path, cfg.OutputSubfolder);
+            Directory.CreateDirectory(outDir);
+            Jobs.Enqueue(new JobRequest
+            {
+                Kind = JobKind.Compress, Inputs = [path], Profile = cfg.Profile.ToString().ToLowerInvariant(), Origin = "watch",
+                Output = InvocationCoalescer.Unique(Path.Combine(outDir, Path.GetFileName(path) + ".osa")),
+            });
+        }
+    }
+
+    private void OnBusyChanged(bool busy)
+    {
+        if (Settings.Performance.KeepAwake)
+            Native.SetThreadExecutionState(busy ? Native.EsContinuous | Native.EsSystemRequired : Native.EsContinuous);
+        try
+        {
+            Process.GetCurrentProcess().PriorityClass = busy
+                ? Settings.Performance.Priority switch { PriorityLevel.Idle => ProcessPriorityClass.Idle, PriorityLevel.BelowNormal => ProcessPriorityClass.BelowNormal, _ => ProcessPriorityClass.Normal }
+                : ProcessPriorityClass.Normal;
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+    }
+
+    private void OnJobFinished(JobSnapshot j)
+    {
+        AppLog.Info($"job {j.Name}: {j.State}{(j.Error is null ? "" : " — " + j.Error)}");
+        if (j.State == JobState.Completed && j.Kind == JobKind.Compress && Settings.General.OpenFolderWhenDone && j.Output is not null) Shell.Reveal(j.Output);
+        var mode = Settings.General.Notifications;
+        if (mode == NotificationMode.None || (mode == NotificationMode.FailuresOnly && j.State != JobState.Failed)) return;
+        if (_main is { Visible: true, ContainsFocus: true } && _main.CurrentPage == "Jobs") return;
+        _recentFinished.Add(j);
+        // aggregate completions that arrive close together
+        var t = new System.Windows.Forms.Timer { Interval = 1500 };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            t.Dispose();
+            if (_recentFinished.Count == 0) return;
+            if (_recentFinished.Count == 1)
+            {
+                var (title, body, error) = TrayText.Completion(_recentFinished[0]);
+                _icon.ShowBalloonTip(5000, title, body, error ? ToolTipIcon.Error : ToolTipIcon.Info);
+            }
+            else
+            {
+                var (title, body) = TrayText.Aggregate(_recentFinished);
+                _icon.ShowBalloonTip(5000, title, body, ToolTipIcon.Info);
+            }
+            _recentFinished.Clear();
+        };
+        t.Start();
+    }
+
+    public void ExitApp(bool confirm)
+    {
+        if (_exiting) return;
+        if (confirm && Settings.General.ConfirmExit && Jobs.AnyActive)
+        {
+            var r = MessageBox.Show("Jobs are still running. Exit and cancel them?", "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (r != DialogResult.Yes) return;
+        }
+        _exiting = true;
+        _main?.AllowClose();
+        _main?.Close();
+        ExitThread();
+    }
+
+    public void HideIcon()
+    {
+        try { _icon.Visible = false; } catch (ObjectDisposedException) { }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            HideIcon();
+            _refresh.Dispose();
+            _coalesce.Dispose();
+            StopWorker();
+            foreach (var w in _watchers) w.Dispose();
+            Jobs.Dispose();
+            _ipc.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
+            _icon.Dispose();
+            _icons.Dispose();
+            _menu.Dispose();
+            _boldMenuFont.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}

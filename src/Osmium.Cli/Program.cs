@@ -205,7 +205,7 @@ namespace Osmium.Cli
             if (!quiet)
             {
                 Console.WriteLine($"Created {result.Path}");
-                Console.WriteLine($"  {Fmt.Bytes(result.InputBytes)} → {Fmt.Bytes(result.OutputBytes)}  ({result.Ratio:P2} of original, {1 - result.Ratio:P2} saved) in {result.Elapsed.TotalSeconds:F1}s");
+                Console.WriteLine($"  {Fmt.Bytes(result.InputBytes)} → {Fmt.Bytes(result.OutputBytes)}  ({result.Ratio:P2} of original, {1 - result.Ratio:P2} saved) in {sw.Elapsed.TotalSeconds:F1}s (planning {(sw.Elapsed - result.Elapsed).TotalSeconds:F1}s)");
                 Console.WriteLine($"  To extract: ~{Fmt.Duration(result.EstimatedDecodeSeconds)} on one core, up to {Fmt.Bytes(result.MaxDecodeMemory)} RAM per block");
             }
             return 0;

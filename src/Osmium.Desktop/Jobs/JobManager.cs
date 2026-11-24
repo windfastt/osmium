@@ -91,19 +91,34 @@ public sealed class JobManager : IDisposable
         return j.Id;
     }
 
+    /// <summary>Cheap snapshot for polling; job logs are omitted (use <see cref="GetLog"/>).</summary>
     public IReadOnlyList<JobSnapshot> Snapshot()
     {
-        lock (_lock) return _jobs.Select(Snap).ToList();
+        lock (_lock) return _jobs.Select(j => Snap(j, withLog: false)).ToList();
     }
 
-    private static JobSnapshot Snap(Job j)
+    public IReadOnlyList<string> GetLog(Guid id)
+    {
+        var j = Find(id);
+        if (j is null) return [];
+        lock (j.Log) return j.Log.ToList();
+    }
+
+    private static JobSnapshot Snap(Job j) => Snap(j, withLog: true);
+
+    private static JobSnapshot Snap(Job j, bool withLog)
     {
         TimeSpan? eta = null;
         if (j.State == JobState.Running && j.Fraction > 0.02 && j.Clock.Elapsed.TotalSeconds > 5)
             eta = TimeSpan.FromSeconds(j.Clock.Elapsed.TotalSeconds * (1 - j.Fraction) / j.Fraction);
         string name = j.Request.Name ?? (j.Request.Kind == JobKind.Compress ? Path.GetFileName(j.Request.Output) : Path.GetFileName(j.Request.Inputs.FirstOrDefault() ?? "?"));
         return new JobSnapshot(j.Id, name, j.Request.Kind, j.State, j.Phase, j.Fraction, j.In, j.Out, j.Total, j.Clock.Elapsed, eta,
-            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, j.Log.ToList());
+            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, withLog ? LogCopy(j) : []);
+    }
+
+    private static List<string> LogCopy(Job j)
+    {
+        lock (j.Log) return j.Log.ToList();
     }
 
     private Job? Find(Guid id) { lock (_lock) return _jobs.FirstOrDefault(j => j.Id == id); }
