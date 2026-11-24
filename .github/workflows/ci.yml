@@ -112,6 +112,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: osmium-*
@@ -119,10 +120,22 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        # The section "## [x.y.z] ..." for the tag's version, with hard-wrapped list items joined back into one line.
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            $0 ~ "^## \\[" v "\\]" { f = 1; next }
+            /^## \[/ { f = 0 }
+            !f { next }
+            /^  +[^ ]/ && buf != "" { sub(/^ +/, " "); buf = buf $0; next }
+            { if (started) print buf; buf = $0; started = 1 }
+            END { if (started) print buf }' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then cat notes.md; else echo "::warning::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; fi
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           pre=""; [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
-          gh release create "$GITHUB_REF_NAME" dist/* --generate-notes $pre
+          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Osmium ${GITHUB_REF_NAME#v}" "${notes[@]}" $pre
