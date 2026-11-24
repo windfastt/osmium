@@ -1,0 +1,365 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Text.Json;
+using Osmium.Core.Container;
+using Osmium.Core.Distributed;
+using Osmium.Core.Pipeline;
+using Osmium.Core.Planning;
+using Osmium.Desktop.Settings;
+
+namespace Osmium.Desktop.Jobs;
+
+public enum JobKind { Compress, Extract, Test }
+public enum JobState { Queued, Running, Paused, Completed, Failed, Canceled }
+
+public sealed class JobRequest
+{
+    public JobKind Kind { get; set; }
+    public List<string> Inputs { get; set; } = [];
+    /// <summary>Archive path (compress) or destination folder (extract).</summary>
+    public string Output { get; set; } = "";
+    public string? Profile { get; set; }
+    public string? Password { get; set; }
+    public string? Pipeline { get; set; }
+    /// <summary>Per-file patches from the Compress page / TuneDialog (job-layer rules).</summary>
+    public List<Rule> Patches { get; set; } = [];
+    public bool Overwrite { get; set; }
+    public string? Name { get; set; }
+    public string? Origin { get; set; }
+}
+
+public sealed record JobSnapshot(
+    Guid Id, string Name, JobKind Kind, JobState State, string Phase, double Fraction,
+    long BytesIn, long BytesOut, long BytesTotal, TimeSpan Elapsed, TimeSpan? Eta, string? Detail,
+    string? Error, string? Output, DateTime Created, IReadOnlyList<string> Log)
+{
+    public double Ratio => BytesIn == 0 ? 0 : (double)BytesOut / BytesIn;
+    public bool IsActive => State is JobState.Queued or JobState.Running or JobState.Paused;
+}
+
+/// <summary>Sequential job queue used by the tray app. Thread-safe; the UI polls <see cref="Snapshot"/>.</summary>
+public sealed class JobManager : IDisposable
+{
+    private sealed class Job(JobRequest r)
+    {
+        public Guid Id { get; } = Guid.NewGuid();
+        public JobRequest Request { get; } = r;
+        public JobState State = JobState.Queued;
+        public string Phase = "Queued";
+        public double Fraction;
+        public long In, Out, Total;
+        public string? Detail, Error, Output;
+        public DateTime Created = DateTime.Now;
+        public Stopwatch Clock = new();
+        public PauseGate Gate { get; } = new();
+        public CancellationTokenSource Cts { get; } = new();
+        public List<string> Log { get; } = [];
+    }
+
+    private readonly Func<OsmiumSettings> _settings;
+    private readonly Func<RuleSet> _globalRules;
+    private readonly List<Job> _jobs = [];
+    private readonly object _lock = new();
+    private readonly SemaphoreSlim _signal = new(0);
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly Task _loop;
+    private readonly string? _historyFile;
+    private bool _pausedAll;
+
+    public event Action<JobSnapshot>? JobFinished;
+    public event Action<bool>? BusyChanged;
+    public Func<string, string?>? PasswordPrompt { get; set; }
+
+    public JobManager(Func<OsmiumSettings> settings, Func<RuleSet> globalRules, string? historyFile = null)
+    {
+        _settings = settings;
+        _globalRules = globalRules;
+        _historyFile = historyFile;
+        LoadHistory();
+        _loop = Task.Run(LoopAsync);
+    }
+
+    public bool AnyActive { get { lock (_lock) return _jobs.Any(j => j.State is JobState.Running or JobState.Paused or JobState.Queued); } }
+    public bool PausedAll => _pausedAll;
+
+    public Guid Enqueue(JobRequest r)
+    {
+        var j = new Job(r);
+        lock (_lock) _jobs.Add(j);
+        if (_pausedAll) j.Gate.Pause();
+        _signal.Release();
+        return j.Id;
+    }
+
+    public IReadOnlyList<JobSnapshot> Snapshot()
+    {
+        lock (_lock) return _jobs.Select(Snap).ToList();
+    }
+
+    private static JobSnapshot Snap(Job j)
+    {
+        TimeSpan? eta = null;
+        if (j.State == JobState.Running && j.Fraction > 0.02 && j.Clock.Elapsed.TotalSeconds > 5)
+            eta = TimeSpan.FromSeconds(j.Clock.Elapsed.TotalSeconds * (1 - j.Fraction) / j.Fraction);
+        string name = j.Request.Name ?? (j.Request.Kind == JobKind.Compress ? Path.GetFileName(j.Request.Output) : Path.GetFileName(j.Request.Inputs.FirstOrDefault() ?? "?"));
+        return new JobSnapshot(j.Id, name, j.Request.Kind, j.State, j.Phase, j.Fraction, j.In, j.Out, j.Total, j.Clock.Elapsed, eta,
+            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, j.Log.ToList());
+    }
+
+    private Job? Find(Guid id) { lock (_lock) return _jobs.FirstOrDefault(j => j.Id == id); }
+
+    public void Pause(Guid id) { if (Find(id) is { } j && j.State is JobState.Running or JobState.Queued) { j.Gate.Pause(); if (j.State == JobState.Running) j.State = JobState.Paused; } }
+    public void Resume(Guid id) { if (Find(id) is { } j) { j.Gate.Resume(); if (j.State == JobState.Paused) j.State = JobState.Running; } }
+    public void Cancel(Guid id) { if (Find(id) is { } j) { j.Cts.Cancel(); j.Gate.Resume(); if (j.State == JobState.Queued) j.State = JobState.Canceled; } }
+
+    public void PauseAll()
+    {
+        _pausedAll = true;
+        lock (_lock) foreach (var j in _jobs.Where(j => j.State is JobState.Running or JobState.Queued)) { j.Gate.Pause(); if (j.State == JobState.Running) j.State = JobState.Paused; }
+    }
+
+    public void ResumeAll()
+    {
+        _pausedAll = false;
+        lock (_lock) foreach (var j in _jobs.Where(j => j.State is JobState.Paused or JobState.Queued)) { j.Gate.Resume(); if (j.State == JobState.Paused) j.State = JobState.Running; }
+    }
+
+    public void ClearFinished()
+    {
+        lock (_lock) _jobs.RemoveAll(j => !(j.State is JobState.Queued or JobState.Running or JobState.Paused));
+        SaveHistory();
+    }
+
+    private async Task LoopAsync()
+    {
+        while (!_shutdown.IsCancellationRequested)
+        {
+            try { await _signal.WaitAsync(_shutdown.Token); } catch (OperationCanceledException) { return; }
+            Job? next;
+            lock (_lock) next = _jobs.FirstOrDefault(j => j.State == JobState.Queued);
+            if (next is null) continue;
+            BusyChanged?.Invoke(true);
+            await RunAsync(next);
+            BusyChanged?.Invoke(AnyActive);
+            if (AnyActive) _signal.Release();
+            SaveHistory();
+            JobFinished?.Invoke(Snap(next));
+        }
+    }
+
+    private async Task RunAsync(Job j)
+    {
+        j.State = j.Gate.IsPaused ? JobState.Paused : JobState.Running;
+        j.Clock.Start();
+        var ct = CancellationTokenSource.CreateLinkedTokenSource(j.Cts.Token, _shutdown.Token).Token;
+        try
+        {
+            switch (j.Request.Kind)
+            {
+                case JobKind.Compress: await CompressAsync(j, ct); break;
+                case JobKind.Extract: Extract(j, ct, test: false); break;
+                case JobKind.Test: Extract(j, ct, test: true); break;
+            }
+            j.State = JobState.Completed;
+            j.Fraction = 1;
+            j.Phase = "Done";
+        }
+        catch (OperationCanceledException) { j.State = JobState.Canceled; j.Phase = "Canceled"; }
+        catch (Exception e)
+        {
+            j.State = JobState.Failed;
+            j.Phase = "Failed";
+            j.Error = e.Message;
+            j.Log.Add("error: " + e);
+        }
+        finally { j.Clock.Stop(); }
+    }
+
+    /// <summary>Translates settings + request into planner options (shared with the CLI semantics).</summary>
+    public static PlanOptions BuildPlanOptions(OsmiumSettings s, JobRequest r, RuleSet globalRules, Action<string>? log)
+    {
+        var profile = Profile.ByName(r.Profile ?? s.Compression.Profile.ToString().ToLowerInvariant());
+        if (s.Codecs.CmMemoryBits > 0) profile = profile with { CmMem = Math.Min(s.Codecs.CmMemoryBits, s.Experimental is { Enabled: true, HugeTables: true } ? 26 : 24) };
+        if (s.Codecs.LzmaDictMiB > 0) profile = profile with { LzmaDict = (long)s.Codecs.LzmaDictMiB << 20 };
+        if (s.Codecs.ZstdLevel > 0) profile = profile with { ZstdLevel = s.Codecs.ZstdLevel };
+        if (s.Analysis.SampleWindows > 0) profile = profile with { SampleWindows = s.Analysis.SampleWindows };
+        if (s.Analysis.MaxCandidates > 0) profile = profile with { MaxCandidates = s.Analysis.MaxCandidates };
+        if (s.Analysis.SearchEvals >= 0) profile = profile with { SearchEvals = s.Analysis.SearchEvals };
+        if (s.Analysis.RaceTopTwo) profile = profile with { RaceTopTwo = true };
+        if (!s.Codecs.AllowCm) profile = profile with { AllowCm = false };
+
+        var forbidCodecs = new List<string>();
+        if (!s.Codecs.AllowPpmd) forbidCodecs.Add("ppmd");
+        if (!s.Codecs.AllowLzma) forbidCodecs.Add("lzma");
+        if (!s.Codecs.AllowZstd) forbidCodecs.Add("zstd");
+        if (!s.Codecs.AllowBrotli) forbidCodecs.Add("brotli");
+        if (!s.Codecs.AllowBzip2) forbidCodecs.Add("bzip2");
+        var forbidFilters = new List<string>();
+        if (!s.Filters.X86) forbidFilters.Add("x86");
+        if (!s.Filters.Arm64) forbidFilters.Add("arm64");
+        if (!s.Filters.Delta) forbidFilters.Add("delta");
+        if (!s.Filters.Transpose) forbidFilters.Add("transpose");
+        if (!s.Filters.Pcm) forbidFilters.Add("pcm16");
+        if (!s.Filters.Image) forbidFilters.Add("image");
+        if (!s.Filters.Text) forbidFilters.Add("text");
+
+        var settingsRules = new RuleSet();
+        if (forbidCodecs.Count + forbidFilters.Count > 0)
+            settingsRules.Rules.Add(new Rule
+            {
+                Id = "settings-allowed-methods", Description = "Codec/filter switches from Settings",
+                Match = new RuleMatch { Globs = ["**"] },
+                Actions = new RuleActions { ForbidCodecs = [.. forbidCodecs], ForbidFilters = [.. forbidFilters] },
+            });
+        var job = new RuleSet { Rules = r.Patches }.AtLayer(RuleSet.LayerJob);
+        settingsRules.AtLayer(RuleSet.LayerGlobal);
+        var rules = RuleSet.Combine(RuleSet.BuiltIn(), globalRules, settingsRules, job);
+
+        return new PlanOptions
+        {
+            Profile = profile,
+            Rules = rules,
+            Threads = s.Performance.Threads > 0 ? s.Performance.Threads : Environment.ProcessorCount,
+            MemoryBudget = s.Performance.MemoryLimitMiB > 0 ? (long)s.Performance.MemoryLimitMiB << 20 : MemoryBudgets.Default(),
+            Dedup = s.Compression.Dedup switch { DedupSetting.Off => DedupMode.Off, DedupSetting.Files => DedupMode.Files, DedupSetting.Chunks => DedupMode.Chunks, _ => null },
+            BlockCap = s.Compression.BlockSizeMiB > 0 ? (long)s.Compression.BlockSizeMiB << 20 : null,
+            DecodeSpeedWeight = (int)s.Compression.DecodeSpeedWeight,
+            AllowExperimental = s.Experimental.Enabled || profile.Experimental,
+            ForcedPipeline = r.Pipeline,
+            Log = log,
+        };
+    }
+
+    private async Task CompressAsync(Job j, CancellationToken ct)
+    {
+        var s = _settings();
+        var r = j.Request;
+        j.Phase = "Scanning";
+        var scan = Scanner.Scan(r.Inputs, new ScanOptions { Excludes = s.Compression.Excludes, IncludeHidden = s.Compression.IncludeHidden }, ct);
+        var po = BuildPlanOptions(s, r, _globalRules(), m => { lock (j.Log) j.Log.Add(m); }) with
+        {
+            Progress = (phase, f) => { j.Phase = phase; j.Fraction = 0.1 * f; },
+        };
+
+        Cluster? cluster = null;
+        bool encrypted = !string.IsNullOrEmpty(r.Password);
+        if (s.Cluster.UseWorkers && !string.IsNullOrWhiteSpace(s.Cluster.ClusterKey) && (!encrypted || s.Cluster.AllowEncryptedJobs))
+        {
+            try
+            {
+                j.Phase = "Connecting to workers";
+                var key = ClusterKey.Parse(s.Cluster.ClusterKey);
+                var endpoints = new List<string>(s.Cluster.Workers);
+                if (s.Cluster.Discovery) endpoints.AddRange((await Discovery.ProbeAsync(key, TimeSpan.FromSeconds(1.5), ct)).Select(w => w.Endpoint));
+                cluster = await Cluster.ConnectAsync(endpoints, key, po.Threads, m => { lock (j.Log) j.Log.Add("cluster: " + m); }, ct);
+                if (cluster.Nodes.Count > 0) po = po with { Trials = cluster.TrialRunner(new MemoryGate(po.MemoryBudget)) };
+            }
+            catch (Exception e) when (e is FormatException or IOException)
+            {
+                lock (j.Log) j.Log.Add("cluster unavailable: " + e.Message);
+            }
+        }
+        try
+        {
+            var plan = await new Planner(po).BuildAsync(scan, ct);
+            j.Total = plan.TotalInput;
+            lock (j.Log) j.Log.AddRange(plan.Groups.SelectMany(g => g.Explain));
+            var result = await ArchiveBuilder.BuildAsync(plan, new BuildOptions
+            {
+                OutputPath = r.Output,
+                Password = r.Password,
+                KdfIterations = s.Security.KdfIterations,
+                VerifyBlocks = s.Compression.VerifyBlocks,
+                Overwrite = r.Overwrite,
+                Threads = po.Threads + (cluster?.RemoteSlots ?? 0),
+                MemoryBudget = po.MemoryBudget,
+                StorePlanLog = s.Compression.StorePlanLog,
+                Gate = j.Gate,
+                Compressor = cluster is { Nodes.Count: > 0 } ? cluster.BlockCompressor() : LocalBlockCompressor.Instance,
+                Progress = p =>
+                {
+                    j.Phase = p.Phase;
+                    j.Detail = p.Detail;
+                    j.In = p.BytesIn;
+                    j.Out = p.BytesOut;
+                    j.Fraction = 0.1 + 0.9 * (p.BytesInTotal == 0 ? 1 : (double)p.BytesIn / p.BytesInTotal);
+                },
+            }, ct);
+            j.In = result.InputBytes;
+            j.Out = result.OutputBytes;
+            j.Output = result.Path;
+            lock (j.Log) j.Log.AddRange(result.Warnings.Select(w => "warning: " + w));
+        }
+        finally
+        {
+            if (cluster is not null) await cluster.DisposeAsync();
+        }
+    }
+
+    private void Extract(Job j, CancellationToken ct, bool test)
+    {
+        var r = j.Request;
+        string archive = r.Inputs[0];
+        j.Phase = "Opening";
+        using var reader = OsaReader.Open(archive, () => r.Password ?? PasswordPrompt?.Invoke(archive));
+        j.Total = reader.TotalUnpacked;
+        var progress = new Progress<ExtractProgress>(p =>
+        {
+            j.Phase = test ? "Testing" : "Extracting";
+            j.In = p.BytesDone;
+            j.Fraction = p.BytesTotal == 0 ? 1 : (double)p.BytesDone / p.BytesTotal;
+            j.Detail = $"{p.FilesDone}/{p.FilesTotal} files";
+        });
+        var res = test
+            ? Extractor.Test(reader, progress, ct)
+            : Extractor.Extract(reader, r.Output, null, new ExtractOptions { Overwrite = r.Overwrite ? OverwriteMode.Overwrite : OverwriteMode.Rename }, progress, ct);
+        j.In = reader.TotalUnpacked;
+        j.Out = reader.FileLength;
+        j.Output = test ? archive : r.Output;
+        lock (j.Log) j.Log.AddRange(res.Errors.Select(e => "error: " + e));
+        if (res.FilesFailed > 0 || res.Errors.Count > 0)
+            throw new InvalidDataException($"{res.FilesFailed} file(s) failed verification; {res.Errors.Count} error(s).");
+    }
+
+    private sealed record HistoryEntry(string Name, JobKind Kind, JobState State, long In, long Out, string? Output, DateTime Created, double Seconds, string? Error);
+
+    private void SaveHistory()
+    {
+        if (_historyFile is null) return;
+        try
+        {
+            List<HistoryEntry> h;
+            lock (_lock)
+                h = _jobs.Where(j => !(j.State is JobState.Queued or JobState.Running or JobState.Paused)).TakeLast(50)
+                    .Select(j => new HistoryEntry(Snap(j).Name, j.Request.Kind, j.State, j.In, j.Out, j.Output, j.Created, j.Clock.Elapsed.TotalSeconds, j.Error)).ToList();
+            Directory.CreateDirectory(Path.GetDirectoryName(_historyFile)!);
+            File.WriteAllText(_historyFile, JsonSerializer.Serialize(h));
+        }
+        catch (IOException) { }
+    }
+
+    private void LoadHistory()
+    {
+        if (_historyFile is null || !File.Exists(_historyFile)) return;
+        try
+        {
+            foreach (var h in JsonSerializer.Deserialize<List<HistoryEntry>>(File.ReadAllText(_historyFile)) ?? [])
+            {
+                var j = new Job(new JobRequest { Kind = h.Kind, Name = h.Name, Output = h.Output ?? "" })
+                {
+                    State = h.State, In = h.In, Out = h.Out, Output = h.Output, Created = h.Created, Error = h.Error, Phase = h.State.ToString(), Fraction = 1,
+                };
+                lock (_lock) _jobs.Add(j);
+            }
+        }
+        catch (Exception e) when (e is JsonException or IOException) { }
+    }
+
+    public void Dispose()
+    {
+        _shutdown.Cancel();
+        lock (_lock) foreach (var j in _jobs) { j.Gate.Resume(); j.Cts.Cancel(); }
+        try { _loop.Wait(TimeSpan.FromSeconds(10)); } catch (AggregateException) { }
+        SaveHistory();
+    }
+}

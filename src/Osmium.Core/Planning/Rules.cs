@@ -201,6 +201,13 @@ public sealed class RuleSet
         File.Move(tmp, path, overwrite: true);
     }
 
+    /// <summary>Assigns a precedence layer to every rule (file order breaks ties within the layer).</summary>
+    public RuleSet AtLayer(int layer)
+    {
+        for (int i = 0; i < Rules.Count; i++) { Rules[i].Layer = layer; Rules[i].Order = i; }
+        return this;
+    }
+
     public static RuleSet Combine(params RuleSet?[] sets)
     {
         var all = new RuleSet();
