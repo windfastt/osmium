@@ -100,18 +100,43 @@ test that must pass on both Linux and Windows.
   integer tables satisfy, so they were treated as text and never got the delta/transpose candidates meant for them.
   The no-BOM thresholds are now 90 %/90 %, with a regression test for both directions.
 
-### 5.3 End-to-end results
-Mixed 16 MiB test folder (license texts, CSV, ELF + .NET binaries, a WAV, a BMP, PNG/JPEG/gzip files, 12-byte
-telemetry records, a duplicate file). Reference: `tar | xz -9e` = 6 095 132 bytes.
+### 5.3 Cross-check against other compressors (0.1.1)
+`tools/crosscheck.py` ran Osmium's profiles and eight other tools (nine settings) on two folders, at the strongest
+commonly used setting of each, and unpacked and compared every archive. Full tables: [BENCHMARKS.md](BENCHMARKS.md).
 
-| Profile | Archive | vs. xz -9e | Time |
+| Share of the original | Mixed folder (16 MiB) | Windows application folder (124 MiB) |
+|---|---|---|
+| `tar \| xz -9e` | 36.4 % | 28.8 % |
+| 7-Zip LZMA2 `-mx=9` | 34.8 % | 28.2 % |
+| `tar \| lrzip -z` | 31.7 % | 26.5 % |
+| ZPAQ `-m5` | 31.8 % | **25.6 %** |
+| Osmium Max / Ultra / Insane | 32.3 % / 29.6 % / **29.5 %** | 28.8 % / 27.3 % / not run |
+
+Lessons:
+- Per-class pipelines are the win on mixed folders: even Balanced and Max beat 7-Zip and xz there, and Ultra/Insane
+  beat ZPAQ -m5 and lrzip by 6–7 %.
+- On homogeneous machine code the LZMA profiles can only match xz (same algorithm family), and Osmium CM is 6.2 %
+  behind ZPAQ -m5. Its x86 modelling is the next thing to improve: the backlog items in §3 (E8/E9 limited to PE code
+  sections, bit-history counters, a two-layer mixer network) target exactly this.
+- 0.1.0's notes listed Ultra at 4 983 958 and Insane at 4 927 730 bytes on the mixed folder, measured before the
+  sniffer fix changed how its 12-byte telemetry records are classified. 0.1.1 measures 4 965 074 (−0.4 %) and
+  4 944 191 (+0.3 %). The 0.1.0 times for Ultra (53 s) and Insane (~10 min) were wrong; see §5.4.
+
+### 5.4 Where Ultra's time goes (0.1.1)
+The cross-check measured Ultra on the mixed folder at 483 s, not the 53 s that 0.1.0's notes listed; that figure
+could not be reproduced and is withdrawn. `osmium a … --profile ultra` printed
+*planning 427.7 s* of the 483 s: compressing and verifying the seven blocks took 55 s.
+
+The plan log (`osmium explain`) shows why. The two large groups (6.3 MiB .NET IL, 5.1 MiB x64 code) chose CM with
+every context model, which runs at roughly 0.3–0.5 MB/s, and the parameter search then spends up to 24 trial
+compressions of the 4 MiB sample on each. The search is worth it — it improved the chosen pipeline by 8.4 % (text),
+2.1 % (x64 code) and 2.2 % (.NET IL, BMP, records) on the sample — but groups were planned one after another, and
+each search step leaves cores idle while its last few trials finish: the run used about 2.6 of 4 cores.
+
+| Change | Planning | Total | Archive |
 |---|---|---|---|
-| fast | 8 227 602 | +35 % | 0.3 s |
-| balanced | 5 604 113 | −8.1 % | 6 s |
-| max | 5 407 508 | −11.3 % | 6 s |
-| ultra | 4 983 958 | −18.2 % | 53 s |
-| insane | 4 927 730 | **−19.2 %** | ~10 min (mostly planning) |
+| 0.1.1 before the fix (groups planned one after another) | 427.7 s | 483.1 s | 4 965 074 bytes |
+| Groups planned concurrently, one shared pool of trial slots | 292.1 s | 345.7 s | 4 965 074 bytes, identical plan log and blocks |
 
-All archives passed `osmium t` and extracted byte-identically (`diff -r`). A distributed `max` run with two workers
-produced the same blocks as the local run in 9.6 s instead of 15.8 s (one local thread). See the README for the
-Windows-payload benchmark.
+Next step (not in 0.1.1): screen each search step's neighbours on the previous rung's smaller sample and promote
+only the best to the full sample. Insane, whose last rung is 16 MiB, would gain the most.

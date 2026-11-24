@@ -64,3 +64,11 @@ Windows by CI (`--selftest-ui`, installer compile, Windows test run) · ⬜ back
 - 🪟 Inno Setup installer (per-user/all-users, tasks, graceful close, clean uninstall)
 - 🪟 GitHub Actions: Linux + Windows tests, publish x64/arm64, UI self-test screenshots (light + dark), CLI smoke test, installer, releases on tags
 - ⬜ Code signing (needs a certificate)
+
+## Release 0.1.1
+- ✅ Cross-check against zip, bzip2, Brotli, Zstandard, xz, 7-Zip (LZMA2, PPMd), lrzip and ZPAQ with every round trip verified ([BENCHMARKS.md](BENCHMARKS.md), `tools/crosscheck.py`)
+- ✅ Groups planned concurrently (identical plans and archives, Ultra planning 428 s → 292 s on the mixed test folder)
+- ✅ Release notes taken from CHANGELOG.md by the release job
+- ✅ Product website (`docs/index.html`, ready for GitHub Pages from `/docs`)
+- ⬜ Hill-climb screening on smaller samples (Ultra/Insane planning time; see IMPROVISATION.md §5.4)
+- ⬜ Stronger x86 modelling in CM: ZPAQ -m5 is 6.2 % smaller than Ultra on program files ([BENCHMARKS.md](BENCHMARKS.md))

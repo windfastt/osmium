@@ -23,21 +23,26 @@ in an original context-mixing codec and other PCs on your network when you ask f
 
 ## Results
 
-Mixed 16 MiB folder (texts, CSV, ELF and .NET binaries, WAV, BMP, PNG/JPEG/gzip, binary records, a duplicate):
+Archive size as a share of the original (smaller is better), on a 4-core machine; every archive was unpacked and
+compared file by file. Full tables, commands and versions: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Tool | Size | vs. `tar \| xz -9e` |
+| | Mixed folder (16 MiB) | Windows application folder (124 MiB) |
 |---|---|---|
-| `tar \| xz -9e` | 6 095 132 | — |
-| Osmium **balanced** (6 s) | 5 604 113 | −8.1 % |
-| Osmium **max** (6 s) | 5 407 508 | −11.3 % |
-| Osmium **ultra** (53 s) | 4 983 958 | −18.2 % |
-| Osmium **insane** (~10 min) | 4 927 730 | **−19.2 %** |
+| `zip -9` | 47.7 % | 41.0 % |
+| `tar \| xz -9e` | 36.4 % | 28.8 % |
+| 7-Zip LZMA2 `-mx=9` | 34.8 % | 28.2 % |
+| `tar \| lrzip -z` | 31.7 % | 26.5 % |
+| ZPAQ `-m5` | 31.8 % | **25.6 %** |
+| Osmium **Max** | 32.3 % · 10.5 s | 28.8 % · 2 min 17 s |
+| Osmium **Ultra** | 29.6 % · 5 min 40 s | 27.3 % · 18 min 47 s |
+| Osmium **Insane** | **29.5 %** · 17 min 29 s | not run |
 
-BENCHMARK_PAYLOAD
-
-Every archive above passed `osmium t` and extracted byte-for-byte identical. Ultra/Insane may choose context mixing,
-which decompresses about as slowly as it compresses (~0.5 MB/s); Osmium tells you the expected extraction time and
-memory before and after compressing. Details: [docs/IMPROVISATION.md §5](docs/IMPROVISATION.md#5-measured-decisions).
+* On mixed data Osmium is the smallest: Insane is 18.9 % smaller than `xz -9e` and 6.8 % smaller than lrzip, because
+  every kind of data gets its own pipeline (text, x64 code, .NET IL, records, audio, images).
+* On a folder of program files ZPAQ -m5 and lrzip are still 6.2 % and 3.0 % smaller than Ultra: their x86 models are
+  stronger than Osmium CM's today. Max matches `xz -9e` there, since both are LZMA with a branch filter.
+* Ultra and Insane may choose context mixing, which extracts about as slowly as it compresses (one thread per
+  block). Osmium tells you the expected extraction time and memory before and after compressing.
 
 ## Install
 
@@ -48,6 +53,10 @@ memory before and after compressing. Details: [docs/IMPROVISATION.md §5](docs/I
 * **CLI only:** the single-file `osmium-<version>-win-x64.exe` also works as a stand-alone extractor.
 
 Windows 10 1809+ or Windows 11, x64 or ARM64. No separate .NET install is needed.
+
+> The builds are not code-signed yet, so Windows SmartScreen may say *"Windows protected your PC"* the first time:
+> choose **More info → Run anyway**. The installer script already supports signing (`ISCC /DSignToolName=…` with an
+> Inno Setup `SignTool` definition) once a code-signing certificate is available.
 
 ## Use
 
@@ -133,6 +142,7 @@ release for `v*` tags.
 * Windows 11 shows the Explorer verbs under *Show more options* (a top-level entry needs a signed MSIX sparse package).
 * Already-compressed media (JPEG, PNG, MP4, ZIP) is stored as-is; recompressing them losslessly (preflate/packJPG
   style) is on the backlog.
+* On program files (EXEs and DLLs), ZPAQ -m5 and lrzip -z still produce smaller archives than Ultra; see Results.
 * Osmium writes and reads its own `.osa` format only.
 
 ## License
