@@ -90,7 +90,7 @@ internal sealed class TrayApp : ApplicationContext
 
         if (startup.Kind == "invoke") HandleMessage(new IpcMessage { Verb = startup.Verb, Profile = startup.Profile, Args = startup.Paths ?? [] });
         else if (startup.Kind != "tray") ShowMain();
-        AppLog.Info($"Osmium started ({(AppPaths.Portable ? "portable" : "installed")}), engine fingerprint {Convert.ToHexString(Protocol.EngineFingerprint())[..8]}");
+        AppLog.Info($"Osmium started ({(AppPaths.Portable ? "portable" : "installed")}), engine fingerprint {Osmium.Desktop.AboutInfo.EngineFingerprint()}");
     }
 
     private static Icon LoadAppIcon()
@@ -129,8 +129,20 @@ internal sealed class TrayApp : ApplicationContext
 
     // ------------------------------------------------------------------ settings
 
+    /// <summary>
+    /// Raised on the UI thread after <see cref="SaveSettings"/> stored and applied new settings. Pages that keep a
+    /// copy of a setting (the Settings page, the Cluster page's key box) reload it unless they hold unsaved edits.
+    /// </summary>
+    public event Action? SettingsChanged;
+
+    /// <summary>
+    /// Stores <paramref name="s"/> as the complete new settings. Callers start from <c>Settings.Clone()</c> taken
+    /// right before the change (the Settings page merges its edits with <see cref="SettingsEdits.Apply"/>), so a
+    /// stale copy never overwrites changes made elsewhere.
+    /// </summary>
     public void SaveSettings(OsmiumSettings s)
     {
+        s.Cluster.ClusterKey = ClusterSettings.NormalizeClusterKey(s.Cluster.ClusterKey);
         var old = Settings;
         bool startupChanged = s.General.StartWithWindows != old.General.StartWithWindows;
         bool integrationChanged = s.Integration.ContextMenu != old.Integration.ContextMenu
@@ -138,13 +150,17 @@ internal sealed class TrayApp : ApplicationContext
             || !s.Integration.QuickProfiles.SequenceEqual(old.Integration.QuickProfiles);
         static string WorkerConfig(OsmiumSettings x) => $"{x.Cluster.ClusterKey}|{x.Cluster.WorkerPort}|{x.Cluster.WorkerSlots}|{x.Cluster.WorkerMemoryMiB}";
         bool workerChanged = WorkerConfig(s) != WorkerConfig(old);
+        _store.Save(s); // first: if the file cannot be written, nothing has changed
         Settings = s;
-        _store.Save(s);
-        if (!s.Security.RememberForSession) _sessionPasswords.Clear();
-        if (integrationChanged) ApplyIntegration(s);
-        else if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
-        if (workerChanged && _worker is not null) StopWorker(); // restarted below with the new configuration
-        ApplyRuntimeSettings();
+        try
+        {
+            if (!s.Security.RememberForSession) _sessionPasswords.Clear();
+            if (integrationChanged) ApplyIntegration(s);
+            else if (startupChanged) Registration.SetStartup(s.General.StartWithWindows);
+            if (workerChanged && _worker is not null) StopWorker(); // restarted below with the new configuration
+            ApplyRuntimeSettings();
+        }
+        finally { SettingsChanged?.Invoke(); }
     }
 
     /// <summary>Re-registers the per-user Explorer integration from settings (also used by "Repair").</summary>
@@ -166,36 +182,79 @@ internal sealed class TrayApp : ApplicationContext
         bool want = Settings.Cluster.LendThisPc && !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey);
         if (want && _worker is null) StartWorker();
         else if (!want && _worker is not null) StopWorker();
+        if (!want) ClearWorkerProblem();
         SetupWatchFolders();
     }
 
+    /// <summary>Why "Lend this PC" is on but no worker runs (invalid key, port in use…), or null.</summary>
+    public string? WorkerError { get; private set; }
+    private string? _workerWarning, _workerErrorNotified;
+
+    /// <summary>Raised on the UI thread when the local worker stopped on its own (settings changes raise
+    /// <see cref="SettingsChanged"/> instead).</summary>
+    public event Action? WorkerChanged;
+
     private void StartWorker()
     {
-        try
-        {
-            var key = ClusterKey.Parse(Settings.Cluster.ClusterKey);
-            _workerCts = new CancellationTokenSource();
-            _worker = new WorkerServer(new WorkerOptions
-            {
-                Key = key,
-                Port = Settings.Cluster.WorkerPort,
-                Slots = Settings.Cluster.WorkerSlots > 0 ? Settings.Cluster.WorkerSlots : Environment.ProcessorCount,
-                Memory = Settings.Cluster.WorkerMemoryMiB > 0 ? (long)Settings.Cluster.WorkerMemoryMiB << 20 : MemoryBudgets.Default() / 2,
-                Log = m => AppLog.Info("worker: " + m),
-            });
-            var w = _worker;
-            var token = _workerCts.Token;
-            _workerTask = Task.Run(async () =>
-            {
-                try { await w.RunAsync(token); }
-                catch (Exception e) { AppLog.Error("worker stopped: " + e.Message); }
-            });
-        }
+        ClusterKey key;
+        try { key = ClusterKey.Parse(Settings.Cluster.ClusterKey); }
         catch (FormatException e)
         {
-            AppLog.Error("cluster key invalid: " + e.Message);
             _worker = null;
+            ReportWorkerProblem("This PC is not lending itself: the saved cluster key is invalid. " + e.Message, "Not lending this PC: invalid cluster key");
+            return;
         }
+        ClearWorkerProblem();
+        _workerCts = new CancellationTokenSource();
+        _worker = new WorkerServer(new WorkerOptions
+        {
+            Key = key,
+            Port = Settings.Cluster.WorkerPort,
+            Slots = Settings.Cluster.WorkerSlots > 0 ? Settings.Cluster.WorkerSlots : Environment.ProcessorCount,
+            Memory = Settings.Cluster.WorkerMemoryMiB > 0 ? (long)Settings.Cluster.WorkerMemoryMiB << 20 : MemoryBudgets.Default() / 2,
+            Log = m => AppLog.Info("worker: " + m),
+        });
+        var w = _worker;
+        var token = _workerCts.Token;
+        _workerTask = Task.Run(async () =>
+        {
+            try { await w.RunAsync(token); }
+            catch (Exception e)
+            {
+                AppLog.Error("worker stopped: " + e.Message);
+                if (!token.IsCancellationRequested) _ui.Post(_ => OnWorkerFailed(w, e.Message), null);
+            }
+        });
+    }
+
+    /// <summary>The worker ended on its own (e.g. the port is in use): show that instead of claiming it runs.</summary>
+    private void OnWorkerFailed(WorkerServer w, string message)
+    {
+        if (!ReferenceEquals(_worker, w)) return;
+        _worker = null;
+        _workerTask = null;
+        _workerCts = null;
+        ReportWorkerProblem($"This PC is not lending itself: the worker stopped ({message}).", "Not lending this PC: the worker stopped");
+        WorkerChanged?.Invoke();
+    }
+
+    /// <summary>Shown on the Cluster page and in the tray tooltip; announced once per distinct problem.</summary>
+    private void ReportWorkerProblem(string message, string tooltip)
+    {
+        WorkerError = message;
+        _workerWarning = tooltip;
+        if (message == _workerErrorNotified) return; // every settings change retries; report a problem once
+        _workerErrorNotified = message;
+        AppLog.Error(message);
+        if (Settings.General.Notifications != NotificationMode.None)
+            _icon.ShowBalloonTip(8000, "Osmium is not lending this PC", TrayText.Truncate(message, TrayText.BalloonBodyMax), ToolTipIcon.Warning);
+    }
+
+    private void ClearWorkerProblem()
+    {
+        WorkerError = null;
+        _workerWarning = null;
+        _workerErrorNotified = null;
     }
 
     private Task? _workerTask;
@@ -313,7 +372,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         _menu.Items.Clear();
         var jobs = Jobs.Snapshot();
-        var header = new ToolStripMenuItem(TrayText.Tooltip(jobs)) { Enabled = false };
+        // Job names are file names: '&' must be doubled in menu text (it would underline the next letter).
+        var header = new ToolStripMenuItem(TrayText.MenuText(TrayText.Tooltip(jobs))) { Enabled = false };
         _menu.Items.Add(header);
         _menu.Items.Add(new ToolStripSeparator());
         var open = new ToolStripMenuItem("Open Osmium", null, (_, _) => ShowMain()) { Font = _boldMenuFont };
@@ -342,7 +402,7 @@ internal sealed class TrayApp : ApplicationContext
             var text = j.State == JobState.Completed && j.Kind == JobKind.Compress
                 ? $"{j.Name} — {TrayText.Bytes(j.BytesIn)} → {TrayText.Bytes(j.BytesOut)}"
                 : $"{j.Name} — {j.State}";
-            var it = new ToolStripMenuItem(TrayText.Truncate(text, 70));
+            var it = new ToolStripMenuItem(TrayText.MenuText(TrayText.Truncate(text, 70)));
             if (j.Output is { Length: > 0 } output) it.Click += (_, _) => Shell.Reveal(output);
             recent.DropDownItems.Add(it);
         }
@@ -360,16 +420,31 @@ internal sealed class TrayApp : ApplicationContext
             SaveSettings(s);
         }) { Checked = Settings.Watch.Enabled, Enabled = Settings.Watch.Folders.Count > 0 };
         _menu.Items.Add(watch);
-        var lend = new ToolStripMenuItem("Lend this PC to the cluster", null, (_, _) =>
+        // The check shows the setting; whether a worker really runs is in the text (and on the Cluster page).
+        bool lending = Settings.Cluster.LendThisPc;
+        var lend = new ToolStripMenuItem(lending && WorkerError is not null ? "Lend this PC to the cluster (not running)" : "Lend this PC to the cluster", null, (_, _) =>
         {
             var s = Settings.Clone();
             s.Cluster.LendThisPc = !s.Cluster.LendThisPc;
             SaveSettings(s);
-        }) { Checked = _worker is not null, Enabled = !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey) };
+        }) { Checked = lending, Enabled = lending || !string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey) };
         _menu.Items.Add(lend);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Settings…", null, (_, _) => ShowMain("Settings"));
+        _menu.Items.Add("About Osmium…", null, (_, _) => ShowAbout());
         _menu.Items.Add("Exit", null, (_, _) => ExitApp(confirm: true));
+    }
+
+    private AboutDialog? _about;
+
+    /// <summary>Version, engine fingerprint and licence (tray menu, Settings page). Only one at a time.</summary>
+    public void ShowAbout()
+    {
+        if (_about is { IsDisposed: false }) { _about.Activate(); return; }
+        using var d = new AboutDialog(_appIcon);
+        _about = d;
+        try { d.ShowDialog(_main is { Visible: true } owner ? owner : null); }
+        finally { _about = null; }
     }
 
     /// <summary>Timer/menu handlers must never throw: an exception would reach Application.ThreadException and
@@ -387,7 +462,7 @@ internal sealed class TrayApp : ApplicationContext
     private void Refresh()
     {
         var jobs = Jobs.Snapshot();
-        var tip = TrayText.Tooltip(jobs);
+        var tip = TrayText.Tooltip(jobs, _workerWarning);
         if (tip != _lastTooltip) { _icon.Text = tip; _lastTooltip = tip; }
         var active = jobs.FirstOrDefault(j => j.State is JobState.Running or JobState.Paused);
         var icon = active is null ? _icons.Idle : _icons.Progress(active.Fraction, active.State == JobState.Paused, false);
@@ -462,12 +537,15 @@ internal sealed class TrayApp : ApplicationContext
         t.Start();
     }
 
+    /// <param name="confirm">Ask first when jobs are running (if "Confirm exit while jobs run" is on) or a page of
+    /// the main window holds unsaved edits.</param>
     public void ExitApp(bool confirm)
     {
         if (_exiting) return;
-        if (confirm && Settings.General.ConfirmExit && Jobs.AnyActive)
+        var unsaved = _main is { IsDisposed: false } main ? main.PagesWithUnsavedChanges() : [];
+        if (confirm && TrayText.ExitQuestion(Settings.General.ConfirmExit && Jobs.AnyActive, unsaved) is { } question)
         {
-            var r = MessageBox.Show("Jobs are still running. Exit and cancel them?", "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            var r = MessageBox.Show(question, "Osmium", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (r != DialogResult.Yes) return;
         }
         _exiting = true;

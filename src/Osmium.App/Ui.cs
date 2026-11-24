@@ -1,4 +1,5 @@
 using System.Globalization;
+using Osmium.Desktop;
 using Osmium.Desktop.Settings;
 
 namespace Osmium.App;
@@ -6,11 +7,13 @@ namespace Osmium.App;
 /// <summary>Small factory helpers so code-built layouts stay readable and DPI-safe (no absolute pixel layouts).</summary>
 internal static class Ui
 {
-    public static Label Heading(string text) => new() { Text = text, Font = Theme.Heading, AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
+    // Headings and text show '&' as is ("Rules & patches", file names): with mnemonics on, it would underline the
+    // next letter instead.
+    public static Label Heading(string text) => new() { Text = text, Font = Theme.Heading, AutoSize = true, Margin = new Padding(0, 0, 0, 6), UseMnemonic = false };
 
     public static Label Text(string text, bool muted = false, int maxWidth = 0) => new()
     {
-        Text = text, AutoSize = true, Tag = muted ? "muted" : null,
+        Text = text, AutoSize = true, Tag = muted ? "muted" : null, UseMnemonic = false,
         MaximumSize = maxWidth > 0 ? new Size(maxWidth, 0) : Size.Empty,
         Margin = new Padding(0, 2, 0, 2),
     };
@@ -20,6 +23,29 @@ internal static class Ui
         var b = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 3, 10, 3), Margin = new Padding(0, 0, 6, 0), Tag = accent ? "accent" : null };
         if (click is not null) b.Click += click;
         return b;
+    }
+
+    /// <summary>A "Show"/"Hide" button that unmasks or masks <paramref name="box"/>; its text says what a click does.</summary>
+    public static Button RevealButton(TextBox box)
+    {
+        var b = Button(box.UseSystemPasswordChar ? "Show" : "Hide");
+        b.Click += (_, _) => SetMasked(box, b, !box.UseSystemPasswordChar);
+        return b;
+    }
+
+    /// <summary>Masks or unmasks a box and keeps its <see cref="RevealButton"/> text in step.</summary>
+    public static void SetMasked(TextBox box, Button reveal, bool masked)
+    {
+        box.UseSystemPasswordChar = masked;
+        reveal.Text = masked ? "Show" : "Hide";
+    }
+
+    /// <summary>Copies text to the clipboard; another program holding the clipboard is reported, not thrown.</summary>
+    public static void CopyToClipboard(string text)
+    {
+        if (text.Length == 0) return; // SetText throws on an empty string
+        try { Clipboard.SetText(text); }
+        catch (System.Runtime.InteropServices.ExternalException) { Error("Another program is using the clipboard. Try again."); }
     }
 
     public static FlowLayoutPanel Bar(params Control[] controls)
@@ -84,10 +110,82 @@ internal static class Ui
     }
 }
 
-/// <summary>Flicker-free details ListView.</summary>
+/// <summary>
+/// TextBox with the keyboard behaviour Osmium wants on top of WinForms (which already makes Ctrl+Backspace delete the
+/// previous word): Enter in a single-line box runs <see cref="EnterAction"/> instead of the edit control's error
+/// beep, and Ctrl+Backspace in a masked box deletes everything before the caret, so it does not reveal where the
+/// words of a password are.
+/// </summary>
+internal sealed class EditBox : TextBox
+{
+    /// <summary>What Enter does in a single-line box (null: nothing, but no beep). Multi-line boxes keep Enter.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? EnterAction { get; set; }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (UseSystemPasswordChar && !ReadOnly && keyData is (Keys.Control | Keys.Back) or (Keys.Control | Keys.Shift | Keys.Back))
+        {
+            if (SelectionLength == 0) Select(0, SelectionStart);
+            SelectedText = "";
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Handled || Multiline || e.KeyData != Keys.Enter) return;
+        e.SuppressKeyPress = true; // no WM_CHAR, so no beep
+        EnterAction?.Invoke();
+    }
+}
+
+/// <summary>
+/// Flicker-free details ListView with list shortcuts: Ctrl+A selects every row, Ctrl+C copies the selected rows
+/// (tab-separated, so they paste into a spreadsheet), Enter and double-click run <see cref="DefaultAction"/>.
+/// </summary>
 internal sealed class FastList : ListView
 {
     private int _scaledFor = 96;
+
+    /// <summary>The page's default action for the selected rows (Enter, double-click), if it has one.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? DefaultAction { get; set; }
+
+    /// <summary>The selected rows, one per line, columns separated by tabs.</summary>
+    public string SelectionAsText() => string.Join(Environment.NewLine, SelectedItems.Cast<ListViewItem>()
+        .Select(i => string.Join("\t", i.SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => s.Text))));
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Handled) return;
+        switch (e.KeyData)
+        {
+            case Keys.Control | Keys.A when MultiSelect:
+                BeginUpdate();
+                foreach (ListViewItem i in Items) i.Selected = true;
+                EndUpdate();
+                e.SuppressKeyPress = true;
+                break;
+            case Keys.Control | Keys.C:
+                Ui.CopyToClipboard(SelectionAsText());
+                e.SuppressKeyPress = true;
+                break;
+            case Keys.Enter when DefaultAction is not null && SelectedItems.Count > 0:
+                DefaultAction();
+                e.SuppressKeyPress = true;
+                break;
+        }
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Left && DefaultAction is not null && HitTest(e.Location).Item is not null) DefaultAction();
+    }
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -154,43 +252,90 @@ internal sealed class NavButton : Button
     }
 }
 
-internal static class PasswordDialog
+/// <summary>
+/// Asks for an archive password (twice for a new archive). It comes to the front when shown, also when an Explorer
+/// verb opened it (the forwarding instance allows that, see Program.Main), so typing goes here and not to Explorer.
+/// </summary>
+internal sealed class PasswordDialog : Form
 {
-    public static string? Ask(string prompt, bool confirm)
+    private readonly EditBox _first = new() { UseSystemPasswordChar = true, Width = 280 };
+    private readonly EditBox? _confirm;
+
+    /// <summary>The password after OK, without control characters.</summary>
+    public string? Password { get; private set; }
+
+    public PasswordDialog(string prompt, bool confirm)
     {
-        using var f = new Form
-        {
-            Text = "Osmium", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterScreen,
-            MinimizeBox = false, MaximizeBox = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            AutoScaleMode = AutoScaleMode.Dpi, AutoScaleDimensions = new SizeF(96f, 96f), Padding = new Padding(12), TopMost = true,
-        };
+        Text = "Osmium";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        Padding = new Padding(12);
+        TopMost = true;
         var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
         t.Controls.Add(Ui.Text(prompt));
-        var p1 = new TextBox { UseSystemPasswordChar = true, Width = 280 };
-        t.Controls.Add(p1);
-        TextBox? p2 = null;
+        t.Controls.Add(_first);
         if (confirm)
         {
             t.Controls.Add(Ui.Text("Confirm password"));
-            p2 = new TextBox { UseSystemPasswordChar = true, Width = 280 };
-            t.Controls.Add(p2);
+            _confirm = new EditBox { UseSystemPasswordChar = true, Width = 280 };
+            t.Controls.Add(_confirm);
         }
-        var ok = Ui.Button("OK", accent: true);
+        var ok = Ui.Button("OK", (_, _) => Check(), accent: true);
         ok.DialogResult = DialogResult.OK;
         var cancel = Ui.Button("Cancel");
         cancel.DialogResult = DialogResult.Cancel;
         t.Controls.Add(Ui.Bar(ok, cancel));
-        f.Controls.Add(t);
-        f.AcceptButton = ok;
-        f.CancelButton = cancel;
-        Theme.Apply(f);
-        while (true)
+        Controls.Add(t);
+        AcceptButton = ok;
+        CancelButton = cancel;
+        ActiveControl = _first;
+        Theme.Apply(this);
+    }
+
+    /// <summary>Shows the dialog; null when it was cancelled.</summary>
+    public static string? Ask(string prompt, bool confirm)
+    {
+        using var f = new PasswordDialog(prompt, confirm);
+        return f.ShowDialog() == DialogResult.OK ? f.Password : null;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try { Native.SetDarkTitleBar(Handle, Theme.IsDark); } catch (Exception) { }
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        Activate();
+        _first.Focus();
+    }
+
+    /// <summary>OK: keeps the dialog open on an empty or mismatched password, with the confirm box cleared.</summary>
+    private void Check()
+    {
+        // Control characters (a pasted tab or line break) are invisible here and could never be typed again.
+        string pw = TextInput.StripControlChars(_first.Text);
+        string? error = pw.Length == 0 ? "The password cannot be empty."
+            : _confirm is not null && TextInput.StripControlChars(_confirm.Text) != pw ? "The passwords do not match."
+            : null;
+        if (error is null)
         {
-            if (f.ShowDialog() != DialogResult.OK) return null;
-            if (p1.Text.Length == 0) { Ui.Error("The password cannot be empty."); continue; }
-            if (p2 is not null && p2.Text != p1.Text) { Ui.Error("The passwords do not match."); continue; }
-            return p1.Text;
+            Password = pw;
+            return;
         }
+        DialogResult = DialogResult.None; // the OK button had already set OK
+        Ui.Error(error);
+        if (_confirm is not null) _confirm.Text = "";
+        _first.SelectAll();
+        _first.Focus();
     }
 }
 

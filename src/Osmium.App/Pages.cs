@@ -19,7 +19,7 @@ internal sealed class CompressPage : UserControl, IPage
     private readonly TrayApp _app;
     private readonly FastList _list = Ui.List(("Name", 240), ("Folder", 220), ("Size", 90), ("Detected type", 170), ("Plan", 320));
     private readonly ComboBox _profile;
-    private readonly TextBox _output = new() { Width = 520 };
+    private readonly EditBox _output = new() { Width = 520 };
     private readonly CheckBox _encrypt = new() { Text = "Encrypt (AES-256, names hidden)", AutoSize = true };
     private readonly Label _estimate = Ui.Text("", muted: true);
     /// <summary>Per-input manual patches: full path → pipeline text, "store", or "exclude".</summary>
@@ -39,7 +39,7 @@ internal sealed class CompressPage : UserControl, IPage
         _list.AllowDrop = true;
         _list.DragEnter += (_, e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
         _list.DragDrop += (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] files) AddPaths(files); };
-        _list.KeyDown += (_, e) => { if (e.KeyCode == Keys.Delete) RemoveSelected(); };
+        _list.KeyDown += (_, e) => { if (e.KeyData == Keys.Delete) RemoveSelected(); };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Tune…", null, (_, _) => Tune(deep: false));
@@ -51,7 +51,7 @@ internal sealed class CompressPage : UserControl, IPage
         menu.Items.Add("Save patch as global rule", null, (_, _) => SavePatchAsRule());
         menu.Items.Add("Open containing folder", null, (_, _) => { if (Selected().FirstOrDefault() is { } p) Shell.Reveal(p); });
         _list.ContextMenuStrip = menu;
-        _list.DoubleClick += (_, _) => Tune(deep: false);
+        _list.DefaultAction = () => Tune(deep: false); // Enter or double-click
 
         var tools = Ui.Bar(
             Ui.Button("Add files…", (_, _) => BrowseFiles()),
@@ -83,6 +83,28 @@ internal sealed class CompressPage : UserControl, IPage
     }
 
     public void Activated() { }
+
+    /// <summary>Ctrl+V adds files and folders copied in Explorer; in the archive box it pastes text as usual.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.V) && ActiveControl is not TextBoxBase && PasteFiles()) return true;
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Adds the files and folders on the clipboard; false when it holds none.</summary>
+    internal bool PasteFiles()
+    {
+        List<string> paths;
+        try
+        {
+            if (!Clipboard.ContainsFileDropList()) return false;
+            paths = Clipboard.GetFileDropList().Cast<string>().Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
+        }
+        catch (System.Runtime.InteropServices.ExternalException) { return false; } // another program holds the clipboard
+        if (paths.Count == 0) return false;
+        AddPaths(paths);
+        return true;
+    }
 
     private static string SafeDir(string p) { try { return Path.GetDirectoryName(p) ?? ""; } catch (ArgumentException) { return ""; } }
 
@@ -536,16 +558,25 @@ internal sealed class RulesPage : UserControl, IPage
 {
     private readonly TrayApp _app;
     private readonly FastList _list = Ui.List(("Id", 160), ("On", 40), ("Priority", 60), ("Match", 300), ("Action", 360));
-    private readonly TextBox _json = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true };
-    private readonly TextBox _testPath = new() { Width = 360, PlaceholderText = "e.g. photos/raw/img001.bmp" };
+    private readonly EditBox _json = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true };
+    private readonly EditBox _testPath = new() { Width = 360, PlaceholderText = "e.g. photos/raw/img001.bmp" };
     private readonly Label _testResult = Ui.Text("", muted: true, maxWidth: 900);
+    /// <summary>The editor holds changes that are not in rules.json (typed, or added with "Add example").</summary>
+    private bool _dirty;
+    private bool _loading;
 
     public RulesPage(TrayApp app)
     {
         _app = app;
         _json.Font = Theme.Mono;
+        _json.TextChanged += (_, _) => { if (!_loading) _dirty = true; };
+        _testPath.EnterAction = TestPath;
         var tools = Ui.Bar(
-            Ui.Button("Reload", (_, _) => ReloadRules()),
+            Ui.Button("Reload", (_, _) =>
+            {
+                if (_dirty && !Ui.Confirm("Discard your unsaved changes and reload rules.json?")) return;
+                ReloadRules();
+            }),
             Ui.Button("Validate", (_, _) => ValidateRules()),
             Ui.Button("Save", (_, _) => Save(), accent: true),
             Ui.Button("Add example", (_, _) => AddExample()),
@@ -571,11 +602,29 @@ internal sealed class RulesPage : UserControl, IPage
         ReloadRules();
     }
 
-    public void Activated() => ReloadRules();
+    public bool HasUnsavedChanges => _dirty;
+
+    /// <summary>Shows rules.json again (it may have been changed by "Save patch as rule" or the Lab), unless the
+    /// editor holds unsaved changes.</summary>
+    public void Activated()
+    {
+        if (!_dirty) ReloadRules();
+    }
 
     private void ReloadRules()
     {
-        _json.Text = File.Exists(AppPaths.RulesFile) ? File.ReadAllText(AppPaths.RulesFile) : new RuleSet().ToJson();
+        string text;
+        try { text = File.Exists(AppPaths.RulesFile) ? File.ReadAllText(AppPaths.RulesFile) : new RuleSet().ToJson(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Error("rules.json could not be read: " + e.Message);
+            _testResult.Text = "rules.json could not be read: " + e.Message;
+            return;
+        }
+        _loading = true;
+        try { _json.Text = text; }
+        finally { _loading = false; }
+        _dirty = false;
         RefreshList();
     }
 
@@ -630,6 +679,7 @@ internal sealed class RulesPage : UserControl, IPage
         var problems = rs.Check(MethodRegistry.Default);
         if (problems.Count > 0 && !Ui.Confirm("There are problems:\n" + string.Join("\n", problems) + "\n\nSave anyway?")) return;
         rs.Save(AppPaths.RulesFile);
+        _dirty = false;
         _app.LoadRules();
         RefreshList();
     }
@@ -664,66 +714,144 @@ internal sealed class RulesPage : UserControl, IPage
 internal sealed class ClusterPage : UserControl, IPage
 {
     private readonly TrayApp _app;
-    private readonly TextBox _key = new() { Width = 560, UseSystemPasswordChar = true };
-    private readonly FastList _list = Ui.List(("Name", 180), ("Address", 200), ("Slots", 60), ("Status", 300));
+    private readonly EditBox _key = new() { UseSystemPasswordChar = true };
+    private readonly Button _reveal;
+    private readonly FastList _list = Ui.List(("Name", 180), ("Address", 200), ("Slots", 60), ("Status", 400));
     private readonly Label _local = Ui.Text("", muted: true, maxWidth: 900);
+    private readonly Label _found = Ui.Text("", muted: true, maxWidth: 900);
+    /// <summary>Shows and changes the "Lend this PC as a worker" setting.</summary>
+    private readonly CheckBox _lend = new() { Text = "Lend this PC to the cluster", AutoSize = true, Margin = new Padding(12, 6, 0, 0) };
+    /// <summary>The key box holds text the user typed, pasted or generated and has not saved yet.</summary>
+    private bool _keyEdited;
+    private bool _loadingKey, _syncingLend;
 
     public ClusterPage(TrayApp app)
     {
         _app = app;
-        _key.Text = app.Settings.Cluster.ClusterKey;
+        // A whole key (OSM1- and 11 groups: 70 characters) fits; monospaced so the groups line up when read aloud.
+        _key.Font = Theme.Mono;
+        _key.Width = _key.LogicalToDeviceUnits(560);
+        _key.TextChanged += (_, _) => { if (!_loadingKey) _keyEdited = true; };
+        _key.EnterAction = SaveKey;
+        LoadKey();
+        _reveal = Ui.RevealButton(_key);
         var keyRow = Ui.Bar(new Label { Text = "Cluster key:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) }, _key,
-            Ui.Button("Show", (_, _) => _key.UseSystemPasswordChar = !_key.UseSystemPasswordChar),
-            Ui.Button("Generate", (_, _) =>
-            {
-                if (_key.Text.Length > 0 && !Ui.Confirm("Replace the current key? Other PCs will need the new key.")) return;
-                _key.Text = ClusterKey.Generate().ToString();
-            }),
-            Ui.Button("Copy", (_, _) => { if (_key.Text.Length > 0) Clipboard.SetText(_key.Text); }),
+            _reveal,
+            Ui.Button("Generate", (_, _) => GenerateKey()),
+            Ui.Button("Copy", (_, _) => Ui.CopyToClipboard(ClusterSettings.NormalizeClusterKey(_key.Text))),
             Ui.Button("Save", (_, _) => SaveKey(), accent: true));
-        var tools = Ui.Bar(
-            Ui.Button("Find workers on this network", (_, _) => Discover()),
-            Ui.Button("Lend this PC", (_, _) => { var s = _app.Settings.Clone(); s.Cluster.LendThisPc = !s.Cluster.LendThisPc; _app.SaveSettings(s); UpdateLocal(); }));
+        _lend.CheckedChanged += (_, _) =>
+        {
+            if (_syncingLend) return;
+            var s = _app.Settings.Clone();
+            s.Cluster.LendThisPc = _lend.Checked;
+            _app.SaveSettings(s); // SettingsChanged updates the status line
+        };
+        var tools = Ui.Bar(Ui.Button("Find workers on this network", (_, _) => Discover()), _lend);
         Controls.Add(Ui.Page("Cluster",
             "PCs that share the same key can split compression work. Workers receive file contents (never names or passwords). Workers are refused if they run a different engine version; every remote result is re-verified here.",
-            _list, keyRow, tools, _local));
+            _list, keyRow, tools, _local, _found));
+        UpdateLocal();
+        app.SettingsChanged += OnSettingsChanged;
+        app.WorkerChanged += UpdateLocalIfAlive;
+        Disposed += (_, _) => { app.SettingsChanged -= OnSettingsChanged; app.WorkerChanged -= UpdateLocalIfAlive; };
+    }
+
+    private void UpdateLocalIfAlive()
+    {
+        if (!IsDisposed) UpdateLocal();
+    }
+
+    public bool HasUnsavedChanges => _keyEdited && _key.Text != _app.Settings.Cluster.ClusterKey;
+
+    public void Activated()
+    {
+        LoadKey();
         UpdateLocal();
     }
 
-    public void Activated() => UpdateLocal();
-
-    private void SaveKey()
+    private void OnSettingsChanged()
     {
-        try
-        {
-            if (_key.Text.Length > 0) ClusterKey.Parse(_key.Text);
-            var s = _app.Settings.Clone();
-            s.Cluster.ClusterKey = _key.Text.Trim();
-            _app.SaveSettings(s);
-            Ui.Info("Cluster key saved.");
-        }
-        catch (FormatException e) { Ui.Error(e.Message); }
+        if (IsDisposed) return;
+        LoadKey();
+        UpdateLocal();
     }
 
+    /// <summary>Shows the saved key, unless the box holds an unsaved one.</summary>
+    private void LoadKey()
+    {
+        if (_keyEdited) return;
+        _loadingKey = true;
+        try { _key.Text = _app.Settings.Cluster.ClusterKey; }
+        finally { _loadingKey = false; }
+    }
+
+    /// <summary>Puts a new random key in the box, unmasked so it can be read and copied (it is saved with Save).</summary>
+    internal void GenerateKey()
+    {
+        if (_key.Text.Length > 0 && !Ui.Confirm("Replace the current key? Other PCs will need the new key.")) return;
+        _key.Text = ClusterKey.Generate().ToString();
+        Ui.SetMasked(_key, _reveal, masked: false);
+    }
+
+    /// <summary>Saves the key in its canonical form (OSM1-XXXXX-…), however it was pasted; an empty box removes it.</summary>
+    private void SaveKey()
+    {
+        string key;
+        if (string.IsNullOrWhiteSpace(_key.Text)) key = "";
+        else
+        {
+            try { key = ClusterKey.Parse(_key.Text).ToString(); }
+            catch (FormatException e) { Ui.Error(e.Message, "Cluster key not saved"); return; }
+        }
+        var s = _app.Settings.Clone();
+        s.Cluster.ClusterKey = key;
+        _app.SaveSettings(s);
+        _keyEdited = false;
+        LoadKey();
+        Ui.Info(key.Length == 0 ? "Cluster key removed." : "Cluster key saved.");
+    }
+
+    /// <summary>The "Lend this PC" check and the status line: the worker's state, or why it does not run.</summary>
     private void UpdateLocal()
     {
+        var c = _app.Settings.Cluster;
+        _syncingLend = true;
+        try
+        {
+            _lend.Checked = c.LendThisPc;
+            _lend.Enabled = c.LendThisPc || !string.IsNullOrWhiteSpace(c.ClusterKey);
+        }
+        finally { _syncingLend = false; }
         var w = _app.LocalWorker;
-        _local.Text = w is null
-            ? $"This PC is not lending its CPU. {(string.IsNullOrEmpty(_app.Settings.Cluster.ClusterKey) ? "Save a cluster key first." : "Use \"Lend this PC\" to start the worker.")}"
-            : $"This PC is a worker on port {_app.Settings.Cluster.WorkerPort}: {w.Stats.Connections} coordinator(s), {w.Stats.Running} running, {w.Stats.TasksDone} task(s) done, {Ui.Bytes(w.Stats.BytesIn)} received.";
+        string? problem = _app.WorkerError;
+        _local.Text = problem
+            ?? (w is not null
+                ? $"This PC is a worker on port {c.WorkerPort}: {w.Stats.Connections} coordinator(s), {w.Stats.Running} running, {w.Stats.TasksDone} task(s) done, {Ui.Bytes(w.Stats.BytesIn)} received."
+                : string.IsNullOrWhiteSpace(c.ClusterKey)
+                    ? "This PC is not lending its CPU. Save a cluster key first."
+                    : "This PC is not lending its CPU. Turn on \"Lend this PC to the cluster\" to start the worker.");
+        _local.ForeColor = problem is null ? Theme.P.Muted : Theme.P.Danger;
     }
 
     private void Discover()
     {
+        if (string.IsNullOrWhiteSpace(_key.Text))
+        {
+            Ui.Info("Enter, paste or generate a cluster key first: workers only answer PCs that use the same key.");
+            return;
+        }
         ClusterKey key;
         try { key = ClusterKey.Parse(_key.Text); }
-        catch (FormatException e) { Ui.Error(e.Message); return; }
+        catch (FormatException e) { Ui.Error(e.Message, "Cluster key"); return; }
         Ui.RunSafe(this, async () =>
         {
             _list.Items.Clear();
+            _found.Text = "Looking for workers…";
             var found = await Discovery.ProbeAsync(key, TimeSpan.FromSeconds(2), CancellationToken.None);
             foreach (var f in found) _list.Items.Add(new ListViewItem([f.Name, f.Endpoint, f.Slots.ToString(), "found"]));
             foreach (var manual in _app.Settings.Cluster.Workers) _list.Items.Add(new ListViewItem(["(manual)", manual, "", "configured"]));
+            int authenticated = 0;
             foreach (ListViewItem item in _list.Items)
             {
                 try
@@ -732,13 +860,18 @@ internal sealed class ClusterPage : UserControl, IPage
                     item.SubItems[0].Text = n.Name;
                     item.SubItems[2].Text = n.Slots.ToString();
                     item.SubItems[3].Text = $"OK — authenticated, {Ui.Bytes(n.Memory)} memory";
+                    authenticated++;
                 }
                 catch (Exception e) when (e is IOException or System.Net.Sockets.SocketException or InvalidDataException or OperationCanceledException)
                 {
                     item.SubItems[3].Text = "error: " + e.Message;
                 }
             }
-            if (_list.Items.Count == 0) _list.Items.Add(new ListViewItem(["", "", "", "No workers answered. Is \"Lend this PC\" on and the firewall open (TCP 46510, UDP 46511)?"]));
+            // Discovery answers are authenticated with the key, so a PC with a different key stays silent.
+            _found.Text = _list.Items.Count == 0
+                ? "No workers answered. Every PC must use the same cluster key as this one and have \"Lend this PC\" turned on, and its firewall must allow TCP 46510 and UDP 46511."
+                : $"{_list.Items.Count} worker(s) listed, {authenticated} authenticated." +
+                  (authenticated < _list.Items.Count ? " The others show why they failed, for example a different cluster key or Osmium version." : "");
         });
     }
 }
@@ -749,26 +882,36 @@ internal sealed class SettingsPage : UserControl, IPage
 {
     private readonly TrayApp _app;
     private readonly ListBox _categories = new() { Dock = DockStyle.Left, Width = 190, IntegralHeight = false, BorderStyle = BorderStyle.None };
-    private readonly TextBox _search = new() { Width = 260, PlaceholderText = "Search settings" };
+    private readonly EditBox _search = new() { Width = 260, PlaceholderText = "Search settings" };
     private readonly SettingsRenderer _renderer = new() { Dock = DockStyle.Fill };
     private readonly Panel _watchPanel = new() { Dock = DockStyle.Bottom, Height = 0 };
+    /// <summary>Copy of the settings being edited. Only the entries in <see cref="_edited"/> are saved.</summary>
     private OsmiumSettings _working;
+    /// <summary>Keys of the settings the user changed since the last Apply or Revert (see <see cref="SettingsEdits"/>).</summary>
+    private readonly HashSet<string> _edited = new(StringComparer.Ordinal);
+    private bool _applying;
     private List<Osmium.Desktop.Settings.SettingDescriptor> _all = [];
     private readonly Label _dirty = Ui.Text("", muted: true);
+    /// <summary>Re-renders once typing in the search box pauses, not on every keystroke.</summary>
+    private readonly System.Windows.Forms.Timer _searchDelay = new() { Interval = 250 };
 
     public SettingsPage(TrayApp app)
     {
         _app = app;
         _working = app.Settings.Clone();
         foreach (var c in SettingReflector.Categories(_working)) _categories.Items.Add(c.Name);
-        _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; Render(); };
-        _search.TextChanged += (_, _) => Render();
-        _renderer.Changed += () => _dirty.Text = "Unsaved changes";
+        _categories.SelectedIndexChanged += (_, _) => { _search.Text = ""; RenderNow(); };
+        _searchDelay.Tick += (_, _) => RenderNow();
+        _search.TextChanged += (_, _) => { _searchDelay.Stop(); _searchDelay.Start(); };
+        _search.EnterAction = RenderNow;
+        Disposed += (_, _) => _searchDelay.Dispose();
+        _renderer.Changed += d => MarkEdited(d.Key);
         var tools = Ui.Bar(_search,
             Ui.Button("Apply", (_, _) => Apply(), accent: true),
-            Ui.Button("Revert", (_, _) => { _working = _app.Settings.Clone(); Render(); _dirty.Text = ""; }),
+            Ui.Button("Revert", (_, _) => Revert()),
             Ui.Button("Restore defaults", (_, _) => RestoreDefaults()),
             Ui.Button("Repair Explorer integration", (_, _) => Repair()),
+            Ui.Button("About Osmium…", (_, _) => _app.ShowAbout()),
             _dirty);
         var body = new Panel();
         body.Controls.Add(_renderer);
@@ -776,9 +919,33 @@ internal sealed class SettingsPage : UserControl, IPage
         body.Controls.Add(_categories);
         Controls.Add(Ui.Page("Settings", "Every option Osmium has. Settings marked EXPERIMENTAL need the master switch on the Experimental page.", body, tools));
         _categories.SelectedIndex = 0;
+        app.SettingsChanged += OnSettingsChanged;
+        Disposed += (_, _) => app.SettingsChanged -= OnSettingsChanged;
     }
 
-    public void Activated() { }
+    public bool HasUnsavedChanges => _edited.Count > 0;
+
+    public void Activated() => RefreshFromCurrent();
+
+    /// <summary>Settings were saved elsewhere (tray, Cluster page): show them, unless the page holds unsaved edits.
+    /// Those are kept, and Apply merges them onto whatever is current then.</summary>
+    private void OnSettingsChanged()
+    {
+        if (!_applying && !IsDisposed) RefreshFromCurrent();
+    }
+
+    private void RefreshFromCurrent()
+    {
+        if (_edited.Count > 0) return;
+        _working = _app.Settings.Clone();
+        Render();
+    }
+
+    private void MarkEdited(string key)
+    {
+        _edited.Add(key);
+        _dirty.Text = "Unsaved changes";
+    }
 
     public void ShowCategory(string name)
     {
@@ -787,6 +954,12 @@ internal sealed class SettingsPage : UserControl, IPage
     }
 
     public IEnumerable<string> CategoryNames => _categories.Items.Cast<string>();
+
+    private void RenderNow()
+    {
+        _searchDelay.Stop();
+        Render();
+    }
 
     private void Render()
     {
@@ -824,10 +997,22 @@ internal sealed class SettingsPage : UserControl, IPage
                 if (d.ShowDialog(this) != DialogResult.OK) return;
                 _working.Watch.Folders.Add(new WatchFolderConfig { Path = d.SelectedPath, Profile = _working.Compression.Profile });
                 Fill();
-                _dirty.Text = "Unsaved changes";
+                MarkEdited(SettingsEdits.WatchFolders);
             }),
-            Ui.Button("Remove", (_, _) => { foreach (ListViewItem i in list.SelectedItems) _working.Watch.Folders.Remove((WatchFolderConfig)i.Tag!); Fill(); _dirty.Text = "Unsaved changes"; }),
-            Ui.Button("Toggle", (_, _) => { foreach (ListViewItem i in list.SelectedItems) { var f = (WatchFolderConfig)i.Tag!; f.Enabled = !f.Enabled; } Fill(); _dirty.Text = "Unsaved changes"; }),
+            Ui.Button("Remove", (_, _) =>
+            {
+                if (list.SelectedItems.Count == 0) return;
+                foreach (ListViewItem i in list.SelectedItems) _working.Watch.Folders.Remove((WatchFolderConfig)i.Tag!);
+                Fill();
+                MarkEdited(SettingsEdits.WatchFolders);
+            }),
+            Ui.Button("Toggle", (_, _) =>
+            {
+                if (list.SelectedItems.Count == 0) return;
+                foreach (ListViewItem i in list.SelectedItems) { var f = (WatchFolderConfig)i.Tag!; f.Enabled = !f.Enabled; }
+                Fill();
+                MarkEdited(SettingsEdits.WatchFolders);
+            }),
             Ui.Text("New files are compressed to an \"_osmium\" subfolder once they stop changing; originals are kept.", muted: true));
         _watchPanel.Controls.Add(list);
         _watchPanel.Controls.Add(bar);
@@ -835,29 +1020,57 @@ internal sealed class SettingsPage : UserControl, IPage
         Fill();
     }
 
+    /// <summary>Saves the edited settings on top of the current ones, so changes made elsewhere since the page
+    /// was shown (tray toggles, a key saved on the Cluster page) are kept.</summary>
     private void Apply()
     {
-        _app.SaveSettings(_working);
+        if (_renderer.Errors is { Count: > 0 } errors)
+        {
+            Ui.Error("Correct these settings first (they show the problem below the field):\n\n" + string.Join("\n", errors), "Settings not saved");
+            return;
+        }
+        var merged = SettingsEdits.Apply(_app.Settings, _working, _edited);
+        _applying = true;
+        try { _app.SaveSettings(merged); }
+        finally { _applying = false; }
+        _edited.Clear();
         _working = _app.Settings.Clone();
         _dirty.Text = "Saved";
         Render();
     }
 
+    private void Revert()
+    {
+        _edited.Clear();
+        _working = _app.Settings.Clone();
+        Render();
+        _dirty.Text = "";
+    }
+
     private void RestoreDefaults()
     {
         string cat = _categories.SelectedItem as string ?? "General";
-        if (!Ui.Confirm($"Restore the defaults for \"{cat}\"?")) return;
+        var keys = SettingsEdits.KeysOf(cat);
+        string question = $"Restore the defaults for \"{cat}\"?";
+        if (keys.Contains("Cluster.ClusterKey") && !string.IsNullOrWhiteSpace(_working.Cluster.ClusterKey))
+            question += "\n\nThis also removes the cluster key when you click Apply. Your other PCs will then need a new key, or you will have to enter this one again.";
+        if (keys.Contains(SettingsEdits.WatchFolders) && _working.Watch.Folders.Count > 0)
+            question += $"\n\nThis also removes the {_working.Watch.Folders.Count} watched folder(s) from the list when you click Apply.";
+        if (!Ui.Confirm(question)) return;
         var defaults = new OsmiumSettings();
         var prop = typeof(OsmiumSettings).GetProperties().FirstOrDefault(p =>
             p.PropertyType.GetCustomAttributes(typeof(SettingsCategoryAttribute), false).OfType<SettingsCategoryAttribute>().FirstOrDefault()?.Name == cat);
-        prop?.SetValue(_working, prop.GetValue(defaults));
+        if (prop is null) return;
+        prop.SetValue(_working, prop.GetValue(defaults));
+        foreach (var key in keys) _edited.Add(key);
         Render();
         _dirty.Text = "Unsaved changes";
     }
 
+    /// <summary>Re-applies the saved integration settings (unsaved edits on this page are not used).</summary>
     private void Repair()
     {
-        if (_app.ApplyIntegration(_working)) Ui.Info("Explorer integration updated for your account.");
+        if (_app.ApplyIntegration(_app.Settings)) Ui.Info("Explorer integration updated for your account.");
         else Ui.Error("Could not update the registry; see the Log page.");
     }
 }
@@ -875,10 +1088,7 @@ internal sealed class LogPage : UserControl, IPage
         _list.Font = Theme.Mono;
         var tools = Ui.Bar(Ui.Button("Open log folder", (_, _) => AppLog.OpenFolder()),
             Ui.Button("Copy all", (_, _) =>
-            {
-                var text = string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}"));
-                if (text.Length > 0) Clipboard.SetText(text); // SetText throws on an empty string
-            }));
+                Ui.CopyToClipboard(string.Join(Environment.NewLine, AppLog.Snapshot().Select(e => $"{e.Time:HH:mm:ss} [{e.Level}] {e.Message}")))));
         Controls.Add(Ui.Page("Log", "Application events, shell invocations, worker activity and errors.", _list, tools));
         _timer.Tick += (_, _) => { if (Visible) Fill(); };
         _timer.Start();

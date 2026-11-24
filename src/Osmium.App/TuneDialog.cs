@@ -15,7 +15,7 @@ internal sealed class TuneDialog : Form
 {
     private readonly TrayApp _app;
     private readonly string _path;
-    private readonly TextBox _pipeline = new() { Width = 620 };
+    private readonly EditBox _pipeline = new() { Width = 620 };
     private readonly Label _valid = Ui.Text("", muted: true);
     private readonly CheckedListBox _filters = new() { Height = 130, Width = 220, CheckOnClick = true, IntegralHeight = false };
     private readonly ComboBox _codec;
@@ -77,6 +77,8 @@ internal sealed class TuneDialog : Form
         var ok = Ui.Button("Use this pipeline", (_, _) => Accept(), accent: true);
         var cancel = Ui.Button("Cancel", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
         root.Controls.Add(Ui.Bar(ok, cancel));
+        AcceptButton = ok;     // Enter
+        CancelButton = cancel; // Esc
         Controls.Add(root);
         Theme.Apply(this);
 
@@ -101,14 +103,8 @@ internal sealed class TuneDialog : Form
     {
         var m = MethodRegistry.Default.Get(_codec.SelectedItem!.ToString()!);
         if (!_paramState.ContainsKey(m.Name)) _paramState[m.Name] = ParamValues.Empty;
-        var descs = m.Params.Select(d => new Osmium.Desktop.Settings.SettingDescriptor
-        {
-            Category = m.DisplayName, Key = $"{m.Name}.{d.Name}", Label = d.Label, Description = d.Description,
-            ValueType = typeof(long), Min = d.Min, Max = d.Max, Default = d.Default, Experimental = d.Experimental,
-            Unit = d.Type == ParamType.Size ? " bytes" : null,
-            Get = () => _paramState[m.Name].Get(d.Name, d.Default),
-            Set = v => { _paramState[m.Name] = _paramState[m.Name].With(d.Name, Convert.ToInt64(v)); SyncFromBuilder(); },
-        }).ToList();
+        // On/off parameters as checkboxes, choices by name, sizes as "64M"; the values map back unchanged.
+        var descs = ParamDescriptors.For(m, () => _paramState[m.Name], p => { _paramState[m.Name] = p; SyncFromBuilder(); });
         _params.Render(descs, descs, () => true, m.Description);
     }
 
@@ -195,6 +191,7 @@ internal sealed class TuneDialog : Form
 
     private void Accept()
     {
+        Validate(); // commits a number still being typed (Enter can arrive before the box loses focus)
         try
         {
             Pipeline = PipelineSpec.Parse(_pipeline.Text, MethodRegistry.Default).ToString();

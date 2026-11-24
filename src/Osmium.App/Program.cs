@@ -40,6 +40,9 @@ internal static class Program
                 "tray" => new IpcMessage { Type = "ping" },
                 _ => new IpcMessage { Type = "show" },
             };
+            // Explorer started this process with the right to take the foreground. Hand it to the running
+            // instance, or the window or password dialog it opens stays behind Explorer and typing goes there.
+            try { Native.AllowSetForegroundWindow(Native.AsfwAny); } catch (Exception) { }
             bool ok = IpcProtocol.ForwardAsync(pipe, msg, TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
             return ok ? 0 : 2;
         }

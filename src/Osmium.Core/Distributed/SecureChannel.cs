@@ -13,6 +13,9 @@ namespace Osmium.Core.Distributed;
 public sealed class ClusterKey
 {
     private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
+    private const string Prefix = "OSM1";
+    /// <summary>32 key bytes + 2 checksum bytes = 272 bits = 55 base32 characters (the last one has 3 zero bits).</summary>
+    private const int BodyLength = 55;
     public byte[] Master { get; }
     public byte[] AuthKey { get; }
     public byte[] DiscoveryKey { get; }
@@ -28,26 +31,69 @@ public sealed class ClusterKey
 
     public static ClusterKey Generate() => new(RandomNumberGenerator.GetBytes(32));
 
+    /// <summary>
+    /// Parses a key the way people paste it: letter case, spaces, line breaks, every kind of dash and invisible
+    /// characters (zero-width spaces, byte-order marks, soft hyphens, direction marks) are ignored. Errors are
+    /// <see cref="FormatException"/>s with a message that can be shown to the user as is.
+    /// </summary>
     public static ClusterKey Parse(string text)
     {
-        var s = text.Trim().ToUpperInvariant();
-        if (!s.StartsWith("OSM1-")) throw new FormatException("Cluster keys start with OSM1-.");
-        var chars = s[5..].Replace("-", "");
-        var bytes = new List<byte>();
-        int buffer = 0, bits = 0;
-        foreach (char c in chars)
+        ArgumentNullException.ThrowIfNull(text);
+        string s = Normalize(text);
+        if (s.Length == 0) throw new FormatException("The cluster key is empty.");
+        if (!s.StartsWith(Prefix, StringComparison.Ordinal))
+            throw new FormatException("This is not an Osmium cluster key: cluster keys start with OSM1-.");
+        // The prefix contains '1', so the check for excluded characters starts after it.
+        string body = s[Prefix.Length..];
+        foreach (char c in body)
         {
-            int v = Alphabet.IndexOf(c);
-            if (v < 0) throw new FormatException($"Invalid character '{c}' in cluster key.");
-            buffer = (buffer << 5) | v;
-            bits += 5;
-            if (bits >= 8) { bytes.Add((byte)(buffer >> (bits - 8))); bits -= 8; }
+            if (Alphabet.Contains(c)) continue;
+            if (c is 'I' or 'O' or '0' or '1')
+                throw new FormatException($"The cluster key contains '{c}', which cluster keys never use (they have no I, O, 0 or 1). Check the key for a typo.");
+            throw new FormatException($"The cluster key contains '{c}' (U+{(int)c:X4}), which is not a cluster key character.");
         }
-        if (bytes.Count < 34) throw new FormatException("Cluster key is too short.");
-        var master = bytes.Take(32).ToArray();
-        var check = bytes.Skip(32).Take(2).ToArray();
-        if (!SHA256.HashData(master).AsSpan(0, 2).SequenceEqual(check)) throw new FormatException("Cluster key checksum mismatch (typo?).");
+        if (body.Length < BodyLength)
+            throw new FormatException($"The cluster key is too short: {body.Length} of {BodyLength} characters after OSM1-. Copy the whole key.");
+        if (body.Length > BodyLength)
+            throw new FormatException($"The cluster key is too long: {body.Length} of {BodyLength} characters after OSM1-.");
+
+        var bytes = new byte[34];
+        int buffer = 0, bits = 0, n = 0;
+        foreach (char c in body)
+        {
+            buffer = (buffer << 5) | Alphabet.IndexOf(c);
+            bits += 5;
+            if (bits >= 8) { bytes[n++] = (byte)(buffer >> (bits - 8)); bits -= 8; }
+            buffer &= (1 << bits) - 1;
+        }
+        var master = bytes[..32];
+        bool padIsZero = buffer == 0; // the 3 bits after the checksum: a non-zero value is a typo in the last character
+        if (!padIsZero || !SHA256.HashData(master).AsSpan(0, 2).SequenceEqual(bytes.AsSpan(32, 2)))
+            throw new FormatException("The cluster key does not match its checksum. Check it for a typo, or copy it again.");
         return new ClusterKey(master);
+    }
+
+    /// <summary>Upper-cases and drops everything that is not part of the key text itself.</summary>
+    private static string Normalize(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (char c in text)
+            if (!IsIgnorable(c)) sb.Append(char.ToUpperInvariant(c));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Whitespace (including line breaks and no-break spaces), control characters, dashes (U+002D, U+2010–U+2015,
+    /// U+2212 minus, U+00AD soft hyphen, U+FE63, U+FF0D and any other dash punctuation) and invisible format
+    /// characters (U+200B–U+200D, U+2060 word joiner, U+FEFF byte-order mark, direction marks).
+    /// </summary>
+    private static bool IsIgnorable(char c)
+    {
+        if (char.IsWhiteSpace(c) || char.IsControl(c)) return true;
+        if (c is '-' or '\u2212' or '\u00AD' or '\uFE63' or '\uFF0D' or (>= '\u2010' and <= '\u2015')) return true;
+        if (c is (>= '\u200B' and <= '\u200D') or '\u2060' or '\uFEFF') return true;
+        var cat = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+        return cat is System.Globalization.UnicodeCategory.DashPunctuation or System.Globalization.UnicodeCategory.Format;
     }
 
     public override string ToString()

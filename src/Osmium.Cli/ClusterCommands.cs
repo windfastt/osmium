@@ -62,13 +62,14 @@ internal static class WorkerCommand
 
     public static async Task<int> RunAsync(Args a, CancellationToken ct)
     {
+        // A worker is only useful with the key the other PCs already use: a fresh random key on every start (the
+        // old behaviour) was never saved and matched nobody.
         var keyText = a.Get("key") ?? Environment.GetEnvironmentVariable("OSMIUM_CLUSTER_KEY");
-        if (keyText is null)
-        {
-            var k = ClusterKey.Generate();
-            keyText = k.ToString();
-            Console.WriteLine($"No --key given; generated a new cluster key:\n  {keyText}");
-        }
+        if (string.IsNullOrWhiteSpace(keyText))
+            throw new ArgumentException(
+                "osmium worker needs the cluster key that your other PCs use. Create one with 'osmium keygen' " +
+                "(or copy it from the Cluster page of the Osmium app), then run: osmium worker --key OSM1-… " +
+                "(or set OSMIUM_CLUSTER_KEY).");
         var server = new WorkerServer(new WorkerOptions
         {
             Key = ClusterKey.Parse(keyText),

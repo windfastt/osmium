@@ -90,7 +90,13 @@ internal sealed class MainForm : Form
         foreach (var (n, b) in _buttons) b.Selected = n == name;
         CurrentPage = name;
         if (page is IPage ip) ip.Activated();
+        // Keyboard users continue in the page (its first control), not on the navigation button.
+        if (Visible && !page.ContainsFocus) page.SelectNextControl(null, forward: true, tabStopOnly: true, nested: true, wrap: false);
     }
+
+    /// <summary>Names of the pages that hold unsaved edits, in navigation order.</summary>
+    public IReadOnlyList<string> PagesWithUnsavedChanges() =>
+        Nav.Select(n => n.Name).Where(n => _pages.TryGetValue(n, out var p) && p is IPage ip && ip.HasUnsavedChanges).ToList();
 
     private void UpdateStatus()
     {
@@ -99,7 +105,8 @@ internal sealed class MainForm : Form
         var w = _app.LocalWorker?.Stats;
         _status.Text = $"{(running + queued == 0 ? "Idle" : $"{running} running, {queued} queued")}   ·   " +
                        $"Profile: {_app.Settings.Compression.Profile}   ·   " +
-                       (w is null ? "Worker: off" : $"Worker: {w.Connections} coordinator(s), {w.TasksDone} task(s) done") +
+                       (w is not null ? $"Worker: {w.Connections} coordinator(s), {w.TasksDone} task(s) done"
+                           : _app.WorkerError is not null ? "Worker: not running (see Cluster)" : "Worker: off") +
                        (Osmium.Desktop.Settings.AppPaths.Portable ? "   ·   portable mode" : "");
     }
 
@@ -136,13 +143,18 @@ internal sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Ctrl+1..8 with the top-row digits or the numeric keypad
         int idx = keyData switch
         {
-            Keys.Control | Keys.D1 => 0, Keys.Control | Keys.D2 => 1, Keys.Control | Keys.D3 => 2, Keys.Control | Keys.D4 => 3,
-            Keys.Control | Keys.D5 => 4, Keys.Control | Keys.D6 => 5, Keys.Control | Keys.D7 => 6, Keys.Control | Keys.D8 => 7, _ => -1,
+            Keys.Control | Keys.D1 or Keys.Control | Keys.NumPad1 => 0, Keys.Control | Keys.D2 or Keys.Control | Keys.NumPad2 => 1,
+            Keys.Control | Keys.D3 or Keys.Control | Keys.NumPad3 => 2, Keys.Control | Keys.D4 or Keys.Control | Keys.NumPad4 => 3,
+            Keys.Control | Keys.D5 or Keys.Control | Keys.NumPad5 => 4, Keys.Control | Keys.D6 or Keys.Control | Keys.NumPad6 => 5,
+            Keys.Control | Keys.D7 or Keys.Control | Keys.NumPad7 => 6, Keys.Control | Keys.D8 or Keys.Control | Keys.NumPad8 => 7,
+            _ => -1,
         };
         if (idx >= 0) { Navigate(Nav[idx].Name); return true; }
         if (keyData == (Keys.Control | Keys.Oemcomma)) { Navigate("Settings"); return true; }
+        // Exit asks first when jobs run or a page holds unsaved edits (see TrayApp.ExitApp).
         if (keyData == (Keys.Control | Keys.Q)) { _app.ExitApp(confirm: true); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
     }
@@ -150,7 +162,11 @@ internal sealed class MainForm : Form
 
 internal interface IPage
 {
+    /// <summary>Called every time the page is shown.</summary>
     void Activated();
+
+    /// <summary>The page holds edits that are not saved yet (asked about before Osmium exits).</summary>
+    bool HasUnsavedChanges => false;
 }
 
 /// <summary>
@@ -160,12 +176,15 @@ internal interface IPage
 internal sealed class SettingsRenderer : Panel
 {
     private readonly FlowLayoutPanel _flow = new() { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
-    private readonly ErrorProvider _errors = new() { BlinkStyle = ErrorBlinkStyle.NeverBlink };
     private readonly List<(SettingDescriptor D, Control Row, Control Editor)> _rows = [];
+    /// <summary>The error line under each editor, and the errors shown now (that input was not applied).</summary>
+    private readonly Dictionary<SettingDescriptor, Label> _errorLabels = [];
+    private readonly Dictionary<SettingDescriptor, string> _errors = [];
     private IReadOnlyList<SettingDescriptor> _all = [];
     private Func<bool> _experimentalEnabled = () => true;
 
-    public event Action? Changed;
+    /// <summary>Raised after the user changed a setting's value (the descriptor's setter has run).</summary>
+    public event Action<SettingDescriptor>? Changed;
 
     public SettingsRenderer()
     {
@@ -184,6 +203,8 @@ internal sealed class SettingsRenderer : Panel
         _flow.Controls.Clear();
         foreach (var c in old) c.Dispose();
         _rows.Clear();
+        _errorLabels.Clear();
+        _errors.Clear();
         if (banner is not null)
         {
             var b = new Label { Text = banner, AutoSize = true, MaximumSize = new Size(Math.Max(300, ClientSize.Width - 40), 0), Padding = new Padding(8), Tag = "experimental", Margin = new Padding(0, 0, 0, 10) };
@@ -195,7 +216,7 @@ internal sealed class SettingsRenderer : Panel
             if (d.Group is not null && d.Group != group)
             {
                 group = d.Group;
-                _flow.Controls.Add(new Label { Text = group, Font = Theme.Bold, AutoSize = true, Margin = new Padding(0, 12, 0, 4) });
+                _flow.Controls.Add(new Label { Text = group, Font = Theme.Bold, AutoSize = true, Margin = new Padding(0, 12, 0, 4), UseMnemonic = false });
             }
             var (row, editor) = BuildRow(d);
             _rows.Add((d, row, editor));
@@ -211,18 +232,24 @@ internal sealed class SettingsRenderer : Panel
     {
         var row = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = Math.Max(300, ClientSize.Width - 30), Margin = new Padding(0, 4, 0, 8) };
         var title = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
-        title.Controls.Add(new Label { Text = d.Label, AutoSize = true, Font = Theme.Bold, Margin = new Padding(0, 0, 6, 0) });
+        title.Controls.Add(new Label { Text = d.Label, AutoSize = true, Font = Theme.Bold, Margin = new Padding(0, 0, 6, 0), UseMnemonic = false });
         if (d.Experimental) title.Controls.Add(new Label { Text = "EXPERIMENTAL", AutoSize = true, Font = Theme.Small, Tag = "experimental" });
         if (d.Dangerous) title.Controls.Add(new Label { Text = "CAUTION", AutoSize = true, Font = Theme.Small, Tag = "experimental" });
         if (d.Advanced) title.Controls.Add(new Label { Text = "advanced", AutoSize = true, Font = Theme.Small, Tag = "muted" });
         if (d.RequiresRestart) title.Controls.Add(new Label { Text = "restart required", AutoSize = true, Font = Theme.Small, Tag = "muted" });
         row.Controls.Add(title);
         if (!string.IsNullOrEmpty(d.Description))
-            row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3) });
+            row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3), UseMnemonic = false });
+        var error = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(760, 0), Tag = "danger", Margin = new Padding(0, 3, 0, 0), UseMnemonic = false };
+        _errorLabels[d] = error;
         var editor = BuildEditor(d);
         row.Controls.Add(editor);
+        row.Controls.Add(error);
         return (row, editor);
     }
+
+    /// <summary>Settings whose last input was rejected, as "label: reason". The rejected input was not applied.</summary>
+    public IReadOnlyList<string> Errors => _errors.Select(kv => $"{kv.Key.Label}: {kv.Value}").ToList();
 
     private Control BuildEditor(SettingDescriptor d)
     {
@@ -231,18 +258,26 @@ internal sealed class SettingsRenderer : Panel
         if (t == typeof(bool))
         {
             var cb = new CheckBox { Text = "Enabled", AutoSize = true, Checked = value is true };
+            bool restoring = false;
             cb.CheckedChanged += (_, _) =>
             {
-                if (cb.Checked && d.WarningText is not null && !Ui.Confirm(d.WarningText + "\n\nContinue?")) { cb.Checked = false; return; }
-                Commit(d, cb, cb.Checked);
+                if (restoring) return;
+                if (d.NeedsConfirmation(cb.Checked) && !Ui.Confirm(d.WarningText + "\n\nContinue?"))
+                {
+                    restoring = true; // put the box back without asking again
+                    try { cb.Checked = !cb.Checked; }
+                    finally { restoring = false; }
+                    return;
+                }
+                Commit(d, cb.Checked);
             };
             return cb;
         }
-        if (t.IsEnum)
+        if (t.IsEnum || d.Choices is { Count: > 0 })
         {
             var combo = Ui.Combo(d.Choices ?? [], value?.ToString());
             combo.Width = 220;
-            combo.SelectedIndexChanged += (_, _) => Commit(d, combo, combo.SelectedItem?.ToString());
+            combo.SelectedIndexChanged += (_, _) => Commit(d, combo.SelectedItem?.ToString());
             return combo;
         }
         if (SettingDescriptor.IsNumeric(t))
@@ -251,10 +286,10 @@ internal sealed class SettingsRenderer : Panel
             {
                 Minimum = (decimal)(double.IsNaN(d.Min) ? -1_000_000_000 : d.Min),
                 Maximum = (decimal)(double.IsNaN(d.Max) ? 1_000_000_000 : d.Max),
-                Increment = (decimal)d.Step, Width = 160, ThousandsSeparator = true,
+                Increment = (decimal)d.Step, Width = 160, ThousandsSeparator = d.GroupDigits,
             };
             n.Value = Math.Clamp(Convert.ToDecimal(value ?? 0, CultureInfo.InvariantCulture), n.Minimum, n.Maximum);
-            n.ValueChanged += (_, _) => Commit(d, n, t == typeof(int) ? (object)(int)n.Value : t == typeof(long) ? (long)n.Value : (double)n.Value);
+            n.ValueChanged += (_, _) => Commit(d, t == typeof(int) ? (object)(int)n.Value : t == typeof(long) ? (long)n.Value : (double)n.Value);
             if (d.Unit is null) return n;
             var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             p.Controls.Add(n);
@@ -263,12 +298,30 @@ internal sealed class SettingsRenderer : Panel
         }
         if (t == typeof(List<string>))
         {
-            var tb = new TextBox { Multiline = true, Width = 420, Height = 80, ScrollBars = ScrollBars.Vertical, Text = string.Join(Environment.NewLine, value as List<string> ?? []) };
-            tb.TextChanged += (_, _) => Commit(d, tb, tb.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList());
+            var tb = new EditBox { Multiline = true, AcceptsReturn = true, Width = 420, Height = 80, ScrollBars = ScrollBars.Vertical, Text = string.Join(Environment.NewLine, value as List<string> ?? []) };
+            tb.TextChanged += (_, _) => Commit(d, tb.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList());
             return tb;
         }
-        var text = new TextBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
-        text.TextChanged += (_, _) => Commit(d, text, text.Text);
+        var text = new EditBox { Width = 420, Text = value?.ToString() ?? "", UseSystemPasswordChar = d.Editor == SettingEditor.Password };
+        text.TextChanged += (_, _) => Commit(d, text.Text);
+        if (d.Editor == SettingEditor.ByteSize)
+        {
+            text.Width = 120;
+            var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+            p.Controls.Add(text);
+            p.Controls.Add(new Label { Text = "bytes, or with K, M or G (for example 64M)", AutoSize = true, Padding = new Padding(0, 5, 0, 0), Tag = "muted" });
+            return p;
+        }
+        if (d.Editor == SettingEditor.Password)
+        {
+            // Wide enough for a whole cluster key (70 characters), scaled for the monitor's DPI.
+            text.Font = Theme.Mono;
+            text.Width = text.LogicalToDeviceUnits(560);
+            var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+            p.Controls.Add(text);
+            p.Controls.Add(Ui.RevealButton(text));
+            return p;
+        }
         if (d.Editor is SettingEditor.FolderPath or SettingEditor.FilePath)
         {
             var p = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
@@ -291,15 +344,28 @@ internal sealed class SettingsRenderer : Panel
         return text;
     }
 
-    private void Commit(SettingDescriptor d, Control editor, object? value)
+    private void Commit(SettingDescriptor d, object? value)
     {
-        var err = d.Validate(value);
-        _errors.SetError(editor, err ?? "");
+        string? err = d.Validate(value);
+        if (err is null)
+        {
+            try { d.Set(value); }
+            catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException or OverflowException) { err = e.Message; }
+        }
+        SetError(d, err);
         if (err is not null) return;
-        try { d.Set(value); }
-        catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException) { _errors.SetError(editor, e.Message); return; }
         UpdateStates();
-        Changed?.Invoke();
+        Changed?.Invoke(d);
+    }
+
+    /// <summary>Shows (or clears) the error line under a setting's editor.</summary>
+    private void SetError(SettingDescriptor d, string? message)
+    {
+        if (message is null) _errors.Remove(d);
+        else _errors[d] = message;
+        if (!_errorLabels.TryGetValue(d, out var label)) return;
+        label.Text = message ?? "";
+        label.Visible = message is not null;
     }
 
     private void UpdateStates()

@@ -9,6 +9,24 @@ public static class TrayText
 
     public static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 
+    /// <summary>Text for a menu item: '&amp;' would otherwise underline the next letter instead of showing (file names).</summary>
+    public static string MenuText(string s) => s.Replace("&", "&&", StringComparison.Ordinal);
+
+    /// <summary>The question asked before Osmium exits, or null when nothing would be lost.</summary>
+    /// <param name="jobsRunning">Jobs are queued or running (and "Confirm exit while jobs run" is on).</param>
+    /// <param name="unsavedPages">Pages with unsaved edits, e.g. "Settings", "Rules".</param>
+    public static string? ExitQuestion(bool jobsRunning, IReadOnlyList<string> unsavedPages)
+    {
+        var lines = new List<string>();
+        if (jobsRunning) lines.Add("Jobs are still running. Exiting cancels them.");
+        if (unsavedPages.Count > 0)
+        {
+            string names = unsavedPages.Count == 1 ? unsavedPages[0] : string.Join(", ", unsavedPages.Take(unsavedPages.Count - 1)) + " and " + unsavedPages[^1];
+            lines.Add($"Unsaved changes on the {names} {(unsavedPages.Count == 1 ? "page" : "pages")} will be lost.");
+        }
+        return lines.Count == 0 ? null : string.Join("\n", lines) + "\n\nExit Osmium?";
+    }
+
     public static string Bytes(long b) => b switch
     {
         < 1024 => $"{b} B",
@@ -30,6 +48,18 @@ public static class TrayText
             : $"Osmium — {(j0.State == JobState.Paused ? "paused" : j0.Phase.ToLowerInvariant())} {j0.Fraction:P0}: {j0.Name}";
         if (queued > 0 && j0 is not null) s += $" (+{queued} queued)";
         return Truncate(s, TooltipMax);
+    }
+
+    /// <summary>
+    /// The tooltip with a problem that needs attention (e.g. an invalid cluster key) as a second line. The job
+    /// line is shortened first, so the warning stays readable within <see cref="TooltipMax"/>.
+    /// </summary>
+    public static string Tooltip(IReadOnlyList<JobSnapshot> jobs, string? warning)
+    {
+        string tip = Tooltip(jobs);
+        if (string.IsNullOrWhiteSpace(warning)) return tip;
+        string w = Truncate(warning.Trim(), 70);
+        return Truncate(tip, TooltipMax - 1 - w.Length) + "\n" + w;
     }
 
     public static (string Title, string Body, bool Error) Completion(JobSnapshot j) => j.State switch
