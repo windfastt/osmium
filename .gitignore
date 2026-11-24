@@ -7,6 +7,4 @@ artifacts/
 TestResults/
 *.osa.tmp
 
-# Claude Code session data (agent worktrees)
-.claude/
 __pycache__/

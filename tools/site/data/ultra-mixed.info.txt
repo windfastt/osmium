@@ -1,4 +1,4 @@
-Archive:      /tmp/claude-0/-home-user/d49b7011-dbfa-5250-9b09-e5efcfbf7745/scratchpad/prof/u-new.osa
+Archive:      mixed-folder.osa
 Format:       .osa 1.0   created by Osmium 0.1.1
 Encrypted:    no
 Experimental: no
