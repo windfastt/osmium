@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Osmium.Core\Osmium.Core.csproj" />
+    <ProjectReference Include="..\Osmium.Desktop\Osmium.Desktop.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- `osmium license` prints these, so the single-file executable carries its own notices. -->

@@ -345,10 +345,11 @@ internal sealed class PasswordDialog : Form
     /// <summary>OK: keeps the dialog open on an empty or mismatched password, with the confirm box cleared.</summary>
     private void Check()
     {
-        // Control characters (a pasted tab or line break) are invisible here and could never be typed again.
-        string pw = TextInput.StripControlChars(_first.Text);
+        // A new password loses invisible control characters (a pasted tab or line break); one for an existing archive is used as typed.
+        bool isNew = _confirm is not null;
+        string pw = TextInput.PasswordFromText(_first.Text, isNew);
         string? error = pw.Length == 0 ? "The password cannot be empty."
-            : _confirm is not null && TextInput.StripControlChars(_confirm.Text) != pw ? "The passwords do not match."
+            : _confirm is not null && TextInput.PasswordFromText(_confirm.Text, isNew) != pw ? "The passwords do not match."
             : null;
         if (error is null)
         {

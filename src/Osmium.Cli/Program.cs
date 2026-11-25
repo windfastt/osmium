@@ -252,16 +252,15 @@ namespace Osmium.Cli
                 while (true)
                 {
                     var k = Console.ReadKey(intercept: true);
-                    if (k.Key == ConsoleKey.Enter) break;
-                    if (k.Key == ConsoleKey.C && k.Modifiers.HasFlag(ConsoleModifiers.Control))
+                    var action = Osmium.Desktop.TextInput.ClassifyPromptKey(k.Key, k.Modifiers, k.KeyChar);
+                    if (action == Osmium.Desktop.TextInput.PromptAction.Enter) break;
+                    if (action == Osmium.Desktop.TextInput.PromptAction.Cancel)
                     {
                         Console.Error.WriteLine();
                         throw new OperationCanceledException();
                     }
-                    if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
-                    // Arrows, Tab, Esc, function keys and dead keys produce '\0' or control characters: never part of a password.
-                    if (char.IsControl(k.KeyChar) || k.KeyChar == '\0') continue;
-                    sb.Append(k.KeyChar);
+                    if (action == Osmium.Desktop.TextInput.PromptAction.Backspace) { if (sb.Length > 0) sb.Length--; }
+                    else if (action == Osmium.Desktop.TextInput.PromptAction.Append) sb.Append(k.KeyChar);
                 }
             }
             finally { Console.TreatControlCAsInput = treatCtrlC; }
