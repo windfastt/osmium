@@ -71,24 +71,62 @@ internal static class Ui
     }
 
     /// <summary>A page: heading, optional subtitle, then the given content filling the rest.</summary>
-    public static Control Page(string title, string subtitle, Control content, params Control[] top)
+    public static Control Page(string title, string subtitle, Control content, params Control[] top) =>
+        Page(new PageHeader(title, subtitle), content, top);
+
+    /// <summary>A page: its header's lines, the <paramref name="top"/> rows (tool bars, status lines), then
+    /// <paramref name="content"/> filling the rest. The header can be changed while the page is shown.</summary>
+    public static Control Page(PageHeader header, Control content, params Control[] top)
     {
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(20, 16, 20, 12) };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.Controls.Add(Heading(title));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.Controls.Add(Text(subtitle, muted: true, maxWidth: 900));
+        // Every row is placed by number: a hidden line (an empty spec) leaves its row empty, so the rows after it keep
+        // their styles.
+        int row = 0;
+        foreach (var line in header.Lines)
+        {
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.Controls.Add(line, 0, row++);
+        }
         foreach (var t in top)
         {
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.Dock = DockStyle.Fill;
-            root.Controls.Add(t);
+            root.Controls.Add(t, 0, row++);
         }
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         content.Dock = DockStyle.Fill;
-        root.Controls.Add(content);
+        root.Controls.Add(content, 0, row);
         return root;
     }
+
+    /// <summary>Content in a card, with an optional heading above it.</summary>
+    public static CardPanel Card(Control content, string? heading = null) => new(content, heading);
+
+    /// <summary>The page's main action.</summary>
+    public static Button Primary(string text, EventHandler? click = null) => Button(text, click, accent: true);
+
+    /// <summary>A line of facts in the spec style (muted, small).</summary>
+    public static Label Spec(string text) => new() { Text = text, Font = Theme.Spec, AutoSize = true, Tag = "muted", UseMnemonic = false, Margin = new Padding(0, 2, 0, 2) };
+
+    /// <summary>A short label for a state: EXPERIMENTAL, CAUTION, ENCRYPTED…</summary>
+    public static Label Tag(string text, TagKind kind = TagKind.Neutral)
+    {
+        var l = new Label { Text = text, Font = Theme.Small, AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 0, 6, 0) };
+        switch (kind)
+        {
+            case TagKind.Neutral: l.Tag = "muted"; break;
+            case TagKind.Warning: l.Tag = "experimental"; break;
+            case TagKind.Danger: l.Tag = "danger"; break;
+            default:
+                l.Tag = "keep"; // Theme.Apply leaves its colour alone
+                l.ForeColor = kind == TagKind.Success ? Theme.P.SuccessText : Theme.P.AccentInk;
+                break;
+        }
+        return l;
+    }
+
+    /// <summary>A one-pixel line across its parent, between sections.</summary>
+    public static Control Divider() => new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Theme.P.Line, Tag = "keep", Margin = new Padding(0, 6, 0, 6) };
 
     public static string Bytes(long b) => Osmium.Desktop.Tray.TrayText.Bytes(b);
 
@@ -132,6 +170,9 @@ internal static class Ui
         }
     }
 }
+
+/// <summary>What a <see cref="Ui.Tag"/> stands for, which sets its colour.</summary>
+internal enum TagKind { Neutral, Accent, Warning, Danger, Success }
 
 /// <summary>
 /// TextBox with the keyboard behaviour Osmium wants on top of WinForms (which already makes Ctrl+Backspace delete the
@@ -218,6 +259,7 @@ internal sealed class FastList : ListView
             foreach (ColumnHeader c in Columns) c.Width = c.Width * DeviceDpi / _scaledFor;
             _scaledFor = DeviceDpi;
         }
+        FitFlexColumn();
     }
 
     public FastList()
@@ -227,6 +269,74 @@ internal sealed class FastList : ListView
         HideSelection = false;
         DoubleBuffered = true;
         BorderStyle = BorderStyle.None;
+    }
+
+    private int _flexColumn = -1, _flexMin;
+    private EmptyState? _empty;
+
+    /// <summary>Gives the width the other columns leave to <paramref name="column"/> whenever the list is resized,
+    /// never less than <paramref name="minWidth"/> logical pixels.</summary>
+    public void Flex(int column, int minWidth)
+    {
+        _flexColumn = column;
+        _flexMin = minWidth;
+        FitFlexColumn();
+    }
+
+    /// <summary>Right-aligns the text of these columns (numbers, sizes). The first column always stays left-aligned.</summary>
+    public void RightAlign(params int[] columns)
+    {
+        foreach (int c in columns) Columns[c].TextAlign = HorizontalAlignment.Right;
+    }
+
+    /// <summary>The height of one row in device pixels.</summary>
+    public int RowHeight =>
+        IsHandleCreated && (VirtualMode ? VirtualListSize : Items.Count) > 0 ? GetItemRect(0).Height
+        : Math.Max(Font.Height + LogicalToDeviceUnits(4), SmallImageList?.ImageSize.Height ?? 0);
+
+    /// <summary>Shows one of <paramref name="icons"/> before each row's first column (<see cref="ListViewItem.ImageKey"/>),
+    /// or none. Icons no taller than <see cref="RowHeight"/> (16 pixels at 100 %) leave the rows as tall as they are.</summary>
+    public void SetIcons(ImageList? icons) => SmallImageList = icons;
+
+    /// <summary>What the list shows while it has no rows (null: nothing). Set it once the list's rows are known, then
+    /// call <see cref="ItemsChanged"/> after adding or removing rows.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public EmptyState? Empty
+    {
+        get => _empty;
+        set
+        {
+            if (ReferenceEquals(_empty, value)) return;
+            if (_empty is not null) Controls.Remove(_empty);
+            _empty = value;
+            if (value is not null)
+            {
+                value.Dock = DockStyle.Fill;
+                Controls.Add(value);
+            }
+            ItemsChanged();
+        }
+    }
+
+    /// <summary>Call after adding or removing rows: shows or hides <see cref="Empty"/>.</summary>
+    public void ItemsChanged()
+    {
+        if (_empty is not null) _empty.Visible = (VirtualMode ? VirtualListSize : Items.Count) == 0;
+    }
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        FitFlexColumn();
+    }
+
+    private void FitFlexColumn()
+    {
+        if (_flexColumn < 0 || _flexColumn >= Columns.Count) return;
+        int others = 0;
+        foreach (ColumnHeader c in Columns) if (c.Index != _flexColumn) others += c.Width;
+        int width = Math.Max(LogicalToDeviceUnits(_flexMin), ClientSize.Width - others);
+        if (Columns[_flexColumn].Width != width) Columns[_flexColumn].Width = width;
     }
 }
 

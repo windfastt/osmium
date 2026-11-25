@@ -39,6 +39,12 @@ internal static partial class Native
         int v = dark ? 1 : 0;
         if (DwmSetWindowAttribute(hwnd, 20, ref v, sizeof(int)) != 0) DwmSetWindowAttribute(hwnd, 19, ref v, sizeof(int));
     }
+
+    /// <summary>Gives a window Osmium's title bar for the current theme. Call it from the form's OnHandleCreated.</summary>
+    internal static void StyleWindow(Form form)
+    {
+        try { SetDarkTitleBar(form.Handle, Theme.IsDark); } catch (Exception) { }
+    }
 }
 
 /// <summary>Colours for custom-drawn parts; standard controls use WinForms' own colour mode.</summary>
@@ -46,11 +52,48 @@ internal sealed record Palette(Color Background, Color Surface, Color Border, Co
 {
     public static readonly Palette Dark = new(Color.FromArgb(32, 32, 32), Color.FromArgb(43, 43, 43), Color.FromArgb(60, 60, 60),
         Color.FromArgb(240, 240, 240), Color.FromArgb(160, 160, 160), Color.FromArgb(96, 140, 255), Color.White,
-        Color.FromArgb(255, 99, 99), Color.FromArgb(232, 89, 12), Color.FromArgb(55, 55, 55));
+        Color.FromArgb(255, 99, 99), Color.FromArgb(232, 89, 12), Color.FromArgb(55, 55, 55))
+    {
+        Success = Color.FromArgb(0x6C, 0xCB, 0x5F), SuccessText = Color.FromArgb(0x6C, 0xCB, 0x5F),
+    };
 
     public static readonly Palette Light = new(Color.FromArgb(243, 243, 243), Color.White, Color.FromArgb(229, 229, 229),
         Color.FromArgb(27, 27, 27), Color.FromArgb(95, 95, 95), Color.FromArgb(58, 42, 150), Color.White,
         Color.FromArgb(196, 43, 28), Color.FromArgb(232, 89, 12), Color.FromArgb(232, 232, 240));
+
+    // Colours by role. Each starts as the colour above that plays that role today.
+
+    /// <summary>The page behind cards and lists.</summary>
+    public Color Page => Background;
+    /// <summary>Cards, lists and editors.</summary>
+    public Color Card { get; init; } = Surface;
+    /// <summary>Tracks, wells and selected rows: a step below the card.</summary>
+    public Color Sunk { get; init; } = Hover;
+    /// <summary>Behind monospaced text (logs, rules).</summary>
+    public Color Code { get; init; } = Surface;
+    /// <summary>Second-level text: ledes, descriptions.</summary>
+    public Color TextSecondary { get; init; } = Text;
+    public Color Line { get; init; } = Border;
+    public Color LineSoft { get; init; } = Border;
+    public Color LineStrong { get; init; } = Border;
+    /// <summary>Accent-coloured text and glyphs on the page or a card.</summary>
+    public Color AccentInk { get; init; } = Accent;
+    public Color AccentHover { get; init; } = Accent;
+    public Color AccentPressed { get; init; } = Accent;
+    /// <summary>Filled part of meters and bars, selection markers.</summary>
+    public Color Mark { get; init; } = Accent;
+    /// <summary>Marks at rest (unselected, not yet started).</summary>
+    public Color MarkRest { get; init; } = Muted;
+    /// <summary>Something happening now (a running job).</summary>
+    public Color Live { get; init; } = Accent;
+    public Color Warning { get; init; } = Experimental;
+    public Color WarningText { get; init; } = Experimental;
+    public Color Success { get; init; } = Color.FromArgb(0x10, 0x7C, 0x10);
+    public Color SuccessText { get; init; } = Color.FromArgb(0x10, 0x7C, 0x10);
+    /// <summary>Quiet backgrounds: hover, a highlighted drop target.</summary>
+    public Color Subtle { get; init; } = Hover;
+    /// <summary>Keyboard focus rings.</summary>
+    public Color Focus { get; init; } = Accent;
 }
 
 internal static class Theme
@@ -63,6 +106,26 @@ internal static class Theme
     public static Font Bold { get; private set; } = Control.DefaultFont;
     public static Font Glyph { get; private set; } = Control.DefaultFont;
     public static Font Mono { get; private set; } = Control.DefaultFont;
+
+    // Fonts by role. Each starts as the font above that plays that role today.
+
+    /// <summary>A page's title.</summary>
+    public static Font Title { get; private set; } = Control.DefaultFont;
+    public static Font CardHeading { get; private set; } = Control.DefaultFont;
+    /// <summary>The "Osmium" wordmark in the navigation rail.</summary>
+    public static Font Brand { get; private set; } = Control.DefaultFont;
+    /// <summary>The fact line above a page's title.</summary>
+    public static Font Spec { get; private set; } = Control.DefaultFont;
+    /// <summary>The sentence below a page's title.</summary>
+    public static Font Lede { get; private set; } = Control.DefaultFont;
+    public static Font BodyStrong { get; private set; } = Control.DefaultFont;
+    public static Font Caption { get; private set; } = Control.DefaultFont;
+    /// <summary>Big numbers that do not change (result tiles).</summary>
+    public static Font Number { get; private set; } = Control.DefaultFont;
+    /// <summary>Numbers that change while they are shown (progress, speed): digits of equal width.</summary>
+    public static Font NumberLive { get; private set; } = Control.DefaultFont;
+    /// <summary>Icon glyphs of empty states.</summary>
+    public static Font GlyphLarge { get; private set; } = Control.DefaultFont;
 
     public static void Initialize(ThemeMode mode)
     {
@@ -83,6 +146,16 @@ internal static class Theme
         Heading = new Font(FontExists("Segoe UI Variable Display") ? "Segoe UI Variable Display" : "Segoe UI", 15f, FontStyle.Bold);
         Glyph = new Font(FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets", 12f);
         Mono = new Font(FontExists("Cascadia Mono") ? "Cascadia Mono" : "Consolas", 9f);
+        Title = Heading;
+        CardHeading = Bold;
+        Brand = new Font(Heading.FontFamily, 13f, FontStyle.Bold);
+        Spec = Small;
+        Lede = Body;
+        BodyStrong = Bold;
+        Caption = Small;
+        Number = Bold;
+        NumberLive = Bold;
+        GlyphLarge = new Font(Glyph.FontFamily, 24f);
     }
 
     public static bool SystemUsesDarkApps()
