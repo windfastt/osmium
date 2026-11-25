@@ -34,6 +34,8 @@ public sealed class JobRequest
     public string? IncludeBase { get; set; }
 }
 
+/// <param name="BytesTotal">0 while the job runs means the total is unknown (rule 6 of IArchiveSource): BytesIn then
+/// counts archive bytes read so far.</param>
 public sealed record JobSnapshot(
     Guid Id, string Name, JobKind Kind, JobState State, string Phase, double Fraction,
     long BytesIn, long BytesOut, long BytesTotal, TimeSpan Elapsed, TimeSpan? Eta, string? Detail,

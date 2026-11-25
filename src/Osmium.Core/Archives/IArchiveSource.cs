@@ -36,11 +36,14 @@ public sealed record ArchiveDetail(string Label, string Value);
 
 public sealed record ArchiveOpenOptions
 {
-    /// <summary>Asked at most once per Open; returning null cancels (PasswordRequiredException).</summary>
-    /// <remarks>Formats that encrypt the file list ask during Open; formats that encrypt only entries ask on the first
-    /// Extract or Test that selects an encrypted entry and keep the answer for later calls. A wrong password throws
-    /// WrongPasswordException; to try another one, open the archive again. Not called for archives without
-    /// encryption.</remarks>
+    /// <summary>Called at most once in the life of the source, on the thread that needs it (callers marshal to the UI).
+    /// Returning null throws PasswordRequiredException.</summary>
+    /// <remarks>Formats that encrypt the file list (.osa with an encrypted index, 7z with encrypted headers) call it in
+    /// Open. Formats that encrypt only entries call it lazily: in the first Extract or Test whose selection holds an
+    /// encrypted entry, never in Open and never for a selection without encrypted entries. The answer is kept for the
+    /// life of the source. A null answer throws PasswordRequiredException from Open, or from that Extract or Test
+    /// before anything is written. Not called for archives without encryption. To try another password, dispose the
+    /// source and open it again (rule 5 of <see cref="IArchiveSource"/>).</remarks>
     public Func<string?>? Password { get; init; }
     /// <summary>Limits for listing and, unless the request gives its own, for Extract and Test.</summary>
     public ImportLimits Limits { get; init; } = ImportLimits.Default;
@@ -82,6 +85,12 @@ public sealed record ArchiveExtractRequest
     public bool RestoreAttributes { get; init; } = true;
     /// <summary>Null: the limits given to Open.</summary>
     public ImportLimits? Limits { get; init; }
+    /// <summary>Full paths an earlier pass of the same operation wrote into this destination (the second pass after
+    /// "Extract anyway"). They count as written by this run: a target equal to one of them, by the source's name
+    /// comparison, gets a free name in every overwrite mode and is never replaced or skipped as existing.</summary>
+    /// <remarks>Null or empty: no earlier pass. A source that cannot honour a non-empty set throws
+    /// NotSupportedException before writing anything; it never ignores it.</remarks>
+    public IReadOnlyCollection<string>? WrittenEarlier { get; init; }
 }
 
 /// <summary>A file written by Extract: the entry's <see cref="ArchiveItem.Index"/> and the full path on disk (which
@@ -125,11 +134,31 @@ public sealed record ArchiveExtractResult
 /// <summary>
 /// An archive opened for reading. Rules every implementation follows (tests check them):
 /// 1. The password is checked before any file or folder is written. Formats that encrypt the file list check it in
-///    Open; formats that encrypt only entries check it in Extract and Test on the first selected encrypted entry
-///    (decrypted and verified in memory) and throw WrongPasswordException before creating anything.
+///    Open; formats that encrypt only entries check it in Extract and Test on the first selected encrypted entry and
+///    throw WrongPasswordException before creating anything. The check streams the entry through decryption (and,
+///    where the format needs it, decompression) into a discarding sink, under the same limit counters, cancellation
+///    and progress as extraction; nothing is buffered in memory. ZIP with ZipCrypto: the one-byte check, then the
+///    whole entry decoded and its CRC-32 compared (one extra decode of that entry). AES ZIP: the 2-byte verifier,
+///    then the authentication code over the entry's encrypted bytes (one extra read, no decompression). 7z: no
+///    verifier exists, so the first encrypted folder is decoded until the end of its first file with a stored CRC
+///    (at worst the whole folder; a solid archive is often one folder, so at worst one extra pass over the archive,
+///    reported as progress). Encrypted 7z entries in a folder with no stored CRC are extracted only when the password
+///    was verified on another folder of the same archive (counted Unverified); otherwise they are refused
+///    (SkippedUnsupported, "encrypted without a stored checksum, so the password cannot be checked").
 /// 2. Nothing is written outside <c>destination</c>; links are never created or followed.
-/// 3. Every limit in <see cref="ImportLimits"/> applies to listing, Test and Extract alike.
+/// 3. Every limit in <see cref="ImportLimits"/> applies to listing, Test and Extract alike. Test uses the limits given
+///    to Open; Extract uses <see cref="ArchiveExtractRequest.Limits"/> when set.
 /// 4. Cancellation removes only the partial files of this run.
+/// 5. Every exception from Extract or Test (wrong password, a limit, damage, cancellation) leaves the source usable:
+///    Items and Details stay valid and later operations run. A password that failed (WrongPasswordException) or was
+///    refused (PasswordRequiredException) stays spent: later encrypted operations throw the same exception without
+///    calling the callback again. Retrying with another password, or retrying Test with AllowLargeExpansion, means
+///    disposing the source and opening it again with new options; Extract can retry on the same source with
+///    <see cref="ArchiveExtractRequest.Limits"/>.
+/// 6. Progress (<see cref="ExtractProgress"/>): when every selected file's size is known, BytesTotal is their total
+///    and BytesDone counts output bytes written or checked. When the total is unknown (a size is null, or the source
+///    lists as it goes), BytesTotal is 0, BytesDone counts archive bytes read so far and FilesTotal is 0; callers then
+///    show an indeterminate meter and "N MB read so far". An empty selection reports (0, 0) once at the end.
 /// </summary>
 /// <remarks>
 /// Open through <see cref="ArchiveSources.Open"/>. One operation at a time per source; the source keeps the archive
