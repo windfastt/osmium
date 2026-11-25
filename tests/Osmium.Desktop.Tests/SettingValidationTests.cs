@@ -21,7 +21,7 @@ public class SettingValidationTests
         Assert.Null(d.Validate(" " + key.ToLowerInvariant().Replace('-', ' ') + "\r\n"));
         Assert.Contains("too short", d.Validate(key[..^3]));
         Assert.Contains("start with OSM1-", d.Validate("hunter2"));
-        Assert.Contains("checksum", d.Validate(key[..^1] + (key[^1] == 'A' ? 'B' : 'A')));
+        Assert.Contains("checksum", d.Validate(key[..12] + (key[12] == 'A' ? 'B' : 'A') + key[13..]));
     }
 
     [Fact]
