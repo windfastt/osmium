@@ -64,6 +64,7 @@ namespace Osmium.Cli
                     "x" or "extract" => Extract(a, cts.Token),
                     "l" or "list" => List(a),
                     "t" or "test" => Test(a, cts.Token),
+                    "salvage" => SalvageCmd(a, cts.Token),
                     "i" or "info" => Info(a),
                     "explain" => Explain(a),
                     "analyze" => Analyze(a),
@@ -114,6 +115,8 @@ namespace Osmium.Cli
               x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob)
               l <archive> [-v]       List contents        t <archive>    Test (full decode + hashes)
               info <archive>         Archive details      explain <archive>  Show planner decisions
+              salvage <archive> <dest>   Recover every file that verifies from a damaged archive; list what was lost
+                  --password <pw> | --password-stdin   --overwrite | --skip | --rename   --force
               analyze <files…>       Detect type / class / statistics
               lab <file> [--profile p] [--sample 4M] [--candidates "spec;spec"]   Benchmark candidates
               tune <file> [--profile insane] [--export-rule rules.json]   Search the best pipeline for a file
@@ -291,6 +294,7 @@ namespace Osmium.Cli
                 new Progress<ExtractProgress>(p => progress.Update($"Extracting {Fmt.Pct(p.BytesDone, p.BytesTotal)}  {p.FilesDone}/{p.FilesTotal} files")), ct);
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
+            foreach (var w in res.Warnings) Console.Error.WriteLine("warning: " + w);
             int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
             Console.WriteLine($"Extracted {res.FilesOk} file(s) to {dest} in {sw.Elapsed.TotalSeconds:F1}s{(res.FilesSkipped > 0 ? $", {res.FilesSkipped} skipped" : "")}" +
                               $"{(damaged > 0 ? $", {damaged} FAILED" : "")}{(newer > 0 ? $", {newer} need a newer version of Osmium" : "")}");
@@ -321,6 +325,23 @@ namespace Osmium.Cli
                 ? $"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified."
                 : $"FAILED — {FailureSummary(res)}.");
             return res.FilesFailed == 0 && res.Errors.Count == 0 ? 0 : 2;
+        }
+
+        private static int SalvageCmd(Args a, CancellationToken ct)
+        {
+            if (a.Positional.Count < 2) return Fail("usage: osmium salvage <archive> <destination>");
+            var progress = new ProgressLine(a.Has("quiet"));
+            var res = Salvage.Run(a.Positional[0], a.Positional[1], () => Password(a) ?? PromptPassword(), new SalvageOptions
+            {
+                Overwrite = a.Has("overwrite") ? OverwriteMode.Overwrite : a.Has("skip") ? OverwriteMode.Skip : OverwriteMode.Rename,
+                MaxExpansion = a.Has("force") ? double.PositiveInfinity : 200,
+                CheckFreeSpace = !a.Has("force"),
+                Progress = p => progress.Update($"{p.Phase} {Fmt.Pct(p.Done, p.Total)}"),
+            }, ct);
+            progress.Done();
+            if (res.Refused is not null) return Fail(res.Refused + "; re-run with --force to continue.");
+            foreach (var line in res.Summary()) Console.WriteLine(line);
+            return res.ExitCode; // 0 everything recovered, 2 something was lost
         }
 
         private static int List(Args a)

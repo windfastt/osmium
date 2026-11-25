@@ -149,3 +149,33 @@ Rejected paths: absolute, drive letters, UNC, empty / `.` / `..` components, `\`
 characters, Windows reserved device names (`CON PRN AUX NUL COM1-9 LPT1-9`, with or without extension), and anything
 whose resolved full path escapes the destination. Files are written to `name.osmium-part`, verified, then renamed;
 directory times and attributes are applied deepest-first after their contents; ReadOnly is applied last.
+
+## 8. Salvage
+`osmium salvage <archive> <dest>` reads a damaged archive through its frames, never through the footer's or the
+index's offsets:
+1. It scans the whole file, from offset 0, for frame markers whose header CRC checks out. A frame whose body verifies
+   (body CRC and payloadHash, or the GCM tag) is skipped whole, so the frames of an archive stored in an intact block
+   are never seen. After a frame that does not verify, the scan resumes one byte later, so frames after a missing or
+   shortened region are still found; a frame found inside the bytes a damaged frame claimed is marked as such.
+2. A block counts only once decoded: every stage size, then rawHash. A pipeline, frame flag or index of a newer version
+   is reported as needing a newer Osmium, never as damage.
+3. Which archive is this one: its id comes from the header at offset 0, else from the footer at the end of the file. A
+   header found after offset 0 (data prepended to the archive) is used only when that footer names the same archive,
+   since an archive stored in a block has an intact header too.
+4. The index: an index frame whose footer names another archive is set aside, and the one the footer at the end of the
+   file follows wins. Without footers, an index is set aside when it lies inside a damaged frame, within the bytes the
+   blocks of another index occupy, or before intact frames it does not list (an archive has one index, after all its
+   frames); of the rest, the one that lists the most frames found wins. The frames a set-aside index lists belong to
+   another archive. Each block of the chosen index is matched to a found frame by frame number, frame length, raw size
+   and descriptor, and a file is written (§7) only when all its blocks verified and its XxHash128 matches.
+5. Without an intact index, each verified block is written as `block-<frame number>.bin`, with a `salvage-report.txt`
+   giving its pipeline, sizes and hashes; file names, folders and times are lost. A frame that may belong to another
+   archive is written as `block-<frame number>-at-<offset>.bin` and never stands for this archive's block. An
+   unencrypted frame does not name its archive, so where the frames stop following one another the report says so.
+6. Encryption: the salt, iterations and archive id exist only in the header (the footer keeps the first 8 bytes of the
+   id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so when the header is damaged elsewhere
+   its key fields, read from their fixed places, still yield the blocks once they authenticate a frame. The index frame
+   also binds the exact header bytes: salvage rebuilds the header from those fields as a writer makes it, and a rebuild
+   that authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
+7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
+   (`--force` lifts both in the CLI).

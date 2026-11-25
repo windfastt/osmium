@@ -42,10 +42,19 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   with a message that read like corruption. Now the archive opens and lists, every block this version understands
   extracts, and the rest are reported as needing a newer version of Osmium. Values read from an archive are checked
   and never clamped.
+- **Mark of the Web:** a file extracted from an archive downloaded from the internet lost Windows' "downloaded from
+  the internet" mark when the archive marked it read-only (the mark was written after the attribute, and the failure
+  was ignored). The mark is now written before any attribute, and a failure to write it is reported.
 
 ### Added
 - `osmium license` prints the license and third-party notices; `osmium version` and the help text state the MIT
   license and that Osmium comes without warranty.
+- **`osmium salvage <archive> <destination>`** recovers what can be trusted from a damaged archive. It scans for
+  intact frames without relying on the footer or the index, writes only files whose blocks and own hash verify (or,
+  when the index is lost, each verified block as `block-<n>.bin` with a report of its pipeline, sizes and hashes),
+  and lists every file it could not recover and why. Encrypted archives need the password and an intact enough
+  header; archives stored inside an archive are never mistaken for it. It refuses to write more than the expansion
+  limit or the free space allows unless `--force` is given, and exits with 0 only when nothing was lost.
 - **About Osmium** (tray menu and Settings page): version, engine fingerprint, license, and buttons that open the
   license and third-party notices.
 - Exiting asks first when the Settings, Rules or Cluster page has unsaved edits.

@@ -60,6 +60,10 @@ public sealed record ExtractOptions
     public bool KeepBroken { get; init; }
     public int MaxParallelBlocks { get; init; } = Math.Max(1, Environment.ProcessorCount);
     public long MemoryBudget { get; init; } = MemoryBudgets.Default();
+    /// <summary>The Mark-of-the-Web to give extracted files instead of the archive's own (tests).</summary>
+    internal string? Zone { get; init; }
+    /// <summary>Writes the Mark-of-the-Web instead of <see cref="Extractor.WriteZoneIdentifier"/> (tests).</summary>
+    internal Func<string, string, string?>? ZoneWriter { get; init; }
 }
 
 public sealed record ExtractProgress(long BytesDone, long BytesTotal, int FilesDone, int FilesTotal, string? Current);
@@ -68,6 +72,8 @@ public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkippe
 {
     /// <summary>How many of <see cref="FilesFailed"/> are in blocks that need a newer version of Osmium (not damaged).</summary>
     public int FilesNeedingNewerVersion { get; init; }
+    /// <summary>Problems that did not stop a file from being extracted, e.g. a Mark-of-the-Web that could not be written.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
 }
 
 public static class MemoryBudgets
@@ -157,7 +163,9 @@ public static class Extractor
             files.Add(new FileState(e, target));
         }
 
-        string? zone = test ? null : ReadZoneIdentifier(reader.Path);
+        string? zone = test ? null : options.Zone ?? ReadZoneIdentifier(reader.Path);
+        var writeZone = options.ZoneWriter ?? WriteZoneIdentifier;
+        var warnings = new ConcurrentQueue<string>();
         long total = files.Sum(f => f.Entry.Size);
         long done = 0;
         int filesDone = 0, ok = 0, failed = 0;
@@ -228,6 +236,7 @@ public static class Extractor
         return new ExtractResult(ok, failed, skipped, errors.ToList())
         {
             FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
+            Warnings = [.. warnings],
         };
 
         bool Complete(FileState f, byte[]? _)
@@ -260,9 +269,11 @@ public static class Extractor
                 }
                 if (!test)
                 {
+                    // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
+                    // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
+                    if (zone is not null && writeZone(f.PartPath!, zone) is { } why) warnings.Enqueue(ZoneWarning(f.Entry.Path, why));
                     Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: options.Overwrite == OverwriteMode.Overwrite);
                     ApplyFileMetadata(f.Target!, f.Entry, options);
-                    if (zone is not null) WriteZoneIdentifier(f.Target!, zone);
                 }
                 return true;
             }
@@ -315,10 +326,10 @@ public static class Extractor
         }
     }
 
-    private static string PartName(string target) =>
+    internal static string PartName(string target) =>
         target + ".osmium-part-" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant();
 
-    private static UInt128 HashFile(string path)
+    internal static UInt128 HashFile(string path)
     {
         var h = new XxHash128();
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
@@ -327,20 +338,45 @@ public static class Extractor
     }
 
     /// <summary>Mark-of-the-Web: files extracted from a downloaded archive inherit its zone (Windows only).</summary>
-    private static string? ReadZoneIdentifier(string archivePath)
+    internal static string? ReadZoneIdentifier(string archivePath)
     {
         if (!OperatingSystem.IsWindows()) return null;
         try { return File.ReadAllText(archivePath + ":Zone.Identifier"); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException) { return null; }
     }
 
-    private static void WriteZoneIdentifier(string path, string zone)
+    /// <summary>
+    /// Gives a file the Mark-of-the-Web. A read-only file refuses a new stream, so its ReadOnly attribute is cleared for
+    /// the write and then restored. Returns why the mark could not be written, or null.
+    /// </summary>
+    internal static string? WriteZoneIdentifier(string path, string zone)
     {
-        try { File.WriteAllText(path + ":Zone.Identifier", zone); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException) { }
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            bool readOnly = attributes.HasFlag(FileAttributes.ReadOnly);
+            if (readOnly) File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+            try
+            {
+                File.WriteAllText(path + ":Zone.Identifier", zone);
+            }
+            finally
+            {
+                if (readOnly) File.SetAttributes(path, attributes);
+            }
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return ex.Message;
+        }
     }
 
-    private static string UniqueName(string target)
+    /// <summary>The warning for a file that came from a downloaded archive but could not be marked as such.</summary>
+    internal static string ZoneWarning(string path, string why) =>
+        $"{path}: the mark that it came from the internet (Mark-of-the-Web) could not be written ({why.TrimEnd('.')}); treat it as downloaded";
+
+    internal static string UniqueName(string target)
     {
         string dir = Path.GetDirectoryName(target)!, stem = Path.GetFileNameWithoutExtension(target), ext = Path.GetExtension(target);
         for (int i = 2; ; i++)
@@ -350,7 +386,7 @@ public static class Extractor
         }
     }
 
-    private static void ApplyFileMetadata(string path, ArchiveEntry e, ExtractOptions o)
+    internal static void ApplyFileMetadata(string path, ArchiveEntry e, ExtractOptions o)
     {
         try
         {
@@ -365,7 +401,7 @@ public static class Extractor
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
-    private static void ApplyDirectoryMetadata(IEnumerable<ArchiveEntry> dirs, string root, ExtractOptions o)
+    internal static void ApplyDirectoryMetadata(IEnumerable<ArchiveEntry> dirs, string root, ExtractOptions o)
     {
         foreach (var d in dirs.OrderByDescending(d => d.Path.Count(c => c == '/')))
         {
