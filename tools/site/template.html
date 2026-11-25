@@ -432,13 +432,14 @@ footer { padding-block: 44px 56px; border-top: 1px solid var(--line-soft); color
         </div>
         <h1 class="h1"><span class="ln">As small as</span><span class="ln">you have time for.</span></h1>
         <p class="lede">Osmium lives in the notification area and packs files into <code>.osa</code> archives. It works out what each
-          file is, gives every kind of data its own pipeline, races codecs on samples and tunes their settings. Give it more
-          time and it brings in context mixing and the other PCs on your network.</p>
+          file is and gives every kind of data its own pipeline. From the Max profile up it races codecs on samples, and from
+          Ultra up it also tunes their settings. Give it more time and it brings in context mixing and, once you pair them, other
+          PCs on your network.</p>
         <div class="ctas">
           <a class="btn btn-primary" href="https://github.com/windfastt/osmium/releases/latest">Download for Windows</a>
           <a class="btn btn-ghost" href="#bench">See the benchmarks</a>
         </div>
-        <p class="meta">Version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64 · MIT license, no warranty</p>
+        <p class="meta">Version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64; ARM64 builds are provided but were not tested on ARM64 hardware for 0.1.1 · MIT license, no warranty</p>
       </div>
 
 {{HERO}}
@@ -454,19 +455,27 @@ footer { padding-block: 44px 56px; border-top: 1px solid var(--line-soft); color
       <h2 id="bench-h">Smallest in our mixed-folder test</h2>
       <p class="lede" id="bench-lede">Each tool compressed the same two folders at the strongest setting people commonly use,
         and every archive was unpacked and compared with the original, file by file. In this test Osmium made the smallest
-        archive of the mixed folder; on the folder of program files, ZPAQ and lrzip made smaller ones. Bars show the archive size as a share of the
-        original; shorter is better.</p>
+        archive of the mixed folder, which includes generated files; on the folder of program files, ZPAQ and lrzip made
+        smaller ones. Against 7-&#8288;Zip&nbsp;-&#8288;mx9, Osmium's smallest archive was 3.2&nbsp;% smaller on the program files (Ultra:
+        18&nbsp;min&nbsp;47&nbsp;s to compress and 7&nbsp;min&nbsp;39&nbsp;s to extract, against 33&nbsp;s and 1.9&nbsp;s) and
+        15.2&nbsp;% smaller on the mixed folder (Insane: 17&nbsp;min&nbsp;29&nbsp;s and 34&nbsp;s, against 2.0&nbsp;s and
+        0.3&nbsp;s). Bars show the archive size as a share of the original; shorter is better.</p>
     </div>
     <div class="charts" id="charts"></div>
     <div class="notes">
       <div class="note"><h4>How it was measured</h4><p id="method">Stream compressors got a tar of the folder. 7-Zip, ZPAQ, zip and Osmium
-        archived the folder directly. xz and Zstandard ran single-threaded, because their multi-threaded modes split the input and lose ratio.</p></div>
+        archived the folder directly. xz and Zstandard ran single-threaded, because their multi-threaded modes split the input and lose ratio.
+        The other tools used their default threading and Osmium all four cores, so the times are not at equal thread counts.
+        Percentages compare with 7-&#8288;Zip&nbsp;-&#8288;mx9 (LZMA2, 256&nbsp;MB dictionary) unless another tool is named. The mixed folder includes
+        four files generated for the test: a CSV, 12-byte telemetry records, a WAV and a BMP.</p></div>
       <div class="note"><h4>Where Osmium loses</h4><p id="loses">On program files, ZPAQ -m5 and lrzip beat Ultra: their models for x86 code are stronger
-        than Osmium's today, and closing that gap is next on the list. Max only matches xz on machine code, since both are
-        LZMA with a branch filter, and Fast is larger than zip on the mixed folder.</p></div>
+        than Osmium's today, and closing that gap is next on the list. There, Balanced, the default, and Max make larger
+        archives than 7-&#8288;Zip&nbsp;-&#8288;mx9; Max only matches xz, since both are LZMA with a branch filter. Fast is larger than zip on
+        the mixed folder.</p></div>
       <div class="note"><h4>The cost of the smallest file</h4><p id="cost">Context mixing decompresses about as slowly as it
-        compresses. After compressing, Osmium reports the expected extraction time and memory, and <code>osmium info</code>
-        shows them for any archive. Max keeps LZMA's fast extraction.</p></div>
+        compresses. After compressing, Osmium estimates the extraction time and memory, and <code>osmium info</code>
+        shows the estimate for any archive; for context-mixing archives the real time can be about twice the estimate. Max
+        uses no context mixing: it extracted the mixed folder in 0.5&nbsp;s and the program files in 5.2&nbsp;s.</p></div>
       <div class="note"><h4>Conditions</h4><p id="conditions">{{CONDITIONS}}</p></div>
     </div>
   </div>
@@ -486,7 +495,7 @@ footer { padding-block: 44px 56px; border-top: 1px solid var(--line-soft); color
       <div class="step"><h3>Rules</h3><p>Your per-file patches and rules force, forbid or tune pipelines.</p></div>
       <div class="step"><h3>Dedup</h3><p>Identical files are stored once. Insane also finds repeated chunks inside and across files.</p></div>
       <div class="step"><h3>Group</h3><p>Files with the same kind of data share solid blocks, aligned to their record size.</p></div>
-      <div class="step"><h3>Plan</h3><p>Candidates race on growing samples; the losers drop out at each round, then the winner's parameters are hill-climbed.</p></div>
+      <div class="step"><h3>Plan</h3><p>Balanced uses a fixed pipeline per kind. From Max up, candidates race on samples and the losers drop out; from Ultra up, the samples grow each round and the winner's parameters are hill-climbed.</p></div>
       <div class="step"><h3>Compress</h3><p>Blocks run in parallel inside a memory budget, on this PC or on paired workers.</p></div>
       <div class="step"><h3>Verify</h3><p>Every block is decoded and compared byte for byte before it is written.</p></div>
       <div class="step"><h3>Commit</h3><p>Frames are written in order, the archive is read back, then renamed into place.</p></div>
@@ -565,10 +574,10 @@ osmium a out.osa data ^
 <section class="sec" id="profiles">
   <div class="wrap">
     <div class="sec-head">
-      <p class="spec" id="prof-spec">Profiles · Store to Exhaustive · results for the mixed folder on a 4-core machine</p>
+      <p class="spec" id="prof-spec">Profiles · Store to Exhaustive · results for the mixed folder, which includes generated files, on a 4-core machine</p>
       <h2>Seven profiles, one trade-off</h2>
-      <p class="lede">Higher profiles try more pipelines on bigger samples and allow context mixing. Choose one per job from the
-        tray menu, or let a rule choose it for a folder.</p>
+      <p class="lede">Higher profiles try more pipelines on bigger samples and allow context mixing. Set the default from the
+        tray menu, or pick one per job on the Compress page.</p>
     </div>
     <div class="prof-wrap">
       <table class="prof">
@@ -608,7 +617,7 @@ osmium a out.osa data ^
 <pre class="code">osmium keygen</pre></li>
         <li><h3>Start a worker on each helper</h3><p>Or use <em>Lend this PC to the cluster</em> in its tray menu.</p>
 <pre class="code">osmium worker --key OSM1-…</pre></li>
-        <li><h3>Compress with workers</h3><p>Workers on the network are found automatically.</p>
+        <li><h3>Compress with workers</h3><p>With <code>--workers auto</code>, Osmium looks for workers on the local network. Discovery across several PCs is not yet covered by our tests.</p>
 <pre class="code">osmium a big.osa D:\data --profile insane ^
   --workers auto --cluster-key OSM1-…</pre></li>
       </ol>
@@ -638,9 +647,9 @@ osmium a out.osa data ^
       <div><h3>Verified by default</h3><p>Every block is decoded and compared with its input before it is written, including blocks compressed by a worker.</p></div>
       <div><h3>Atomic and change-aware</h3><p>Archives are written to a temporary file, re-read, then renamed into place. A file that changes while it is read is detected.</p></div>
       <div><h3>Encrypted, names too</h3><p>AES-256-GCM with PBKDF2-SHA512 and HKDF. With a password, file names, pipelines and contents are encrypted. The block count, block sizes, the version of Osmium that wrote the archive and whether experimental features were used stay visible.</p></div>
-      <div><h3>Safe extraction</h3><p>Paths that try to leave the target folder are refused, and the Mark of the Web is carried over to extracted files.</p></div>
+      <div><h3>Safe extraction</h3><p>Paths that try to leave the target folder are refused, and the Mark of the Web is carried over to extracted files. 0.1.1 misses files the archive marks read-only; 0.2.0 fixes this.</p></div>
       <div><h3>Same output everywhere</h3><p>The context-mixing codec is integer-only. CI checks a golden hash on Linux and Windows.</p></div>
-      <div><h3>Extraction cost, stated</h3><p>After compressing, and for any archive in <code>osmium info</code> or on the Archives page, Osmium reports how long extraction will take and how much memory it needs.</p></div>
+      <div><h3>Extraction cost, stated</h3><p>After compressing, and for any archive in <code>osmium info</code> or on the Archives page, Osmium estimates how long extraction will take and how much memory it needs. For context-mixing archives the time estimate can be half the real time: about 4&nbsp;minutes estimated, 7&nbsp;min&nbsp;39&nbsp;s measured for Ultra's archive of the program files.</p></div>
     </div>
   </div>
 </section>
@@ -704,10 +713,9 @@ osmium a out.osa data ^
 <section class="sec" id="download">
   <div class="wrap">
     <div class="sec-head">
-      <p class="spec">Download · version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64 and ARM64</p>
+      <p class="spec">Download · version {{VERSION}} · Windows 11, or Windows 10 version 1809 or later · x64; ARM64 builds are provided but were not tested on ARM64 hardware for 0.1.1</p>
       <h2>Download</h2>
-      <p class="lede">No separate .NET install is needed. Every file is on the GitHub release page with SHA-256 checksums, and
-        every download includes the license and third-party notices.</p>
+      <p class="lede">No separate .NET install is needed. Every file is on the GitHub release page with SHA-256 checksums.</p>
     </div>
     <div class="dl">
       <div class="card">
@@ -755,8 +763,7 @@ pwsh build/publish.ps1 -Arch x64</pre>
         It is provided “as is”, without warranty of any kind, and its authors are not liable for any damages, including lost
         data. Keep backups, and test archives with <code>osmium t</code> before you delete the originals.</p></div>
       <div><h4>Third-party software</h4><p>The downloads include third-party components under their own licenses, listed with
-        their full license texts in <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES</a>.
-        Every download carries this file, and <code>osmium license</code> prints it.</p></div>
+        their full license texts in <a href="https://github.com/windfastt/osmium/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES</a>.</p></div>
       <div><h4>Trademarks</h4><p>Windows and .NET are trademarks of the Microsoft group of companies. 7-Zip, ZPAQ, xz, Zstandard,
         Brotli, bzip2, lrzip and Info-ZIP are names of their respective owners and are used here only to identify those
         products. Osmium is an independent project, not affiliated with, sponsored or endorsed by any of them.</p></div>
@@ -823,7 +830,7 @@ pwsh build/publish.ps1 -Arch x64</pre>
     tip.replaceChildren();
     tip.append(el("b", null, pct(r.bytes / ds.bytes, 2) + " · " + nf.format(r.bytes) + " bytes"));
     tip.append(el("div", "t", nice(r) + (r.setting ? " — " + r.setting : "")));
-    if (base && r !== base) tip.append(el("div", "m", "vs xz -9e: " + signed(r.bytes / base.bytes - 1)));
+    if (base && r !== base) tip.append(el("div", "m", "vs 7-Zip -mx9: " + signed(r.bytes / base.bytes - 1)));
     tip.append(el("div", "m", "compress " + secs(r.c) + " · extract " + secs(r.d)));
     tip.append(el("div", "m okmark", "✓ round trip identical"));
     card.append(tip);
@@ -839,7 +846,7 @@ pwsh build/publish.ps1 -Arch x64</pre>
 
   for (const ds of D.datasets) {
     const rows = rowsOf(ds.id).sort((a, b) => a.bytes - b.bytes);
-    const base = find(ds.id, "xz");
+    const base = find(ds.id, "7z");
     const maxR = Math.max(...rows.map(r => r.bytes / ds.bytes));
     const ticks = Math.ceil(maxR * 10 + 1.2);          // 10 % steps, with room for the value label
     const axisMax = ticks / 10;
@@ -888,7 +895,7 @@ pwsh build/publish.ps1 -Arch x64</pre>
     const tw = el("div", "table-wrap"); tw.hidden = true;
     const tb = el("table", "data");
     const thead = el("thead"), trh = el("tr");
-    for (const h of ["Tool and setting", "Size (bytes)", "Of original", "vs xz -9e", "Compress", "Extract", "Round trip"]) trh.append(el("th", null, h));
+    for (const h of ["Tool and setting", "Size (bytes)", "Of original", "vs 7-Zip -mx9", "Compress", "Extract", "Round trip"]) trh.append(el("th", null, h));
     thead.append(trh); tb.append(thead);
     const tbody = el("tbody");
     for (const r of rows) {

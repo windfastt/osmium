@@ -36,8 +36,8 @@ SHORT = {
     "zpaq": ("ZPAQ -m5", "zpaq a -m5"),
 }
 DATASETS = {
-    "mixed-folder": ("Mixed folder", "{mib} MiB, {files} files: license texts and a CSV, ELF and .NET binaries, a WAV and a BMP, "
-                     "PNG and gzip files, 12-byte telemetry records, duplicates."),
+    "mixed-folder": ("Mixed folder", "{mib} MiB, {files} files: license texts, ELF and .NET binaries, PNG and gzip files and "
+                     "duplicates, plus four files generated for the test: a CSV, 12-byte telemetry records, a WAV and a BMP."),
     "windows-app": ("Folder of program files", "{mib} MiB, {files} files: Osmium's own self-contained Windows build, mostly .NET "
                     "runtime DLLs (ReadyToRun) and native x64 DLLs and EXEs, the kind of payload an installer ships."),
 }
@@ -61,6 +61,20 @@ def pct(x):
 
 def signed(x):
     return ("−" if x < 0 else "+") + f"{abs(x) * 100:.1f} %"
+
+
+def secs(s):
+    # the same format as the page's charts and tables (secs() in the template's script)
+    return (f"{s:.1f} s" if s < 10 else f"{round(s)} s" if s < 90
+            else f"{int(s // 60)} min {round(s % 60):02d} s" if s < 5400 else f"{s / 3600:.1f} h")
+
+
+def keep(text):
+    """No line break between a number and its unit, or between a tool and its switch, in the narrow result tiles."""
+    text = re.sub(r"(\d) (%|s\b|min\b|bytes\b)", "\\1\u00a0\\2", text)
+    text = re.sub(r"\bmin (\d)", "min\u00a0\\1", text)
+    text = re.sub(r"\b(7-Zip|ZPAQ|lrzip|xz) -", "\\1\u00a0-\u2060", text)   # U+2060 (word joiner): no break after a hyphen
+    return text.replace("7-Zip", "7-\u2060Zip")
 
 
 def version():
@@ -100,23 +114,32 @@ def bench_data(raw):
         c = [r for r in rows if r["ds"] == ds and r["fam"].startswith("osmium") == osm]
         return min(c, key=lambda r: r["bytes"]) if c else None
 
+    # Every size tile names the profile, the baseline (7-Zip -mx9), the folder, and both times next to the percentage.
     tiles = []
     for ds in datasets:
-        xz, bo, bt = get(ds["id"], "xz"), best(ds["id"], True), best(ds["id"], False)
-        if not (xz and bo):
+        sz, bo, bt = get(ds["id"], "7z"), best(ds["id"], True), best(ds["id"], False)
+        if not (sz and bo):
             continue
-        cap = f"{bo['tool']}: {pct(bo['bytes'] / ds['bytes'])} of the original, against {pct(xz['bytes'] / ds['bytes'])}"
+        mixed = ds["id"] == "mixed-folder"
+        cap = (f"{bo['tool']}: {pct(bo['bytes'] / ds['bytes'])} of the original, against {pct(sz['bytes'] / ds['bytes'])}. "
+               f"Compress {secs(bo['c'])} against {secs(sz['c'])}, extract {secs(bo['d'])} against {secs(sz['d'])}, "
+               f"with Osmium on 4 cores and 7-Zip at its default threading")
         if bt and bt["bytes"] < bo["bytes"]:
             cap += f". {bt['tool']} is smaller still: {pct(bt['bytes'] / ds['bytes'])}"
-        tiles.append({"v": signed(bo["bytes"] / xz["bytes"] - 1), "l": f"vs xz -9e on the {ds['title'].lower()} in our test", "c": cap})
-        if ds["id"] == "mixed-folder" and bt and bo["bytes"] < bt["bytes"]:
+        tiles.append({"v": signed(bo["bytes"] / sz["bytes"] - 1),
+                      "l": f"vs 7-Zip -mx9 on the {ds['title'].lower()} in our test" + (", which includes generated files" if mixed else ""),
+                      "c": cap})
+        if mixed and bt and bo["bytes"] < bt["bytes"]:
             tiles.append({"v": signed(bo["bytes"] / bt["bytes"] - 1),
-                          "l": f"vs {bt['tool']}, the smallest other result on the mixed folder",
-                          "c": f"{bo['tool']} {bo['bytes']:,} bytes, {bt['tool']} {bt['bytes']:,} bytes"})
+                          "l": f"vs {bt['tool']}, the smallest other result on the same mixed folder",
+                          "c": f"{bo['tool']} {bo['bytes']:,} bytes, {bt['tool']} {bt['bytes']:,} bytes. Compress {secs(bo['c'])} "
+                               f"against {secs(bt['c'])}, extract {secs(bo['d'])} against {secs(bt['d'])}, with Osmium on 4 cores "
+                               f"and {bt['tool'].split()[0]} at its default threading"})
     n_ok = sum(1 for r in raw if r.get("ok"))
     n_run = sum(1 for r in raw if "bytes" in r)
     tiles.append({"v": f"{n_ok} of {n_run}", "l": "benchmark archives unpacked byte-identical",
                   "c": "every run in the table below, checked file by file"})
+    tiles = [{k: keep(v) for k, v in t.items()} for t in tiles]
     return {"datasets": datasets, "rows": rows, "tiles": tiles[:4]}
 
 
@@ -142,12 +165,12 @@ def planner_rows():
         elif line.startswith("forced pipeline: "):
             cur["forced"] = line[len("forced pipeline: "):]
     seen = {
-        "Text": "{u} license texts and a CSV (UTF-8)",
+        "Text": "{u} files: license texts, a generated CSV and a short UTF-8 file",
         "CodeX86": "libcrypto.so.3 and xz: x64 machine code (ELF)",
         "Binary": "Microsoft.Build.dll: .NET IL, no native code",
-        "Structured": "telemetry.dat: 12-byte records",
-        "Audio": "tone.wav: 16-bit stereo PCM",
-        "Image": "gradient.bmp: 400×300, 24-bit",
+        "Structured": "telemetry.dat: 12-byte records, generated",
+        "Audio": "tone.wav: 16-bit stereo PCM, generated",
+        "Image": "gradient.bmp: 400×300, 24-bit, generated",
         "Incompressible": "3 PNG and 3 gzip files",
     }
     out = []
@@ -178,9 +201,14 @@ def settings_count():
 def conditions():
     c = json.loads((SITE / "data" / "benchmark-conditions.json").read_text())
     tools = ", ".join(f"{k} {v}" for k, v in c["versions"].items())
+    corpus = DOCS / f"{bench_file().stem}-corpus.sha256"   # the SHA-256 of every file the benchmark measured
+    if not corpus.exists():
+        raise SystemExit(f"missing {corpus.relative_to(ROOT)}: every published result needs its corpus hash list")
     cond = (f"Measured on {c['date']} on one machine ({c['machine']}) with {tools}. Times are wall-clock seconds on that "
-            f"machine. Full tables and commands: <a href=\"https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md\">BENCHMARKS.md</a>.")
-    disclaimer = (f"The results come from two test folders measured once on one machine ({c['machine']}, {c['date']}) "
+            f"machine. Full tables and commands: <a href=\"https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md\">BENCHMARKS.md</a>; "
+            f"the SHA-256 of every file measured: <a href=\"https://github.com/windfastt/osmium/blob/main/docs/{corpus.name}\">{corpus.name}</a>.")
+    disclaimer = (f"The results come from two test folders, one of which includes files generated for the test, measured once on "
+                  f"one machine ({c['machine']}, {c['date']}) "
                   f"with the tool versions and settings listed in "
                   f"<a href=\"https://github.com/windfastt/osmium/blob/main/docs/BENCHMARKS.md\">BENCHMARKS.md</a>. "
                   f"Other data, versions and hardware will give different results; rerun them with "
