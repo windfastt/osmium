@@ -251,9 +251,22 @@ freely, subject to the following restrictions:
 ### SharpCompress: BZip2 (`Compressors/BZip2/`)
 
 Copyright 2001, 2004-2005 The Apache Software Foundation, licensed under the Apache License, Version 2.0 (the source
-files carry the standard license header). The files state: "This package is based on the work done by Keiron Liddle,
-Aftex Software <keiron@aftexsw.com> to whom the Ant project is very grateful for his great code." The input stream was
-modified to read the leading "BZ" of the stream. No separate NOTICE file ships with the SharpCompress source.
+files carry the standard license header). The code is Apache Ant's bzip2 package. The files state: "This package is
+based on the work done by Keiron Liddle, Aftex Software <keiron@aftexsw.com> to whom the Ant project is very grateful
+for his great code." The input stream was modified to read the leading "BZ" of the stream.
+
+The SharpCompress source has no NOTICE file of its own. Apache Ant's NOTICE file carries these attribution notices
+(its remaining paragraph concerns Ant's `<sync>` task, which is not part of this code):
+
+```
+Apache Ant
+Copyright 1999-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+```
+
+The Apache License, Version 2.0:
 
 ```
                                  Apache License
@@ -594,8 +607,29 @@ source code". Shkarin's PPMd source is public domain.
 
 ### SharpCompress: LZW (`Compressors/Lzw/LzwStream.cs`)
 
-The `.Z` (compress) decoder is "Based on Java code by Ronald Tschalar, which in turn was based on the unlzw.c code in
-the gzip package". The file carries no license text.
+The `.Z` (compress) decoder is a copy of SharpZipLib's `LzwInputStream` (`ICSharpCode.SharpZipLib.Lzw`, whose name its
+documentation still uses), which is "Based on Java code by Ronald Tschalar, which in turn was based on the unlzw.c code
+in the gzip package". The SharpCompress file carries no license text. SharpZipLib's license:
+
+```
+Copyright © 2000-2018 SharpZipLib Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
 
 ### SharpCompress: ADC (`Compressors/ADC/`)
 
