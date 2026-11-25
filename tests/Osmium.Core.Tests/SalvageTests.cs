@@ -193,7 +193,7 @@ public class SalvageTests
             Assert.Equal($"block-{k}.bin", b.Frame!.Output);
         }
         var report = File.ReadAllText(t.Sub("out/" + Container.Salvage.ReportFileName));
-        Assert.Equal(t.Sub("out/" + Container.Salvage.ReportFileName), res.ReportPath);
+        Assert.Equal(Path.GetFullPath(t.Sub(Path.Combine("out", Container.Salvage.ReportFileName))), Path.GetFullPath(res.ReportPath!));
         Assert.Contains("file names", report, StringComparison.OrdinalIgnoreCase);
         foreach (int k in intact)
         {
