@@ -25,8 +25,7 @@ checks every block before writing it. It runs as a notification-area app with Ex
 
 - **A pipeline for each kind of data.** Files are sorted by content (text, x86/x64 and ARM64 code, fixed-size records,
   16-bit audio, bitmaps, other binary data, already-compressed files). Each group gets optional reversible filters and
-  one of the codecs: Osmium CM2 (context mixing, with models for x86/x64 machine code; the first Osmium CM is kept for
-  reading older archives), LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate or Store.
+  one of the codecs: Osmium CM (context mixing), LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate or Store.
 - **Seven profiles.** Store, Fast and Balanced (default) use fixed choices; Max trial-compresses candidates on samples;
   Ultra and Insane also tune parameters and may use context mixing, which extracts slowly. Exhaustive is experimental.
 - **Checked before it is written.** By default every block is decoded and compared with its input before it is
@@ -69,21 +68,26 @@ the original (smaller is better) and, below it, the wall-clock time to compress 
 Linux 6.18, .NET 10), not on Windows. Tool versions and the compression commands are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md); [tools/crosscheck.py](tools/crosscheck.py), which ran the comparison, has
 the exact compression and extraction commands. The *mixed folder* (33 files, 16.0 MiB) holds license texts (some
-duplicated), a CSV, a .NET assembly, two x64 ELF binaries, generated 12-byte records, a WAV, a BMP, and PNG and gzip
-files. *Program files* (284 files, 124.0 MiB) is Osmium's own self-contained Windows x64 build, mostly .NET
-ReadyToRun DLLs. xz and Zstandard ran single-threaded (their multi-threaded modes lose ratio), the other tools with
-their default threading and Osmium on all four cores, so compression times are not like for like. Tools marked
+duplicated), a .NET assembly, two x64 ELF binaries, PNG and gzip files, and four files generated for the test: a CSV,
+12-byte records, a WAV and a BMP. *Program files* (284 files, 124.0 MiB) is Osmium's own self-contained Windows x64
+build, mostly .NET ReadyToRun DLLs. The SHA-256 of every file measured is in
+[docs/benchmarks-0.1.1-corpus.sha256](docs/benchmarks-0.1.1-corpus.sha256). xz and Zstandard ran single-threaded
+(their multi-threaded modes lose ratio), the other tools with their default threading and Osmium on all four cores,
+so compression times are not like for like. Tools marked
 "on a tar" were timed on a ready-made tar; making and unpacking the tar is not included. Every output was unpacked
 and checked against the original: 27 of 27 runs were identical. Insane was not run on the program files (the script
 skips it above 64 MiB). Other data, versions and hardware will give different results.
 
-- Mixed folder: Insane's archive is 18.9 % smaller than xz's and 6.8 % smaller than lrzip's (the smallest other
-  result), but Insane took 17 min 29 s to compress against 24.3 s for lrzip. Fast is larger than zip there.
+- Mixed folder, which includes the generated files: Insane's archive is 15.2 % smaller than 7-Zip LZMA2's and 6.8 %
+  smaller than lrzip's (the smallest other result), but Insane took 17 min 29 s to compress and 33.9 s to extract,
+  against 2.0 s and 0.3 s for 7-Zip and 24.3 s and 26.4 s for lrzip. Fast is larger than zip there.
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) shows how much of the lead comes from the generated files.
 - Program files: ZPAQ and lrzip made smaller archives than Ultra (Ultra's is 6.6 % larger than ZPAQ's). Max is
   0.05 % larger than xz, and Balanced, the default, is larger than xz and 7-Zip LZMA2.
 - Context mixing decodes about as fast as it encodes, one thread per block: Ultra's archive of the program files took
   7 min 39 s to extract, against 2.1 s for xz and 2 min 31 s for ZPAQ. After compressing, `osmium` prints an
-  estimate of the extraction time and memory, and `osmium info` shows it for any archive.
+  estimate of the extraction time and memory, and `osmium info` shows it for any archive. For context-mixing archives
+  the time estimate can be half the real time: `osmium info` estimates about 4 minutes for that archive.
 
 ## Download
 
@@ -117,7 +121,7 @@ the [roadmap](ROADMAP.md), once a code-signing certificate is available.
 ## Quick start
 
 **App.** Osmium runs in the notification area. Click its icon, drop files or folders on the *Compress* page, choose a
-profile and press *Compress*. *Jobs* shows progress and the planner's decisions; *Archives* opens, tests and extracts
+profile and press *Compress*. *Jobs* shows progress and the planner's decisions; *Archives* lists, tests and extracts
 `.osa` files. To encrypt, tick *Encrypt (AES-256, names hidden)*.
 
 **Explorer.** Right-click files or folders and choose *Osmium* → *Add to archive…* or *Compress to .osa (Balanced)*.
