@@ -108,8 +108,11 @@ engine and the command-line tool on Windows 11 ARM64.
 
 **Not code-signed yet.** Windows SmartScreen may warn before the installer or the program runs. You can first compare
 the file's checksum with `SHA256SUMS.txt` from the same release (in PowerShell: `Get-FileHash <file>`): a match shows
-that the file is complete and is the one attached to the release, but it is not a signature. Running unsigned software
-is your decision. Signed builds are on the [roadmap](ROADMAP.md), once a code-signing certificate is available.
+that the file is complete and is the one attached to the release, but it is not a signature. From 0.2.0 on, every
+release file also carries a build provenance attestation: `gh attestation verify <file> --repo windfastt/osmium` (with
+the [GitHub CLI](https://cli.github.com/)) checks that the file was built by this repository's own workflow from the
+published source, so a modified copy fails the check. Running unsigned software is your decision. Signed builds are on
+the [roadmap](ROADMAP.md), once a code-signing certificate is available.
 
 ## Quick start
 

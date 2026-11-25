@@ -49,6 +49,10 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   was ignored). The mark is now written before any attribute, and a failure to write it is reported.
 
 ### Added
+- **Verifiable downloads:** every release file carries a build provenance attestation, so
+  `gh attestation verify <file> --repo windfastt/osmium` shows that it was built by the repository's own workflow from
+  the published source; a modified copy fails the check. CI builds drop machine-specific paths, so a commit builds to
+  the same files wherever it is built.
 - **Osmium CM2**, a new context-mixing codec (method id 8): bit-history models, contexts from an approximate x86/x64
   instruction decoder (opcode, ModRM, prefixes, previous instruction) and a larger mixer. With the new **x86v2**
   filter (id 71), which converts RIP-relative operands as well as CALL/JMP targets, Ultra made a 124.1 MiB folder of

@@ -8,6 +8,8 @@
     <Product>Osmium</Product>
     <Copyright>Copyright (c) 2026 Osmium contributors</Copyright>
     <Deterministic>true</Deterministic>
+    <!-- Builds on CI drop machine-specific paths, so the same commit gives the same files wherever it is built. -->
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <InvariantGlobalization>false</InvariantGlobalization>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <NoWarn>$(NoWarn);CA1416</NoWarn>

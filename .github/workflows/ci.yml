@@ -220,6 +220,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write       # signs the provenance attestation (Sigstore)
+      attestations: write   # stores it with the repository
     env:
       TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
@@ -235,6 +237,13 @@ jobs:
           find dist -mindepth 2 -type f -exec mv -t dist {} +
           find dist -mindepth 1 -type d -empty -delete
           cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Build provenance for every download
+        # Proves each file was built by this workflow from this repository at this commit. Check a download with:
+        #   gh attestation verify <file> --repo windfastt/osmium
+        # A release is never published without it: if this step fails, the release step does not run.
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
       - name: Release notes from CHANGELOG.md
         # The section "## [x.y.z] ..." for the tag's version, with hard-wrapped list items joined back into one line.
         run: |
