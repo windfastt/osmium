@@ -54,12 +54,10 @@ public sealed class ClusterKey
         }
         if (body.Length < BodyLength)
             throw new FormatException($"The cluster key is too short: {body.Length} of {BodyLength} characters after OSM1-. Copy the whole key.");
-        if (body.Length > BodyLength)
-            throw new FormatException($"The cluster key is too long: {body.Length} of {BodyLength} characters after OSM1-.");
 
         var bytes = new byte[34];
         int buffer = 0, bits = 0, n = 0;
-        foreach (char c in body)
+        foreach (char c in body.AsSpan(0, BodyLength))
         {
             buffer = (buffer << 5) | Alphabet.IndexOf(c);
             bits += 5;
@@ -67,8 +65,12 @@ public sealed class ClusterKey
             buffer &= (1 << bits) - 1;
         }
         var master = bytes[..32];
-        bool padIsZero = buffer == 0; // the 3 bits after the checksum: a non-zero value is a typo in the last character
-        if (!padIsZero || !SHA256.HashData(master).AsSpan(0, 2).SequenceEqual(bytes.AsSpan(32, 2)))
+        bool checksumOk = SHA256.HashData(master).AsSpan(0, 2).SequenceEqual(bytes.AsSpan(32, 2));
+        // Version 0.1.1 ignored extra trailing characters and the 3 pad bits, so a saved key that has either keeps
+        // working when its first 34 bytes verify (it derives the same master key); anything that does not verify is a typo.
+        if (body.Length > BodyLength && !checksumOk)
+            throw new FormatException($"The cluster key is too long: {body.Length} of {BodyLength} characters after OSM1-.");
+        if (!checksumOk)
             throw new FormatException("The cluster key does not match its checksum. Check it for a typo, or copy it again.");
         return new ClusterKey(master);
     }

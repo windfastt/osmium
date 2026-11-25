@@ -119,10 +119,25 @@ public class ClusterKeyTests
     }
 
     [Fact]
-    public void ExtraCharactersMakeTheKeyTooLong()
+    public void ExtraCharactersAreAcceptedOnlyAfterAVerifiedKey()
     {
-        Assert.Contains("too long", ParseError(Vector + "A"));
-        Assert.Contains("too long", ParseError(Vector + Vector[4..]));                // pasted twice
+        // 0.1.1 ignored them: a key whose first 34 bytes verify keeps working, in canonical form.
+        AssertIsVector(Vector + "A");
+        AssertIsVector(Vector + Vector[4..]);                                         // pasted twice
+        // Not a verified key: still an error that says what is wrong.
+        string bad = "OSM1-" + Body[..10] + (Body[10] == 'A' ? 'B' : 'A') + Body[11..] + "A";
+        Assert.Contains("too long", ParseError(bad));
+    }
+
+    [Fact]
+    public void NonZeroPadBitsAreAcceptedOnlyAfterAVerifiedKey()
+    {
+        // The last character carries 2 key bits and 3 pad bits: the 8 values with the same top bits are 0.1.1-equivalent.
+        char last = Body[^1];
+        int idx = Alphabet.IndexOf(last);
+        char sameBits = Alphabet[idx ^ 1];
+        AssertIsVector("OSM1-" + Body[..^1] + sameBits);
+        Assert.Contains("checksum", ParseError("OSM1-" + Body[..^1] + Alphabet[idx ^ 8]));
     }
 
     [Fact]
@@ -130,6 +145,7 @@ public class ClusterKeyTests
     {
         for (int i = 0; i < Body.Length; i++)
         {
+            if (i == Body.Length - 1) continue; // its low bits are padding, which 0.1.1 ignored (see NonZeroPadBits...)
             char wrong = Alphabet[(Alphabet.IndexOf(Body[i]) + 1) % Alphabet.Length];
             string typo = "OSM1-" + Body[..i] + wrong + Body[(i + 1)..];
             Assert.Contains("checksum", ParseError(typo));
