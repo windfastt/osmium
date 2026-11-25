@@ -38,7 +38,8 @@ public sealed class RecycleJobTests : IDisposable
 
     private string Write(string rel, string text = "some text")
     {
-        var path = Path.Combine(_root, rel);
+        // Full path in the spelling the product uses: Path.Combine keeps a '/' in rel, GetFullPath turns it into '\' on Windows.
+        var path = Path.GetFullPath(Path.Combine(_root, rel));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, text);
         return path;

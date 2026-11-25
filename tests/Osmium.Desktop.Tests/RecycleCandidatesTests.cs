@@ -23,7 +23,8 @@ public sealed class RecycleCandidatesTests : IDisposable
 
     private string Write(string rel, string text = "some text")
     {
-        var path = Path.Combine(_root, rel);
+        // Full path in the spelling the product uses: Path.Combine keeps a '/' in rel, GetFullPath turns it into '\' on Windows.
+        var path = Path.GetFullPath(Path.Combine(_root, rel));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, text);
         return path;
@@ -335,6 +336,17 @@ public sealed class RecycleCandidatesTests : IDisposable
         var twice = RecycleCandidates.Decide(Facts([other, other + Path.DirectorySeparatorChar]), Fixed);
         Assert.Empty(twice.Move);
         Assert.Equal(2, twice.Keep.Count(k => k.Reason == "it was given more than once"));
+    }
+
+    [Fact]
+    public void InputsAreReportedAsFullPathsWithTheSystemSeparator()
+    {
+        string inner = Write("in/a.txt");
+        string mixed = _root.TrimEnd(Path.DirectorySeparatorChar) + Path.AltDirectorySeparatorChar + "in" + Path.AltDirectorySeparatorChar + "a.txt"
+            + Path.AltDirectorySeparatorChar;
+        var d = RecycleCandidates.Decide(Facts([inner]) with { Inputs = [mixed] }, Fixed);
+        Assert.Equal(Path.GetFullPath(inner), Assert.Single(d.Inputs).Path);
+        Assert.Equal(Path.GetFullPath(inner), RecycleCandidates.Display(mixed));
     }
 
     [Fact]
