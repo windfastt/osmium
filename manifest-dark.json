@@ -1,0 +1,112 @@
+{
+  "theme": "dark",
+  "version": "0.1.1+bba9c4e882fc23c919c42109d2c98a48f470e54e",
+  "engine": "6D2E9B96",
+  "screenshots": [
+    {
+      "file": "page-compress-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Compress page before any files are added"
+    },
+    {
+      "file": "page-compress-filled-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Compress page: the 6 sample files after Analyze, with their detected types and the plan of profile max"
+    },
+    {
+      "file": "page-jobs-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Jobs page: the sample files (2.4 MB) compressed with profile max to 689.7 KB, with the job's planner log"
+    },
+    {
+      "file": "page-archives-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Archives page: Osmium sample.osa with its blocks, their pipelines and its files"
+    },
+    {
+      "file": "page-lab-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Lab page: every candidate pipeline of profile max benchmarked on tone.wav, smallest first"
+    },
+    {
+      "file": "page-rules-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Rules page with the example rule added, not saved yet"
+    },
+    {
+      "file": "page-cluster-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Cluster page with a newly generated cluster key, shown and not saved; no workers"
+    },
+    {
+      "file": "settings-general-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Settings: General, with the default values"
+    },
+    {
+      "file": "settings-experimental-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Settings: Experimental, with the master switch turned on"
+    },
+    {
+      "file": "page-log-dark.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "dark",
+      "caption": "Log page after the self-test's run"
+    },
+    {
+      "file": "dialog-tune-dark.png",
+      "width": 844,
+      "height": 721,
+      "theme": "dark",
+      "caption": "Tune dialog for tone.wav after its analysis, with the suggested pipeline and its parameters"
+    },
+    {
+      "file": "tray-menu-dark.png",
+      "width": 213,
+      "height": 314,
+      "theme": "dark",
+      "caption": "Notification-area menu after the compression job finished"
+    },
+    {
+      "file": "dialog-password-dark.png",
+      "width": 310,
+      "height": 167,
+      "theme": "dark",
+      "caption": "Password dialog for a new archive, before anything is typed"
+    },
+    {
+      "file": "dialog-about-dark.png",
+      "width": 352,
+      "height": 229,
+      "theme": "dark",
+      "caption": "About dialog: version, engine fingerprint and licence"
+    },
+    {
+      "file": "tray-frames-dark.png",
+      "width": 480,
+      "height": 32,
+      "theme": "dark",
+      "caption": "Notification-area icon: progress from 0 to 100 %, then paused and failed at 50 %"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+ok    sample folder (0.1 s)
+ok    main window (0.4 s)
+ok    Compress page: Analyze (0.6 s)
+ok    compression job, profile max (2.1 s)
+ok    Archives page (0.3 s)
+ok    Lab page: tone.wav, profile max (6.2 s)
+ok    Rules page with the example rule (0.2 s)
+ok    Cluster page with a new key (0.2 s)
+ok    Settings pages (2.3 s)
+ok    Log page (0.2 s)
+ok    Tune dialog (0.4 s)
+ok    tray menu (0.2 s)
+ok    password dialog (0.3 s)
+ok    About dialog (0.3 s)
+ok    tray icon frames (0.0 s)
+      in the Recycle Bin as C:\$Recycle.Bin\S-1-5-21-3414932011-3134797172-3625386099-500\$RXAMXG5; the shell asked 2 time(s) before deleting
+ok    Recycle Bin: the shell recycler moves a folder and nothing else (0.1 s)
+      originals: 2 moved to the Recycle Bin, 1 kept
+ok    Recycle Bin option: a compression job (0.2 s)
+      GDI objects: 137, USER objects: 232
+ok    handle counts (0.0 s)
+15 screenshot(s)
+SELFTEST PASSED

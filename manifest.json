@@ -1,0 +1,112 @@
+{
+  "theme": "light",
+  "version": "0.1.1+bba9c4e882fc23c919c42109d2c98a48f470e54e",
+  "engine": "6D2E9B96",
+  "screenshots": [
+    {
+      "file": "page-compress.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Compress page before any files are added"
+    },
+    {
+      "file": "page-compress-filled.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Compress page: the 6 sample files after Analyze, with their detected types and the plan of profile max"
+    },
+    {
+      "file": "page-jobs.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Jobs page: the sample files (2.4 MB) compressed with profile max to 689.7 KB, with the job's planner log"
+    },
+    {
+      "file": "page-archives.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Archives page: Osmium sample.osa with its blocks, their pipelines and its files"
+    },
+    {
+      "file": "page-lab.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Lab page: every candidate pipeline of profile max benchmarked on tone.wav, smallest first"
+    },
+    {
+      "file": "page-rules.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Rules page with the example rule added, not saved yet"
+    },
+    {
+      "file": "page-cluster.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Cluster page with a newly generated cluster key, shown and not saved; no workers"
+    },
+    {
+      "file": "settings-general.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Settings: General, with the default values"
+    },
+    {
+      "file": "settings-experimental.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Settings: Experimental, with the master switch turned on"
+    },
+    {
+      "file": "page-log.png",
+      "width": 1040,
+      "height": 760,
+      "theme": "light",
+      "caption": "Log page after the self-test's run"
+    },
+    {
+      "file": "dialog-tune.png",
+      "width": 844,
+      "height": 721,
+      "theme": "light",
+      "caption": "Tune dialog for tone.wav after its analysis, with the suggested pipeline and its parameters"
+    },
+    {
+      "file": "tray-menu.png",
+      "width": 213,
+      "height": 314,
+      "theme": "light",
+      "caption": "Notification-area menu after the compression job finished"
+    },
+    {
+      "file": "dialog-password.png",
+      "width": 310,
+      "height": 169,
+      "theme": "light",
+      "caption": "Password dialog for a new archive, before anything is typed"
+    },
+    {
+      "file": "dialog-about.png",
+      "width": 352,
+      "height": 231,
+      "theme": "light",
+      "caption": "About dialog: version, engine fingerprint and licence"
+    },
+    {
+      "file": "tray-frames.png",
+      "width": 480,
+      "height": 32,
+      "theme": "light",
+      "caption": "Notification-area icon: progress from 0 to 100 %, then paused and failed at 50 %"
+    }
+  ]
+}
