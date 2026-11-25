@@ -44,7 +44,7 @@ public static class ParamDescriptors
                 Category = category, Key = key, Label = d.Label, Description = d.Description, Experimental = d.Experimental,
                 ValueType = typeof(string), Editor = SettingEditor.ByteSize, Default = ParamValues.FormatSize(d.Default),
                 Get = () => ParamValues.FormatSize(Current()),
-                Set = v => Store(ParamValues.ParseNumber(v as string ?? "")),
+                Set = v => Store(ParamValues.ParseNumber((v as string ?? "").Trim())),
                 TextValidator = text => ValidateSize(d, text),
             };
         return new SettingDescriptor

@@ -106,6 +106,9 @@ public class SettingEditorTests
         dict.Set("1536K");
         Assert.Equal(1536L << 10, state.Get("dict", -1));
         Assert.Equal("1536K", dict.Get());
+        Assert.Null(dict.Validate(" 64M "));                     // padding is ignored by validation and by Set alike
+        dict.Set(" 64M ");
+        Assert.Equal(64L << 20, state.Get("dict", -1));
 
         Assert.Equal(typeof(long), editors["lzma.lc"].ValueType); // a number: shown as a number
 
