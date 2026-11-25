@@ -47,6 +47,15 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   was ignored). The mark is now written before any attribute, and a failure to write it is reported.
 
 ### Added
+- **Osmium CM2**, a new context-mixing codec (method id 8): bit-history models, contexts from an approximate x86/x64
+  instruction decoder (opcode, ModRM, prefixes, previous instruction) and a larger mixer. With the new **x86v2**
+  filter (id 71), which converts RIP-relative operands as well as CALL/JMP targets, Ultra made a 124.1 MiB folder of
+  Windows program files 22.98 % of its original size, against 27.29 % for the previous release on the same folder
+  and 25.60 % for ZPAQ -m5 (sizes measured on one Linux machine; timings were not comparable because the machine
+  was loaded). On the 16 MiB mixed test folder Ultra's archive is 8.3 % smaller. CM2 needs about 1.1 times the time
+  of Osmium CM and the same memory. x86v2 also helps the faster profiles on x64 code (about 7 % smaller with LZMA).
+  Archives that use CM2 or x86v2 need Osmium 0.2.0 or later; older versions open them, extract every other block and
+  report that those blocks need a newer version. Osmium CM stays unchanged, so existing archives decode as before.
 - `osmium license` prints the license and third-party notices; `osmium version` and the help text state the MIT
   license and that Osmium comes without warranty.
 - **`osmium salvage <archive> <destination>`** recovers what can be trusted from a damaged archive. It scans for
@@ -71,6 +80,13 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   settings-editing tests.
 
 ### Changed
+- **Profiles:** Ultra, Insane and Exhaustive use CM2 instead of Osmium CM; x64 code gets the x86v2 filter, 32-bit x86
+  code keeps the x86 filter and is grouped separately. Forbidding `cm` or `x86` in rules or settings also forbids the
+  newer member of the family, and `cm.*` parameters apply to CM2. The CM memory setting goes up to 1 GiB (24); the
+  experimental 4 GiB table option is gone, since CM2 at 1 GiB compresses better than Osmium CM at 4 GiB.
+- **Robustness:** a truncated context-mixing stream now fails where it ends instead of decoding to its declared
+  size, and a block whose data makes a decoder fail unexpectedly is reported as damaged on its own instead of
+  stopping the whole extraction.
 - **Website:** rebuilt from the real product. The mock-ups of the tray and the main window (with invented data) are
   gone; fonts are served from the site itself (no requests to other sites); claims are qualified; the footer states
   the license and warranty disclaimer, third-party notices, trademarks, benchmark conditions and privacy. The page is

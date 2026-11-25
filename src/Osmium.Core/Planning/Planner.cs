@@ -283,7 +283,7 @@ public sealed class Planner(PlanOptions o)
             string key = f.Rules.Pipeline is not null ? $"F:{f.Rules.Pipeline}|{solid}|{f.Rules.Key}"
                 : solid == "own" || f.Class is CompatClass.Audio or CompatClass.Image ? $"own:{i}"
                 : solid.StartsWith("group:", StringComparison.OrdinalIgnoreCase) ? $"G:{solid}|{f.Rules.Key}"
-                : $"C:{f.Class}|{(f.Class == CompatClass.Structured ? f.Analysis?.Stats.Stride : 0)}|{f.Rules.Key}";
+                : $"C:{f.Class}|{(f.Class == CompatClass.Structured ? f.Analysis?.Stats.Stride : 0)}{(f.Class == CompatClass.CodeX86 ? $"|{f.Analysis?.Arch}" : "")}|{f.Rules.Key}";
             if (!byKey.TryGetValue(key, out var g))
             {
                 g = new PlanGroup { Id = plan.Groups.Count, Key = key, Class = f.Class, Rep = f.Analysis, Rules = f.Rules, Forced = f.Rules.Pipeline is not null };
@@ -349,7 +349,7 @@ public sealed class Planner(PlanOptions o)
     {
         if (!g.Rules.Allows(s)) return false;
         if (s.Experimental && !o.AllowExperimental) return false;
-        if (s.Codec.Method.Id == MethodIds.Cm && !o.Profile.AllowCm) return false;
+        if (MethodIds.IsContextMixing(s.Codec.Method.Id) && !o.Profile.AllowCm) return false;
         return s.EncodeMemory(blockSize) <= o.MemoryBudget && s.DecodeMemory(blockSize) <= o.MemoryBudget;
     }
 
@@ -374,7 +374,7 @@ public sealed class Planner(PlanOptions o)
 
         if (p.Rungs.Length == 0 || g.Size < 4096)
         {
-            g.Spec = allowed.FirstOrDefault(s => s.Codec.Method.Id != MethodIds.Cm) ?? allowed[0];
+            g.Spec = allowed.FirstOrDefault(s => !MethodIds.IsContextMixing(s.Codec.Method.Id)) ?? allowed[0];
             g.Explain.Add($"  chose {g.Spec} ({(g.Size < 4096 ? "tiny group" : "profile default")})");
             return;
         }
@@ -477,13 +477,13 @@ public sealed class Planner(PlanOptions o)
             yield return spec.WithFilters(filters.Where((_, k) => k != i));
         string? natural = g.Class switch
         {
-            CompatClass.CodeX86 => "x86",
+            CompatClass.CodeX86 => Candidates.BranchFilter(g.Rep),
             CompatClass.CodeArm64 => "arm64",
             CompatClass.Text => "text",
             CompatClass.Structured when g.Rep is { Stats.Stride: > 1 } => $"delta(stride={g.Rep.Stats.Stride})",
             _ => null,
         };
-        if (natural is not null && filters.Count < 3 && !filters.Any(f => natural.StartsWith(f.Method.Name, StringComparison.Ordinal)))
+        if (natural is not null && filters.Count < 3 && !Candidates.HasNaturalFilter(spec, natural))
         {
             var add = PipelineSpec.Parse(natural + "+store", _reg).Stages[0];
             yield return spec.WithFilters(filters.Prepend(add));

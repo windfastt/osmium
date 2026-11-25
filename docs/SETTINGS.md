@@ -4,7 +4,7 @@ Generated from the `[Setting]` metadata in `src/Osmium.Desktop/Settings/OsmiumSe
 definitions — the Settings page and the Tune dialog render exactly these. Stored in `%APPDATA%\Osmium\settings.json`
 (portable mode: `.\data\settings.json`).
 
-**64 settings in 11 categories**, plus 37 codec/filter parameters usable in pipelines, rules and the Tune dialog.
+**63 settings in 11 categories**, plus 46 codec/filter parameters usable in pipelines, rules and the Tune dialog.
 
 ## General
 
@@ -28,7 +28,7 @@ Defaults for new archives.
 | Setting | Default | Range / choices | Notes |
 |---|---|---|---|
 | **Default profile**<br>Store → Insane: higher profiles try more algorithms and take longer. | Balanced | Store · Fast · Balanced · Max · Ultra · Insane |  |
-| **Decode-speed weight**<br>Penalise pipelines that are slow to extract (context mixing decompresses at ~0.5 MB/s). | None | None · Light · Strong |  |
+| **Decode-speed weight**<br>Penalise pipelines that are slow to extract (context mixing decompresses at about 0.3 MB/s). | None | None · Light · Strong |  |
 | **Deduplication**<br>Auto = profile default. Chunks finds repeats inside and across files (slower to plan). | Auto | Auto · Off · Files · Chunks |  |
 | **Solid block size**<br>0 = profile default. Larger blocks compress better but need more memory and limit parallelism. | 0 | 0 – 1,024 MiB |  |
 | **Verify every block**<br>Decode each block and compare before writing it. Strongly recommended. | on |  | **caution** |
@@ -43,13 +43,13 @@ Which algorithms the planner may use, and their resource limits.
 
 | Setting | Default | Range / choices | Notes |
 |---|---|---|---|
-| **Allow context mixing (CM)**<br>Osmium CM: smallest output, but compresses AND extracts slowly. | on |  |  |
+| **Allow context mixing (CM)**<br>Osmium CM (cm2; cm in older archives and explicit pipelines): smallest output, but compresses AND extracts slowly. | on |  |  |
 | **Allow PPMd**<br> | on |  |  |
 | **Allow LZMA**<br> | on |  |  |
 | **Allow Zstandard**<br> | on |  |  |
 | **Allow Brotli**<br> | on |  |  |
 | **Allow BZip2**<br> | on |  |  |
-| **CM model memory**<br>log2 of 64-byte buckets: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB. 0 = profile default. | 0 | 0 – 26 | advanced |
+| **CM model memory**<br>log2 of 64-byte table lines: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB. 0 = profile default. Extraction needs the same memory. | 0 | 0 – 24 | advanced |
 | **LZMA dictionary**<br>0 = profile default. | 0 | 0 – 512 MiB | advanced |
 | **Zstandard level**<br>0 = profile default. | 0 | 0 – 22 | advanced |
 
@@ -59,7 +59,7 @@ Reversible pre-processing that makes data more compressible.
 
 | Setting | Default | Range / choices | Notes |
 |---|---|---|---|
-| **x86/x64 branch converter**<br>For .exe/.dll/.so. | on |  |  |
+| **x86/x64 branch converter**<br>For .exe/.dll/.so: CALL/JMP targets (x86), and for x64 code RIP-relative addresses too (x86v2). | on |  |  |
 | **ARM64 branch converter**<br> | on |  |  |
 | **Delta (records, tables)**<br> | on |  |  |
 | **Byte-plane transpose**<br> | on |  |  |
@@ -143,8 +143,7 @@ Features that may be very slow, use huge memory, or change in future versions. A
 |---|---|---|---|
 | **Enable experimental features**<br>Master switch for everything on this page. | off |  |  |
 | **Offer the Exhaustive profile**<br>Every candidate compressed on the full data, then hill-climbed. | off |  | **experimental**, enabled when `Enabled` |
-| **CM: all context models**<br>Adds order-5/8 and sparse models to every CM candidate (slower, sometimes smaller). | off |  | **experimental**, enabled when `Enabled` |
-| **Huge CM tables (4 GiB)**<br>Allows model memory 26. Extraction needs the same memory. | off |  | **experimental**, enabled when `Enabled` |
+| **CM: all context models**<br>Adds order-5/8, sparse and x86 models to every CM candidate (slower, sometimes smaller). | off |  | **experimental**, enabled when `Enabled` |
 | **Distribute symmetric codecs**<br>Send CM/PPMd blocks to workers too (verification then costs as much as compressing). | off |  | **experimental**, enabled when `Enabled` |
 
 ## Watch-folder entries
@@ -248,6 +247,21 @@ Osmium's own context-mixing compressor: usually the smallest output, but slow (~
 | `stride` | 0 | 0 – 65,536 | — (resource/structure) | Record stride. Record length for the record model (0 = off; set automatically when a stride is detected). |
 | `apm` | 7 | 4 – 9 | 6, 7 | SSE adaptation rate. Adaptation shift of the secondary estimation stages. |
 
+### `cm2` — Osmium CM2 (context mixing, v2) (codec, id 8)
+
+Osmium's second-generation context-mixing compressor (bit histories, x86/x64 contexts): usually the smallest output, but slow (~0.3 MB/s) in BOTH directions. Needs Osmium 0.2.0 or newer to decompress.
+
+| Parameter | Default | Range | Searched values | Meaning |
+|---|---|---|---|---|
+| `mem` | 22 | 16 – 24 | — (resource/structure) | Model memory (log2 of 64-byte lines). Hash-table size: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB. Same memory is needed to decompress. |
+| `models` | 767 | 0 – 12,287 | 767, 1,599, 975, 9,167, 12,287 | Model set (flags). Bit flags selecting context models: orders 2/3/4/5/6/8, word, word pair, sparse A/B/C, match, record, x86 (8192). |
+| `limit` | 255 | 2 – 1,023 | 60, 127, 255, 1,023 | Counter adaptation limit. Order-0/1 counters: higher = more stationary statistics, lower = adapts faster to changing data. |
+| `lr` | 16 | 1 – 64 | 8, 12, 16, 24 | Mixer learning rate. First-layer mixer learning rate. |
+| `lr2` | 10 | 1 – 64 | 6, 10, 16 | Final mixer learning rate. Second-layer mixer learning rate. |
+| `minlen` | 6 | 3 – 32 | 4, 6, 8, 12 | Match model minimum length. Shortest repeat the match model will follow. |
+| `stride` | 0 | 0 – 65,536 | — (resource/structure) | Record stride. Record length for the record model (0 = off; set automatically when a stride is detected). |
+| `apm` | 7 | 4 – 9 | 6, 7 | SSE adaptation rate. Adaptation shift of the secondary estimation stages. |
+
 ### `x86` — x86/x64 branch converter (filter, id 64)
 
 Converts relative CALL/JMP targets to absolute addresses so repeated calls look identical. For .exe/.dll (not .NET IL).
@@ -306,4 +320,12 @@ Predicts each pixel from its left, upper and upper-left neighbours (MED). For un
 Replaces frequent words with short codes and folds capital letters into flags. For English-like text.
 
 No parameters.
+
+### `x86v2` — x86/x64 branch and RIP-relative converter (filter, id 71)
+
+Converts x64 RIP-relative addresses and CALL/JMP targets to absolute ones, following the instructions. For .exe/.dll (not .NET IL); needs Osmium 0.2.0 or newer to decompress.
+
+| Parameter | Default | Range | Searched values | Meaning |
+|---|---|---|---|---|
+| `calls` | 1 | 0 – 1 | 0, 1 | Convert CALL/JMP. Also convert CALL/JMP rel32 (E8/E9) targets. Helps native code; .NET ReadyToRun code calls mostly through RIP-relative cells. |
 

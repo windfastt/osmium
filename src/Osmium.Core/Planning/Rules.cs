@@ -134,24 +134,33 @@ public sealed class EffectiveRules
 
     public string Key => $"{Pipeline}|{Solid}|{string.Join(',', ForbidCodecs.Order())}|{string.Join(',', ForbidFilters.Order())}|{string.Join(',', Params.OrderBy(k => k.Key).Select(k => k.Key + "=" + k.Value))}";
 
+    /// <summary>False when a stage is forbidden by its own name or its family's (forbidding x86 also forbids x86v2).</summary>
     public bool Allows(PipelineSpec spec) =>
-        !spec.Stages.Any(s => s.Method.Kind == MethodKind.Codec ? ForbidCodecs.Contains(s.Method.Name) : ForbidFilters.Contains(s.Method.Name));
+        !spec.Stages.Any(s =>
+        {
+            var forbid = s.Method.Kind == MethodKind.Codec ? ForbidCodecs : ForbidFilters;
+            return forbid.Contains(s.Method.Name) || forbid.Contains(MethodFamily.Of(s.Method.Name));
+        });
 
-    /// <summary>Applies "codec.param" overrides to a spec (unknown names are ignored).</summary>
+    /// <summary>Applies "codec.param" overrides to a spec (unknown names are ignored). A family name also reaches its
+    /// newer members ("cm.limit" sets cm2's limit); the method's own name wins over its family's.</summary>
     public PipelineSpec Apply(PipelineSpec spec)
     {
         if (Params.Count == 0) return spec;
         var stages = spec.Stages.Select(s =>
         {
             var p = s.Params;
-            foreach (var kv in Params)
-            {
-                int dot = kv.Key.IndexOf('.');
-                if (dot <= 0) continue;
-                if (!kv.Key[..dot].Equals(s.Method.Name, StringComparison.OrdinalIgnoreCase)) continue;
-                string name = kv.Key[(dot + 1)..].ToLowerInvariant();
-                if (s.Method.Params.Any(d => d.Name == name)) p = p.With(name, kv.Value);
-            }
+            string family = MethodFamily.Of(s.Method.Name);
+            string[] prefixes = family.Equals(s.Method.Name, StringComparison.OrdinalIgnoreCase) ? [s.Method.Name] : [family, s.Method.Name];
+            foreach (string prefix in prefixes)
+                foreach (var kv in Params)
+                {
+                    int dot = kv.Key.IndexOf('.');
+                    if (dot <= 0) continue;
+                    if (!kv.Key[..dot].Equals(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    string name = kv.Key[(dot + 1)..].ToLowerInvariant();
+                    if (s.Method.Params.Any(d => d.Name == name)) p = p.With(name, kv.Value);
+                }
             return new StageSpec(s.Method, p);
         });
         return new PipelineSpec(stages);

@@ -99,9 +99,9 @@ public class DesktopTests
         Assert.True(po.Profile.CmAllModels);
         Assert.True(po.AllowExperimental);
         var cms = Candidates.For(Osmium.Core.Analysis.CompatClass.Text, null, po.Profile, Core.Pipeline.MethodRegistry.Default)
-            .Where(c => c.Codec.Method.Name == "cm").ToList();
+            .Where(c => c.Codec.Method.Name == "cm2").ToList();
         Assert.NotEmpty(cms);
-        Assert.All(cms, c => Assert.Equal((long)Osmium.Core.Codecs.Cm.CmModels.All, c.Codec.Params.Get("models", -1)));
+        Assert.All(cms, c => Assert.Equal((long)Osmium.Core.Codecs.Cm2.Cm2Models.All, c.Codec.Params.Get("models", -1)));
     }
 
     [Fact]

@@ -116,7 +116,7 @@ public class PlannerTests
         var plan = await PlanSingle(t, "app.exe", data, "balanced");
         var g = plan.Groups[0];
         Assert.Equal(CompatClass.CodeX86, g.Class);
-        Assert.Equal("x86", g.Spec!.Filters.First().Method.Name);
+        Assert.Equal("x86v2", g.Spec!.Filters.First().Method.Name); // x64 code: the converter that also handles RIP-relative operands
     }
 
     [Fact]

@@ -38,7 +38,7 @@ public sealed class CompressionSettings
 {
     [Setting("Default profile", Description = "Store → Insane: higher profiles try more algorithms and take longer.", Order = 0, Keywords = "level preset")]
     public ProfileName Profile { get; set; } = ProfileName.Balanced;
-    [Setting("Decode-speed weight", Description = "Penalise pipelines that are slow to extract (context mixing decompresses at ~0.5 MB/s).", Order = 1)]
+    [Setting("Decode-speed weight", Description = "Penalise pipelines that are slow to extract (context mixing decompresses at about 0.3 MB/s).", Order = 1)]
     public DecodeSpeed DecodeSpeedWeight { get; set; } = DecodeSpeed.None;
     [Setting("Deduplication", Description = "Auto = profile default. Chunks finds repeats inside and across files (slower to plan).", Order = 2)]
     public DedupSetting Dedup { get; set; } = DedupSetting.Auto;
@@ -64,14 +64,14 @@ public sealed class CompressionSettings
 [SettingsCategory("Codecs", Order = 2, Glyph = "", Description = "Which algorithms the planner may use, and their resource limits.")]
 public sealed class CodecSettings
 {
-    [Setting("Allow context mixing (CM)", Description = "Osmium CM: smallest output, but compresses AND extracts slowly.", Order = 0)]
+    [Setting("Allow context mixing (CM)", Description = "Osmium CM (cm2; cm in older archives and explicit pipelines): smallest output, but compresses AND extracts slowly.", Order = 0)]
     public bool AllowCm { get; set; } = true;
     [Setting("Allow PPMd", Order = 1)] public bool AllowPpmd { get; set; } = true;
     [Setting("Allow LZMA", Order = 2)] public bool AllowLzma { get; set; } = true;
     [Setting("Allow Zstandard", Order = 3)] public bool AllowZstd { get; set; } = true;
     [Setting("Allow Brotli", Order = 4)] public bool AllowBrotli { get; set; } = true;
     [Setting("Allow BZip2", Order = 5)] public bool AllowBzip2 { get; set; } = true;
-    [Setting("CM model memory", Description = "log2 of 64-byte buckets: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB. 0 = profile default.", Min = 0, Max = 26, Order = 6, Advanced = true)]
+    [Setting("CM model memory", Description = "log2 of 64-byte table lines: 20 = 64 MiB, 22 = 256 MiB, 24 = 1 GiB. 0 = profile default. Extraction needs the same memory.", Min = 0, Max = 24, Order = 6, Advanced = true)]
     public int CmMemoryBits { get; set; }
     [Setting("LZMA dictionary", Description = "0 = profile default.", Min = 0, Max = 512, Unit = " MiB", Order = 7, Advanced = true)]
     public int LzmaDictMiB { get; set; }
@@ -82,7 +82,7 @@ public sealed class CodecSettings
 [SettingsCategory("Filters", Order = 3, Glyph = "", Description = "Reversible pre-processing that makes data more compressible.")]
 public sealed class FilterSettings
 {
-    [Setting("x86/x64 branch converter", Description = "For .exe/.dll/.so.", Order = 0)] public bool X86 { get; set; } = true;
+    [Setting("x86/x64 branch converter", Description = "For .exe/.dll/.so: CALL/JMP targets (x86), and for x64 code RIP-relative addresses too (x86v2).", Order = 0)] public bool X86 { get; set; } = true;
     [Setting("ARM64 branch converter", Order = 1)] public bool Arm64 { get; set; } = true;
     [Setting("Delta (records, tables)", Order = 2)] public bool Delta { get; set; } = true;
     [Setting("Byte-plane transpose", Order = 3)] public bool Transpose { get; set; } = true;
@@ -220,10 +220,8 @@ public sealed class ExperimentalSettings
     public bool Enabled { get; set; }
     [Setting("Offer the Exhaustive profile", Description = "Every candidate compressed on the full data, then hill-climbed.", EnabledWhen = "Enabled", Experimental = true, Order = 1)]
     public bool Exhaustive { get; set; }
-    [Setting("CM: all context models", Description = "Adds order-5/8 and sparse models to every CM candidate (slower, sometimes smaller).", EnabledWhen = "Enabled", Experimental = true, Order = 2)]
+    [Setting("CM: all context models", Description = "Adds order-5/8, sparse and x86 models to every CM candidate (slower, sometimes smaller).", EnabledWhen = "Enabled", Experimental = true, Order = 2)]
     public bool CmAllModels { get; set; }
-    [Setting("Huge CM tables (4 GiB)", Description = "Allows model memory 26. Extraction needs the same memory.", EnabledWhen = "Enabled", Experimental = true, Order = 3)]
-    public bool HugeTables { get; set; }
     [Setting("Distribute symmetric codecs", Description = "Send CM/PPMd blocks to workers too (verification then costs as much as compressing).", EnabledWhen = "Enabled", Experimental = true, Order = 4)]
     public bool DistributeSymmetric { get; set; }
 }

@@ -25,7 +25,8 @@ checks every block before writing it. It runs as a notification-area app with Ex
 
 - **A pipeline for each kind of data.** Files are sorted by content (text, x86/x64 and ARM64 code, fixed-size records,
   16-bit audio, bitmaps, other binary data, already-compressed files). Each group gets optional reversible filters and
-  one of eight codecs: Osmium CM (context mixing), LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate or Store.
+  one of the codecs: Osmium CM2 (context mixing, with models for x86/x64 machine code; the first Osmium CM is kept for
+  reading older archives), LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate or Store.
 - **Seven profiles.** Store, Fast and Balanced (default) use fixed choices; Max trial-compresses candidates on samples;
   Ultra and Insane also tune parameters and may use context mixing, which extracts slowly. Exhaustive is experimental.
 - **Checked before it is written.** By default every block is decoded and compared with its input before it is

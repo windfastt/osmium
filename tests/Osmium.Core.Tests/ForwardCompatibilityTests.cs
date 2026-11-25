@@ -17,6 +17,8 @@ public class ForwardCompatibilityTests
     private static readonly MethodRegistry Reg = MethodRegistry.Default;
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
     private const string Newer = "This archive needs a newer version of Osmium: ";
+    /// <summary>A codec id no version of Osmium uses yet (8 became cm2 in 0.2.0).</summary>
+    private const int FutureId = 63;
 
     private static byte[] Descriptor(params (int Id, ParamValues Params)[] stages)
     {
@@ -27,8 +29,8 @@ public class ForwardCompatibilityTests
 
     private static (byte[] Blob, string Feature) Case(string name) => name switch
     {
-        "unknown method" => (Descriptor((8, ParamValues.Empty)), "method id 8"),
-        "unknown filter" => (Descriptor((71, ParamValues.Empty), (MethodIds.Lzma, ParamValues.Empty)), "method id 71"),
+        "unknown method" => (Descriptor((FutureId, ParamValues.Empty)), $"method id {FutureId}"),
+        "unknown filter" => (Descriptor((127, ParamValues.Empty), (MethodIds.Lzma, ParamValues.Empty)), "method id 127"),
         "unknown parameter" => (Descriptor((MethodIds.Lzma, ParamValues.Of(("dict", 1 << 20), ("future", 1)))), "parameter lzma.future"),
         "value above the range" => (Descriptor((MethodIds.Cm, ParamValues.Of(("models", 8191)))), "parameter cm.models=8191"),
         "value below the range" => (Descriptor((MethodIds.X86, ParamValues.Empty), (MethodIds.Cm, ParamValues.Of(("mem", 12)))), "parameter cm.mem=12"),
@@ -72,8 +74,8 @@ public class ForwardCompatibilityTests
         // ...and out of range they are refused by every read path, including the pipeline-only form.
         var pipelineOnly = new BlobWriter().U(1).U(MethodIds.Cm).Bytes(ParamValues.Of(("models", 8191)).Serialize()).ToArray();
         Assert.Equal($"{Newer}it uses parameter cm.models=8191.", Assert.ThrowsAny<NewerVersionException>(() => PipelineSpec.Deserialize(pipelineOnly, Reg)).Message);
-        var unknown = new BlobWriter().U(1).U(8).Bytes(ParamValues.Empty.Serialize()).ToArray();
-        Assert.Equal(8, Assert.Throws<UnknownMethodException>(() => PipelineSpec.Deserialize(unknown, Reg)).MethodId);
+        var unknown = new BlobWriter().U(1).U(FutureId).Bytes(ParamValues.Empty.Serialize()).ToArray();
+        Assert.Equal(FutureId, Assert.Throws<UnknownMethodException>(() => PipelineSpec.Deserialize(unknown, Reg)).MethodId);
     }
 
     [Fact]
@@ -100,10 +102,10 @@ public class ForwardCompatibilityTests
         public override byte[] Decode(ReadOnlyMemory<byte> input, int outputLength, ParamValues p, CodecContext ctx) => input.ToArray();
     }
 
-    /// <summary>The registry of a newer Osmium: a new method id 8, more cm model bits, a new lzma parameter.</summary>
+    /// <summary>The registry of a newer Osmium: a new method id, more cm model bits, a new lzma parameter.</summary>
     private static readonly MethodRegistry NewerRegistry = new(Reg.All.Where(m => m.Id is not (MethodIds.Cm or MethodIds.Lzma)).Concat<IMethod>(
     [
-        new NewerCodec(8, "cm2"),
+        new NewerCodec(FutureId, "future"),
         new NewerCodec(MethodIds.Cm, "cm", new ParamDef("models", "Model set", ParamType.Int, 0, 8191, 767, "13 model bits")),
         new NewerCodec(MethodIds.Lzma, "lzma", new ParamDef("future", "New parameter", ParamType.Int, 0, 1, 0, "not in 0.1")),
     ]));
@@ -111,7 +113,7 @@ public class ForwardCompatibilityTests
     private static readonly (string Name, string Pipeline, byte[] Data)[] Files =
     [
         ("a.txt", "zstd(level=3)", Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("osmium forward compatibility ", 300)))),
-        ("b.bin", "cm2", Synthetic.X86(4000)),
+        ("b.bin", "future", Synthetic.X86(4000)),
         ("c.bin", "cm(models=8191)", Synthetic.Records(300)),
         ("d.bin", "x86+lzma(future=1)", Synthetic.X86(3000, seed: 5)),
         ("e.txt", "store", "stored as is"u8.ToArray()),
@@ -119,7 +121,7 @@ public class ForwardCompatibilityTests
 
     private static readonly string[] NewerErrors =
     [
-        $"{Newer}block 1 uses method id 8.",
+        $"{Newer}block 1 uses method id {FutureId}.",
         $"{Newer}block 2 uses parameter cm.models=8191.",
         $"{Newer}block 3 uses parameter lzma.future.",
     ];
@@ -153,7 +155,7 @@ public class ForwardCompatibilityTests
 
         // opening and listing work; the blocks that need a newer version say so
         Assert.Equal(
-            [PipelineSpec.Parse("zstd(level=3)", Reg).ToString(), "needs a newer Osmium (method id 8)", "needs a newer Osmium (parameter cm.models=8191)",
+            [PipelineSpec.Parse("zstd(level=3)", Reg).ToString(), $"needs a newer Osmium (method id {FutureId})", "needs a newer Osmium (parameter cm.models=8191)",
                 "needs a newer Osmium (parameter lzma.future)", "store"],
             r.Blocks.Select(b => b.Descriptor.Spec.ToString()));
         Assert.Equal(NewerErrors[0], r.NewerVersion!.Message);
@@ -162,7 +164,7 @@ public class ForwardCompatibilityTests
         // reading a block: the supported ones decode, the others raise the message (keeping its type)
         Assert.Equal(Files[0].Data, r.ReadBlock(0));
         var e = Assert.Throws<UnknownMethodException>(() => r.ReadBlock(1));
-        Assert.Equal((8, NewerErrors[0]), (e.MethodId, e.Message));
+        Assert.Equal((FutureId, NewerErrors[0]), (e.MethodId, e.Message));
         Assert.Equal(NewerErrors[1], Assert.ThrowsAny<NewerVersionException>(() => r.ReadBody(2)).Message);
 
         // test and extract report exactly those messages, no corruption errors, and extract the rest
@@ -181,9 +183,9 @@ public class ForwardCompatibilityTests
     public void AnIndexCompressedByANewerMethodCannotBeOpenedAndSaysWhy()
     {
         using var t = new TempDir();
-        var path = WriteNewerArchive(t, indexPipeline: "cm2");
+        var path = WriteNewerArchive(t, indexPipeline: "future");
         var e = Assert.Throws<UnknownMethodException>(() => OsaReader.Open(path));
-        Assert.Equal($"{Newer}the index uses method id 8.", e.Message);
+        Assert.Equal($"{Newer}the index uses method id {FutureId}.", e.Message);
     }
 
     [Fact]

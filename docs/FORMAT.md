@@ -63,8 +63,8 @@ stage*: varint methodId
 Decoding runs the stages in reverse; each must produce exactly its recorded `inputSize`, then the final output's
 XxHash128 must equal `rawHash`. A method id, parameter name or parameter value outside the declared range that this
 reader does not know makes only that block undecodable, never the whole archive: the archive opens, listings show
-the block's pipeline as "needs a newer Osmium (method id 8)", every other block extracts, and reading the block
-reports "This archive needs a newer version of Osmium: block 3 uses method id 8." Stored values are checked, never
+the block's pipeline as "needs a newer Osmium (method id 63)", every other block extracts, and reading the block
+reports "This archive needs a newer version of Osmium: block 3 uses method id 63." Stored values are checked, never
 clamped, because a value from a newer writer would decode differently. The same message is used for the other
 features a newer writer can add: unknown critical header flags (checked only after the header CRC, so damage is
 still reported as damage), critical header extensions, key-derivation functions and ciphers, index versions and
@@ -80,6 +80,7 @@ frame flags. An index compressed with an unknown method cannot be opened, and sa
 | 5 | codec | `bzip2` | – |
 | 6 | codec | `ppmd` | `order`, `mem` |
 | 7 | codec | `cm` | `mem`, `models`, `limit`, `lr`, `lr2`, `minlen`, `stride`, `apm` |
+| 8 | codec | `cm2` | `mem` (16–24), `models` (adds bit 8192, x86/x64 instruction contexts), `limit`, `lr`, `lr2`, `minlen`, `stride`, `apm` — needs Osmium 0.2.0 |
 | 64 | filter | `x86` | – |
 | 65 | filter | `arm64` | – |
 | 66 | filter | `delta` | `stride` |
@@ -87,6 +88,7 @@ frame flags. An index compressed with an unknown method cannot be opened, and sa
 | 68 | filter | `pcm16` | `offset`, `length`, `channels`, `lms`, `split` |
 | 69 | filter | `image` | `offset`, `width`, `rows`, `bpp`, `rowbytes`, `green` |
 | 70 | filter | `text` | – (its dictionary travels inside the filtered stream, so it gets compressed too) |
+| 71 | filter | `x86v2` | `calls` (0/1): x64 RIP-relative operands, and with `calls=1` CALL/JMP rel32, as block positions — needs Osmium 0.2.0 |
 
 Ids ≥ 128 are reserved for experimental methods.
 

@@ -1,12 +1,13 @@
 using Osmium.Core.Analysis;
-using Osmium.Core.Codecs.Cm;
+using Osmium.Core.Codecs.Cm2;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Planning;
 
 /// <summary>
 /// Seed pipelines per compatibility class, most promising first (BLUEPRINT §7.4). Profiles without trials use
-/// the first non-CM entry; trial profiles race the first N that pass rules and memory limits.
+/// the first non-CM entry; trial profiles race the first N that pass rules and memory limits. Context mixing uses
+/// cm2, which measured smaller than cm on every class; cm stays available for reading and for explicit pipelines.
 /// </summary>
 public static class Candidates
 {
@@ -14,7 +15,8 @@ public static class Candidates
     {
         var list = new List<string>();
         string cm(string models, int stride = 0) =>
-            $"cm(mem={p.CmMem},models={(int)(p.CmAllModels ? CmModels.All : Enum.Parse<CmModels>(models))}{(stride > 0 ? $",stride={stride}" : "")})";
+            $"cm2(mem={Math.Min(p.CmMem, Cm2Method.MaxMem)},models={(int)(p.CmAllModels ? Cm2Models.All : Enum.Parse<Cm2Models>(models))}{(stride > 0 ? $",stride={stride}" : "")})";
+        string bx = BranchFilter(rep);
         string lz(int lc, int lp, int pb, long? dict = null) =>
             $"lzma(dict={dict ?? p.LzmaDict},lc={lc},lp={lp},pb={pb},fb=273,mf=1)";
         string pm(int order) => $"ppmd(order={order},mem={(p.Level >= ProfileLevel.Ultra ? 256 : 64)}M)";
@@ -32,8 +34,8 @@ public static class Candidates
                 break;
 
             case CompatClass.Text:
-                list.AddRange([cm("Text"), $"text+{cm("Text")}", pm(8), lz(3, 0, 0), $"text+{pm(8)}", pm(12),
-                    $"text+{lz(3, 0, 0)}", pm(6), br, zs(p.ZstdLevel), cm("All"), cm("Default"), "bzip2", pm(16)]);
+                list.AddRange([cm("Text"), cm("All"), $"text+{cm("Text")}", pm(8), lz(3, 0, 0), $"text+{pm(8)}", pm(12),
+                    $"text+{lz(3, 0, 0)}", pm(6), br, zs(p.ZstdLevel), cm("Default"), "bzip2", pm(16)]);
                 break;
 
             case CompatClass.Utf16Text:
@@ -42,12 +44,12 @@ public static class Candidates
                 break;
 
             case CompatClass.CodeX86:
-                list.AddRange([$"x86+{cm("Binary")}", $"x86+{cm("Default")}", $"x86+{lz(0, 2, 2)}", $"x86+{lz(3, 0, 2)}",
-                    lz(3, 0, 2), cm("Default"), $"x86+{lz(1, 2, 2)}", $"x86+{pm(8)}", $"x86+{zs(p.ZstdLevel)}", $"x86+{cm("All")}"]);
+                list.AddRange([$"{bx}+{cm("All")}", $"{bx}+{cm("Exe")}", $"{bx}+{lz(0, 2, 2)}", $"{bx}+{lz(3, 0, 2)}", $"x86+{lz(0, 2, 2)}",
+                    lz(3, 0, 2), cm("Default"), $"{bx}+{lz(1, 2, 2)}", $"{bx}+{pm(8)}", $"{bx}+{zs(p.ZstdLevel)}", $"x86+{cm("All")}"]);
                 break;
 
             case CompatClass.CodeArm64:
-                list.AddRange([$"arm64+{cm("Binary")}", $"arm64+{lz(0, 2, 2)}", $"arm64+{cm("Default")}", lz(0, 2, 2),
+                list.AddRange([$"arm64+{cm("Binary")}", $"arm64+{cm("All")}", $"arm64+{lz(0, 2, 2)}", $"arm64+{cm("Default")}", lz(0, 2, 2),
                     lz(3, 0, 2), cm("Default"), $"arm64+{zs(p.ZstdLevel)}"]);
                 break;
 
@@ -87,8 +89,8 @@ public static class Candidates
                 break;
 
             default: // Binary and unknown structure
-                list.AddRange([cm("Default"), lz(3, 0, 2), lz(0, 2, 2), cm("Binary"), pm(6), zs(p.ZstdLevel),
-                    $"x86+{lz(3, 0, 2)}", lz(1, 0, 0), br, cm("All"), "bzip2"]);
+                list.AddRange([cm("All"), cm("Default"), lz(3, 0, 2), lz(0, 2, 2), cm("Binary"), pm(6), zs(p.ZstdLevel),
+                    $"x86+{lz(3, 0, 2)}", lz(1, 0, 0), br, "bzip2"]);
                 break;
         }
         if (p.Level == ProfileLevel.Exhaustive)
@@ -101,5 +103,14 @@ public static class Candidates
 
     /// <summary>The pipeline used when the profile does not run trials (first non-CM candidate).</summary>
     public static PipelineSpec Default(CompatClass cls, FileAnalysis? rep, Profile p, MethodRegistry reg) =>
-        For(cls, rep, p, reg).FirstOrDefault(s => s.Codec.Method.Id != MethodIds.Cm) ?? PipelineSpec.Parse("lzma", reg);
+        For(cls, rep, p, reg).FirstOrDefault(s => !MethodIds.IsContextMixing(s.Codec.Method.Id)) ?? PipelineSpec.Parse("lzma", reg);
+
+    /// <summary>The branch converter for x86 code: x86v2 for x64 (it also converts RIP-relative addresses), x86 for
+    /// 32-bit code, where the same ModRM encoding is an absolute address.</summary>
+    public static string BranchFilter(FileAnalysis? rep) => rep?.Arch == CpuArch.X86 ? "x86" : "x86v2";
+
+    /// <summary>True when <paramref name="spec"/> already has the class's natural filter or one of its family (x86 and
+    /// x86v2), so the parameter search does not stack a second one on top.</summary>
+    public static bool HasNaturalFilter(PipelineSpec spec, string natural) =>
+        spec.Filters.Any(f => natural.StartsWith(f.Method.Name, StringComparison.Ordinal) || f.Method.Name.StartsWith(natural, StringComparison.Ordinal));
 }

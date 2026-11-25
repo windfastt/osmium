@@ -64,6 +64,8 @@ public class GoldenVectorTests
         // x86, arm64 and text have no parameters: the second vector of each uses a harder input instead.
         ["x86 on x86 code"] = Filter("F1575BF331A30200", "x86", () => Synthetic.X86(24 << 10)),
         ["x86 on dense E8/E9/00/FF bytes"] = Filter("E28290435B4F43E3", "x86", () => Synthetic.BranchNoise(8 << 10)),
+        ["x86v2 on x86 code"] = Filter("9D85BC6F6915AAF2", "x86v2", () => Synthetic.X86(24 << 10)),
+        ["x86v2 calls=0 on x64 code with RIP-relative operands"] = Filter("53BDB330DAC62327", "x86v2", () => X64Synthetic.Code(24 << 10), P(("calls", 0))),
         ["arm64 on arm64 code"] = Filter("F7A7D505DDA01C5C", "arm64", () => Synthetic.Arm64(6 << 10)),
         ["arm64 on misaligned arm64 code with an odd tail"] = Filter("5B96B292C5389150", "arm64", () => Synthetic.Misaligned(Synthetic.Arm64(2 << 10))),
         ["text on English-like lines"] = Filter("540DE11C062E23EB", "text", () => Synthetic.Text(24 << 10)),

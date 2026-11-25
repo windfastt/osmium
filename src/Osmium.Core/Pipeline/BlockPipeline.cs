@@ -198,7 +198,14 @@ public static class PipelineExecutor
             long expect = d.InputSizes[i];
             if (expect > BlockLimits.MaxRawSize) throw new InvalidDataException("Stage size exceeds the block limit.");
             bool isCodec = i == n - 1;
-            var outBuf = s.Method.Decode(cur, (int)expect, s.Params, isCodec ? ScaleProgress(ctx, expect, d.RawSize) : Silent(ctx));
+            byte[] outBuf;
+            try { outBuf = s.Method.Decode(cur, (int)expect, s.Params, isCodec ? ScaleProgress(ctx, expect, d.RawSize) : Silent(ctx)); }
+            catch (Exception e) when (e is IndexOutOfRangeException or ArithmeticException or ArgumentException or InvalidCastException
+                                           or NullReferenceException)
+            {
+                // A crafted payload or descriptor must fail only its own block, as corruption, never as a crash.
+                throw new CorruptDataException($"Block cannot be decoded: {s.Method.Name} failed ({e.GetType().Name}: {e.Message})", e);
+            }
             if (outBuf.Length != expect)
                 throw new InvalidDataException($"{s.Method.Name} produced {outBuf.Length} bytes, expected {expect}.");
             cur = outBuf;

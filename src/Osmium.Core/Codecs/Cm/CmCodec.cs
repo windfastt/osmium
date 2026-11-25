@@ -240,7 +240,6 @@ internal sealed class ArithmeticDecoder
     private readonly byte[] _buf;
     private readonly int _len;
     private int _pos;
-    private bool _pastEnd;
 
     public ArithmeticDecoder(ReadOnlyMemory<byte> input)
     {
@@ -250,15 +249,19 @@ internal sealed class ArithmeticDecoder
     }
 
     /// <summary>True when the stream was consumed exactly (encoder emits shifts + 4 bytes; decoder reads 4 + shifts).</summary>
-    public bool ConsumedExactly => !_pastEnd && _pos == _len;
+    public bool ConsumedExactly => _pos == _len;
 
+    /// <summary>The next stream byte. A valid stream is never read past its end, so a read past the end means the stream
+    /// is truncated: fail at once, so the work done follows the payload, not the declared size.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private uint Next()
     {
         if (_pos < _len) return _buf[_pos++];
-        _pastEnd = true;
-        return 0u;
+        return Truncated();
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static uint Truncated() => throw new InvalidDataException("CM stream is truncated.");
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int Decode(int p12)

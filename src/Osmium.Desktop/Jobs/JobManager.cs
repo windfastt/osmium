@@ -221,7 +221,7 @@ public sealed class JobManager : IDisposable
     public static PlanOptions BuildPlanOptions(OsmiumSettings s, JobRequest r, RuleSet globalRules, Action<string>? log)
     {
         var profile = Profile.ByName(r.Profile ?? s.Compression.Profile.ToString().ToLowerInvariant());
-        if (s.Codecs.CmMemoryBits > 0) profile = profile with { CmMem = Math.Min(s.Codecs.CmMemoryBits, s.Experimental is { Enabled: true, HugeTables: true } ? 26 : 24) };
+        if (s.Codecs.CmMemoryBits > 0) profile = profile with { CmMem = Math.Min(s.Codecs.CmMemoryBits, 24) };
         if (s.Experimental is { Enabled: true, CmAllModels: true }) profile = profile with { CmAllModels = true };
         if (s.Codecs.LzmaDictMiB > 0) profile = profile with { LzmaDict = (long)s.Codecs.LzmaDictMiB << 20 };
         if (s.Codecs.ZstdLevel > 0) profile = profile with { ZstdLevel = s.Codecs.ZstdLevel };

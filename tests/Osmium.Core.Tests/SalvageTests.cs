@@ -828,10 +828,10 @@ public class SalvageTests
 
     // ------------------------------------------------------------------ a newer version is not damage
 
-    /// <summary>A codec of a newer Osmium (method id 8; it stores its input).</summary>
+    /// <summary>A codec of a newer Osmium (method id 63, unused by this version; it stores its input).</summary>
     private sealed class FutureCodec : MethodBase
     {
-        public override int Id => 8;
+        public override int Id => 63;
         public override string Name => "future";
         public override string DisplayName => "Future";
         public override MethodKind Kind => MethodKind.Codec;
@@ -843,7 +843,7 @@ public class SalvageTests
     private static readonly MethodRegistry Future = new(MethodRegistry.Default.All.Append(new FutureCodec()));
 
     /// <summary>Writes an archive the way a newer Osmium would: a.txt and c.txt in blocks this version decodes,
-    /// b.bin in a block of method id 8, and d.txt split over blocks 0 and 1.</summary>
+    /// b.bin in a block of method id 63, and d.txt split over blocks 0 and 1.</summary>
     private static string WriteFutureArchive(TempDir t, string indexPipeline = "zstd(level=19)")
     {
         var files = new[] { ("a.txt", "zstd(level=3)"), ("b.bin", "future"), ("c.txt", "store") };
@@ -868,7 +868,7 @@ public class SalvageTests
         return path;
     }
 
-    private const string Newer = "needs block 1, which needs a newer version of Osmium (it uses method id 8)";
+    private const string Newer = "needs block 1, which needs a newer version of Osmium (it uses method id 63)";
 
     [Fact]
     public void FilesInBlocksOfANewerVersionAreListedApartFromDamage()
@@ -882,7 +882,7 @@ public class SalvageTests
         Assert.Equal([new SalvageLoss("b.bin", Newer), new SalvageLoss("d.txt", Newer)], res.NeedNewerVersion);
         Assert.Equal(["a.txt", "c.txt"], res.Written);
         Assert.Equal(SalvageBlockState.NeedsNewerVersion, res.Blocks[1].State);
-        Assert.Equal("it uses method id 8", res.Blocks[1].Problem);
+        Assert.Equal("it uses method id 63", res.Blocks[1].Problem);
         Assert.Equal(SalvageFrameState.NeedsNewerVersion, res.Blocks[1].Frame!.State);
         Assert.DoesNotContain(res.Frames, f => f.State == SalvageFrameState.Damaged);
         Assert.Equal(0, res.UnrecognizedBytes); // intact, so accounted for
@@ -906,7 +906,7 @@ public class SalvageTests
         Assert.Equal(SalvageBlockState.NeedsNewerVersion, res.Blocks[1].State);
         Assert.False(File.Exists(t.Sub("out/block-1.bin")));
         Assert.Contains("1 block(s) need a newer version of Osmium", res.Summary().Last());
-        Assert.Contains("block 1: needs a newer version of Osmium (it uses method id 8)", File.ReadAllText(res.ReportPath!));
+        Assert.Contains("block 1: needs a newer version of Osmium (it uses method id 63)", File.ReadAllText(res.ReportPath!));
     }
 
     [Fact]
@@ -915,7 +915,7 @@ public class SalvageTests
         using var t = new TempDir();
         var res = Salvage(t, WriteFutureArchive(t, indexPipeline: "future"));
         Assert.False(res.IndexRecovered);
-        Assert.Equal("the index needs a newer version of Osmium (it uses method id 8)", res.IndexProblem);
+        Assert.Equal("the index needs a newer version of Osmium (it uses method id 63)", res.IndexProblem);
         Assert.Equal(SalvageFrameState.NeedsNewerVersion, res.Frames.Single(f => f.IsIndex).State);
         Assert.Equal(["block-0.bin", "block-2.bin"], res.Written);
     }
