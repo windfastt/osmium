@@ -89,8 +89,8 @@ static string RepoRoot()
         if (File.Exists(Path.Combine(d.FullName, "Osmium.sln"))) return d.FullName;
     throw new DirectoryNotFoundException("Run this from inside the Osmium repository.");
 }
-bool check = args.Contains("--check");
-string target = args.FirstOrDefault(a => !a.StartsWith("--")) ?? Path.Combine(RepoRoot(), "docs", "SETTINGS.md");
+bool check = args.Contains("--check") || args.Contains("check");
+string target = args.FirstOrDefault(a => !a.StartsWith("--") && a != "check") ?? Path.Combine(RepoRoot(), "docs", "SETTINGS.md");
 if (check)
 {
     bool same = File.Exists(target) && File.ReadAllText(target) == sb.ToString();
