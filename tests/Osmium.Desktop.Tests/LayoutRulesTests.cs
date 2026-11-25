@@ -25,7 +25,7 @@ public partial class LayoutRulesTests(ITestOutputHelper output)
 
     /// <summary>False: <see cref="EveryAppFileIsMarkedOrExempt"/> only reports the unmarked files. True: it fails on
     /// them.</summary>
-    public const bool RequireMarkerEverywhere = false;
+    public static readonly bool RequireMarkerEverywhere = false;
 
     [GeneratedRegex(@"//\s*layout: device pixels on purpose \(.+\)\s*$")]
     private static partial Regex OnPurpose();
