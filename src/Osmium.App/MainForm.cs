@@ -1,3 +1,4 @@
+// Layout: logical units only
 using Osmium.Desktop.Jobs;
 using Osmium.Desktop.Settings;
 
@@ -14,8 +15,8 @@ internal sealed class MainForm : Form
 
     private readonly TrayApp _app;
     private readonly Panel _content = new() { Dock = DockStyle.Fill };
-    private readonly FlowLayoutPanel _rail = new() { Dock = DockStyle.Left, Width = 200, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(4, 12, 4, 4) };
-    private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 0, 0, 0), Tag = "muted" };
+    private readonly FlowLayoutPanel _rail = new() { Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+    private readonly Label _status = new() { Dock = DockStyle.Bottom, TextAlign = ContentAlignment.MiddleLeft, Tag = "muted" };
     private readonly Dictionary<string, Control> _pages = [];
     private readonly Dictionary<string, NavButton> _buttons = [];
     private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 1000 };
@@ -26,17 +27,25 @@ internal sealed class MainForm : Form
     public MainForm(TrayApp app)
     {
         _app = app;
-        SuspendLayout();
+        // Scaled for the monitor's DPI now, before any child exists: everything below is given in device pixels
+        // (LogicalToDeviceUnits), as in the pages created later, and a later DPI change scales it all together.
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96f, 96f);
+        PerformAutoScale();
+        SuspendLayout();
         Text = "Osmium";
         Icon = app.AppIcon;
-        MinimumSize = new Size(900, 600);
-        Size = new Size(1180, 760);
+        MinimumSize = new Size(LogicalToDeviceUnits(900), LogicalToDeviceUnits(600));
+        Size = new Size(LogicalToDeviceUnits(1180), LogicalToDeviceUnits(760));
         StartPosition = FormStartPosition.CenterScreen;
         Font = Theme.Body;
+        _rail.Width = LogicalToDeviceUnits(200);
+        _rail.Padding = Space.Pad(this, 4, 12, 4, 4);
+        _status.Height = LogicalToDeviceUnits(24);
+        _status.Padding = Space.Pad(this, 12, 0, 0, 0);
 
-        var brand = new Label { Text = "Osmium", Font = new Font(Theme.Heading.FontFamily, 13f, FontStyle.Bold), AutoSize = true, Margin = new Padding(14, 0, 0, 14) };
+        var brand = new Label { Text = "Osmium", Font = Theme.Brand, AutoSize = true };
+        brand.Margin = Space.Pad(this, 14, 0, 0, 14);
         _rail.Controls.Add(brand);
         foreach (var (name, glyph) in Nav)
         {
@@ -53,6 +62,7 @@ internal sealed class MainForm : Form
 
         _statusTimer.Tick += (_, _) => UpdateStatus();
         _statusTimer.Start();
+        UpdateStatus(); // shown from the start, not a second later
         Navigate("Compress");
     }
 
@@ -61,6 +71,12 @@ internal sealed class MainForm : Form
 
     /// <summary>A page by its navigation name, created if needed.</summary>
     internal T Page<T>(string name) where T : Control => (T)GetPage(name);
+
+    /// <summary>The pages' names in navigation order (Ctrl+1 … Ctrl+8).</summary>
+    internal static IReadOnlyList<string> PageNames { get; } = Nav.Select(n => n.Name).ToList();
+
+    /// <summary>The window's own parts around the pages: the navigation rail and the status line.</summary>
+    internal IReadOnlyList<Control> Chrome => [_rail, _status];
 
     private Control GetPage(string name)
     {
@@ -117,7 +133,7 @@ internal sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        try { Native.SetDarkTitleBar(Handle, Theme.IsDark); } catch (Exception) { }
+        Native.StyleWindow(this);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

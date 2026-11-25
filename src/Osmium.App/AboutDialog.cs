@@ -1,3 +1,4 @@
+// Layout: logical units only
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
@@ -19,6 +20,10 @@ internal sealed class AboutDialog : Form
         string version = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? Application.ProductVersion;
         string? copyright = asm.GetCustomAttribute<AssemblyCopyrightAttribute>()?.Copyright;
 
+        // Scaled for the monitor's DPI before any child exists; sizes below are in device pixels.
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        PerformAutoScale();
         Text = "About Osmium";
         Icon = icon;
         Font = Theme.Body;
@@ -29,9 +34,7 @@ internal sealed class AboutDialog : Form
         ShowInTaskbar = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScaleDimensions = new SizeF(96f, 96f);
-        Padding = new Padding(16);
+        Padding = Space.Pad(this, Space.Lg, Space.Lg, Space.Lg, Space.Lg);
 
         var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
         t.Controls.Add(Ui.Heading("Osmium"));
@@ -39,9 +42,10 @@ internal sealed class AboutDialog : Form
         t.Controls.Add(Ui.Text("Engine fingerprint " + AboutInfo.EngineFingerprint(), muted: true));
         if (copyright is not null) t.Controls.Add(Ui.Text(copyright, muted: true));
         var license = Ui.Text("MIT License — provided as is, without warranty of any kind.", maxWidth: 440);
-        license.Margin = new Padding(0, 10, 0, 2);
+        license.Margin = Space.Pad(license, 0, 10, 0, 2);
         t.Controls.Add(license);
-        var link = new LinkLabel { Text = ProjectUrl, AutoSize = true, Margin = new Padding(0, 2, 0, 10), LinkColor = Theme.P.Accent, ActiveLinkColor = Theme.P.Accent, UseMnemonic = false };
+        var link = new LinkLabel { Text = ProjectUrl, AutoSize = true, LinkColor = Theme.P.AccentInk, ActiveLinkColor = Theme.P.AccentInk, UseMnemonic = false };
+        link.Margin = Space.Pad(link, 0, 2, 0, 10);
         link.LinkClicked += (_, _) => Open(ProjectUrl);
         t.Controls.Add(link);
         var close = Ui.Button("Close");
@@ -59,7 +63,7 @@ internal sealed class AboutDialog : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        try { Native.SetDarkTitleBar(Handle, Theme.IsDark); } catch (Exception) { }
+        Native.StyleWindow(this);
     }
 
     /// <summary>Opens a licence file from the program folder with its default program (normally Notepad).</summary>

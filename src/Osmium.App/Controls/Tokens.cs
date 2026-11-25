@@ -1,3 +1,4 @@
+// Layout: logical units only
 namespace Osmium.App;
 
 /// <summary>Spacing steps in logical pixels (96 DPI), and their size on a given control's monitor.</summary>

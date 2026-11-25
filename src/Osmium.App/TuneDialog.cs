@@ -1,3 +1,4 @@
+// Layout: logical units only
 using System.Diagnostics;
 using Osmium.Core.Analysis;
 using Osmium.Core.Pipeline;
@@ -11,17 +12,22 @@ namespace Osmium.App;
 /// Per-file "patch" editor: build a pipeline by hand (filters + codec + parameters, rendered from the engine's
 /// parameter metadata), quick-test it on the file, or run a deep auto-tune that searches for the best pipeline.
 /// </summary>
-internal sealed class TuneDialog : Form
+internal sealed class TuneDialog : ThemedDialog
 {
     private readonly TrayApp _app;
     private readonly string _path;
-    private readonly EditBox _pipeline = new() { Width = 620 };
+    private readonly EditBox _pipeline = new() { Dock = DockStyle.Fill };
     private readonly Label _valid = Ui.Text("", muted: true);
-    private readonly CheckedListBox _filters = new() { Height = 130, Width = 220, CheckOnClick = true, IntegralHeight = false };
+    private readonly CheckedListBox _filters = new() { CheckOnClick = true, IntegralHeight = false };
     private readonly ComboBox _codec;
-    private readonly SettingsRenderer _params = new() { Width = 520, Height = 300 };
-    private readonly TextBox _result = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 150, Width = 760 };
+    private readonly Label _codecInfo = Ui.Text("", muted: true);
+    private readonly SettingsRenderer _params = new() { Dock = DockStyle.Fill };
+    private readonly TextBox _result = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Visible = false, Tag = "code" };
+    private readonly Label _resultHint = Ui.Text("Quick test compresses and extracts the file with this pipeline. Deep auto-tune searches for a smaller one.", muted: true);
     private readonly ComboBox _profile = Ui.Combo(["ultra", "insane", "max"], "insane");
+    private readonly TableLayoutPanel _root = new() { Dock = DockStyle.Fill, ColumnCount = 1, AutoScroll = true };
+    private readonly CardPanel _builderCard, _testCard;
+    private readonly TableLayoutPanel _builderLeft = new() { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
     private readonly Dictionary<string, ParamValues> _paramState = [];
     private CancellationTokenSource? _cts;
     private bool _syncing;
@@ -32,74 +38,186 @@ internal sealed class TuneDialog : Form
     internal Task Analysis { get; }
 
     public TuneDialog(TrayApp app, string path, string? current, string profile, bool startDeep)
+        : base("Tune — " + Path.GetFileName(path))
     {
         _app = app;
         _path = path;
-        AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScaleDimensions = new SizeF(96f, 96f);
-        Text = "Tune — " + Path.GetFileName(path);
         Icon = app.AppIcon;
-        StartPosition = FormStartPosition.CenterParent;
-        Size = new Size(860, 760);
-        MinimumSize = new Size(760, 600);
-        Font = Theme.Body;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
+        MinimumSize = new Size(LogicalToDeviceUnits(600), LogicalToDeviceUnits(440));
+        FitTo(Screen.FromPoint(Cursor.Position).WorkingArea);
+        _pipeline.Font = Theme.Mono;
         _result.Font = Theme.Mono;
         if (_profile.Items.Contains(profile)) _profile.SelectedItem = profile;
 
         var reg = MethodRegistry.Default;
         foreach (var f in reg.Filters) _filters.Items.Add(f.Name);
+        // Tall enough for every filter, so the order and the ticks are seen at once.
+        int filterRows = Math.Max(1, _filters.Items.Count);
+        _filters.Height = _filters.ItemHeight * filterRows + LogicalToDeviceUnits(6);
+        _filters.Width = LogicalToDeviceUnits(180);
         _codec = Ui.Combo(reg.Codecs.Select(c => c.Name), "lzma");
+        _codec.Width = _filters.Width;
         _codec.SelectedIndexChanged += (_, _) => { RenderParams(); SyncFromBuilder(); };
         _filters.ItemCheck += (_, _) => { if (!_syncing && IsHandleCreated) BeginInvoke(SyncFromBuilder); };
         _pipeline.TextChanged += (_, _) => SyncFromText();
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(16), AutoScroll = true };
-        root.Controls.Add(Ui.Heading(Path.GetFileName(path)));
-        var info = Ui.Text("Analyzing…", muted: true, maxWidth: 780);
-        root.Controls.Add(info);
-        root.Controls.Add(new Label { Text = "Pipeline (filters + codec):", AutoSize = true, Margin = new Padding(0, 10, 0, 2) });
-        root.Controls.Add(_pipeline);
-        root.Controls.Add(_valid);
+        _root.Padding = Space.Pad(_root, Space.Xl, 20, Space.Xl, Space.Sm);
+        _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var header = new PageHeader("Tune", "", "Analyzing the file…");
+        int row = 0;
+        foreach (var line in header.Lines)
+        {
+            _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _root.Controls.Add(line, 0, row++);
+        }
+        header.Lede = $"Build a pipeline for {Path.GetFileName(path)} by hand, test it on the file, or let Osmium search for a better one.";
 
-        var builder = new TableLayoutPanel { ColumnCount = 2, AutoSize = true };
-        var left = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
-        left.Controls.Add(new Label { Text = "Filters (in order):", AutoSize = true });
-        left.Controls.Add(_filters);
-        left.Controls.Add(new Label { Text = "Codec:", AutoSize = true, Margin = new Padding(0, 8, 0, 0) });
-        left.Controls.Add(_codec);
-        builder.Controls.Add(left, 0, 0);
-        builder.Controls.Add(_params, 1, 0);
-        root.Controls.Add(builder);
+        // The pipeline as text, and the same pipeline as filters, a codec and its parameters.
+        var builder = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
+        builder.Margin = Padding.Empty;
+        builder.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        builder.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        builder.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        builder.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        builder.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _pipeline.Margin = Space.Pad(_pipeline, 0, 0, 0, 2);
+        builder.Controls.Add(_pipeline, 0, 0);
+        builder.SetColumnSpan(_pipeline, 2);
+        builder.Controls.Add(_valid, 0, 1);
+        builder.SetColumnSpan(_valid, 2);
+        _valid.Margin = Space.Pad(_valid, 0, 0, 0, Space.Md);
+        _builderLeft.Margin = Space.Pad(_builderLeft, 0, 0, Space.Lg, 0);
+        _builderLeft.Controls.Add(FieldLabel("Filters, in order"));
+        _builderLeft.Controls.Add(_filters);
+        var codecLabel = FieldLabel("Codec");
+        codecLabel.Margin = Space.Pad(codecLabel, 0, Space.Md, 0, Space.Xs);
+        _builderLeft.Controls.Add(codecLabel);
+        _builderLeft.Controls.Add(_codec);
+        builder.Controls.Add(_builderLeft, 0, 2);
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        right.Margin = Padding.Empty;
+        right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        right.Controls.Add(_codecInfo, 0, 0);
+        right.Controls.Add(_params, 0, 1);
+        _params.Margin = Padding.Empty;
+        builder.Controls.Add(right, 1, 2);
+        _builderCard = Ui.Card(builder, "Pipeline");
 
-        root.Controls.Add(Ui.Bar(
+        var test = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
+        test.Margin = Padding.Empty;
+        test.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var deepLabel = new Label { Text = "Deep auto-tune with", AutoSize = true, UseMnemonic = false };
+        deepLabel.Margin = Space.Pad(deepLabel, Space.Sm, 8, 4, 0);
+        var bar = Ui.Bar(
             Ui.Button("Quick test", (_, _) => QuickTest()),
-            new Label { Text = "Deep auto-tune with:", AutoSize = true, Padding = new Padding(12, 6, 0, 0) }, _profile,
+            deepLabel, _profile,
             Ui.Button("Deep auto-tune", (_, _) => DeepTune()),
-            Ui.Button("Stop", (_, _) => _cts?.Cancel())));
-        root.Controls.Add(_result);
-        var ok = Ui.Button("Use this pipeline", (_, _) => Accept(), accent: true);
+            Ui.Button("Stop", (_, _) => _cts?.Cancel()));
+        bar.Dock = DockStyle.Fill;
+        bar.Margin = Space.Pad(bar, 0, 0, 0, Space.Xs);
+        test.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        test.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        test.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        test.Controls.Add(bar, 0, 0);
+        test.Controls.Add(_resultHint, 0, 1);
+        test.Controls.Add(_result, 0, 2);
+        _testCard = Ui.Card(test, "Test");
+        _testCard.AutoSize = true; // in a row that takes its height from the card
+        _testCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+        _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _builderCard.Dock = DockStyle.Fill;
+        _builderCard.Margin = Space.Pad(_builderCard, 0, 0, 0, Space.Lg);
+        _root.Controls.Add(_builderCard, 0, row++);
+        _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _testCard.Dock = DockStyle.Fill;
+        _testCard.Margin = Padding.Empty;
+        _root.Controls.Add(_testCard, 0, row);
+        Controls.Add(_root);
+
+        var ok = Ui.Primary("Use this pipeline", (_, _) => Accept());
         var cancel = Ui.Button("Cancel", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
-        root.Controls.Add(Ui.Bar(ok, cancel));
-        AcceptButton = ok;     // Enter
+        ButtonBar.Controls.Add(ok);
+        ButtonBar.Controls.Add(cancel);
+        AcceptButton = ok;     // Enter (and Ctrl+Enter from a box that takes Enter)
         CancelButton = cancel; // Esc
-        Controls.Add(root);
         Theme.Apply(this);
+        UpdateMinimumLayout();
 
         _pipeline.Text = current is null or "store" or "exclude" ? "lzma" : current;
         Analysis = Ui.RunSafeAsync(this, async () =>
         {
             var a = await Task.Run(() => Sniffer.Analyze(path, 32));
-            info.Text = $"{Ui.Bytes(new FileInfo(path).Length)} · {a.Summary}";
+            header.Spec = $"{Ui.Bytes(new FileInfo(path).Length)} · {a.Summary}";
             if (current is null)
                 _pipeline.Text = Candidates.Default(a.Class, a, Profile.ByName("max"), MethodRegistry.Default).ToString();
             if (startDeep) DeepTune();
         });
     }
 
-    protected override void OnHandleCreated(EventArgs e)
+    private static Label FieldLabel(string text)
     {
-        base.OnHandleCreated(e);
-        try { Native.SetDarkTitleBar(Handle, Theme.IsDark); } catch (Exception) { }
+        var l = new Label { Text = text, AutoSize = true, UseMnemonic = false, Font = Theme.BodyStrong };
+        l.Margin = Space.Pad(l, 0, 0, 0, Space.Xs);
+        return l;
+    }
+
+    /// <summary>Sizes the dialog for a screen's working area: 860 × 760 logical pixels, or 90 % of the area when that is
+    /// smaller, so the buttons along the bottom are always on screen.</summary>
+    internal void FitTo(Rectangle workingArea)
+    {
+        int width = Math.Min(LogicalToDeviceUnits(860), workingArea.Width * 9 / 10);
+        int height = Math.Min(LogicalToDeviceUnits(760), workingArea.Height * 9 / 10);
+        Size = new Size(width, height);
+    }
+
+    /// <summary>
+    /// The content's smallest height: every row at its natural height, the filters and codec column whole. When the
+    /// dialog is smaller, the content scrolls above the buttons instead of being cut.
+    /// </summary>
+    private void UpdateMinimumLayout()
+    {
+        int width = Math.Max(1, _root.ClientSize.Width);
+        int height = _root.Padding.Vertical;
+        foreach (Control c in _root.Controls)
+        {
+            if (!c.Visible && c.IsHandleCreated) continue;
+            if (ReferenceEquals(c, _builderCard))
+                height += _builderCard.ChromeHeight + _pipeline.PreferredSize.Height + _pipeline.Margin.Vertical
+                          + _valid.GetPreferredSize(new Size(width, 0)).Height + _valid.Margin.Vertical
+                          + _builderLeft.GetPreferredSize(new Size(width, 0)).Height + _builderLeft.Margin.Vertical + c.Margin.Vertical
+                          + LogicalToDeviceUnits(Space.Xs); // rounding in the nested tables
+            else height += c.GetPreferredSize(new Size(width, 0)).Height + c.Margin.Vertical;
+        }
+        _root.AutoScrollMinSize = new Size(0, height);
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        if (IsHandleCreated) UpdateMinimumLayout();
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.Enter)) { Accept(); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Shows test or tuning output in the result box (hidden while there is none).</summary>
+    private void ShowResult(string text)
+    {
+        _result.Text = text;
+        bool show = text.Length > 0;
+        if (_result.Visible == show) return;
+        _result.Height = LogicalToDeviceUnits(120);
+        _result.Visible = show;
+        _resultHint.Visible = !show;
+        UpdateMinimumLayout();
     }
 
     private void RenderParams()
@@ -109,7 +227,8 @@ internal sealed class TuneDialog : Form
         // On/off parameters as checkboxes, choices by name, sizes as "64M"; the values map back unchanged.
         var descs = ParamDescriptors.For(m, () => _paramState[m.Name], p => { _paramState[m.Name] = p; SyncFromBuilder(); });
         _params.ClearRejected();
-        _params.Render(descs, descs, () => true, m.Description);
+        _codecInfo.Text = m.Description;
+        _params.Render(descs, descs, () => true);
     }
 
     private void SyncFromBuilder()
@@ -155,7 +274,7 @@ internal sealed class TuneDialog : Form
         var ct = _cts.Token;
         Ui.RunSafe(this, async () =>
         {
-            _result.Text = $"Testing {spec} …";
+            ShowResult($"Testing {spec} …");
             var r = await Task.Run(() =>
             {
                 long len = new FileInfo(_path).Length;
@@ -170,8 +289,8 @@ internal sealed class TuneDialog : Form
                 if (!back.AsSpan().SequenceEqual(data)) throw new InvalidOperationException("Round-trip mismatch — please report this pipeline.");
                 return (data.Length, payload.Length, te, sw.Elapsed, sample: len > data.Length);
             }, ct);
-            _result.Text = $"{spec}{Environment.NewLine}{Ui.Bytes(r.Item1)}{(r.sample ? " sample" : "")} → {Ui.Bytes(r.Item2)} ({(double)r.Item2 / Math.Max(1, r.Item1):P2})" +
-                           $"{Environment.NewLine}compress {r.te.TotalSeconds:F2}s, extract {r.Item4.TotalSeconds:F2}s — round trip verified";
+            ShowResult($"{spec}{Environment.NewLine}{Ui.Bytes(r.Item1)}{(r.sample ? " sample" : "")} → {Ui.Bytes(r.Item2)} ({(double)r.Item2 / Math.Max(1, r.Item1):P2})" +
+                       $"{Environment.NewLine}compress {r.te.TotalSeconds:F2}s, extract {r.Item4.TotalSeconds:F2}s — round trip verified");
         });
     }
 
@@ -182,14 +301,14 @@ internal sealed class TuneDialog : Form
         var profileName = _profile.SelectedItem?.ToString() ?? "insane";
         Ui.RunSafe(this, async () =>
         {
-            _result.Text = $"Searching with the {profileName} profile (successive halving + hill climbing)…";
+            ShowResult($"Searching with the {profileName} profile (successive halving + hill climbing)…");
             var po = JobManager.BuildPlanOptions(_app.Settings, new JobRequest { Profile = profileName }, _app.GlobalRules, null);
             po = po with { Profile = po.Profile with { RaceTopTwo = false } };
             var plan = await Task.Run(() => new Planner(po).BuildAsync(Scanner.Scan([_path]), ct), ct);
             var g = plan.Groups.FirstOrDefault();
-            if (g?.Spec is null) { _result.Text = "Nothing to tune (empty file?)."; return; }
+            if (g?.Spec is null) { ShowResult("Nothing to tune (empty file?)."); return; }
             _pipeline.Text = g.Spec.ToString();
-            _result.Text = string.Join(Environment.NewLine, g.Explain);
+            ShowResult(string.Join(Environment.NewLine, g.Explain));
         });
     }
 

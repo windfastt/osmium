@@ -1,25 +1,41 @@
+// Layout: logical units only
 using System.Globalization;
 using Osmium.Desktop.Settings;
+using Osmium.Desktop.Theming;
 
 namespace Osmium.App;
 
 /// <summary>Small factory helpers so code-built layouts stay readable and DPI-safe (no absolute pixel layouts).</summary>
 internal static class Ui
 {
+    /// <summary>How wide ledes and descriptions run at most, in logical pixels, for readable lines.</summary>
+    public const int ReadableWidth = 760;
+
     // Headings and text show '&' as is ("Rules & patches", file names): with mnemonics on, it would underline the
     // next letter instead.
-    public static Label Heading(string text) => new() { Text = text, Font = Theme.Heading, AutoSize = true, Margin = new Padding(0, 0, 0, 6), UseMnemonic = false };
-
-    public static Label Text(string text, bool muted = false, int maxWidth = 0) => new()
+    public static Label Heading(string text)
     {
-        Text = text, AutoSize = true, Tag = muted ? "muted" : null, UseMnemonic = false,
-        MaximumSize = maxWidth > 0 ? new Size(maxWidth, 0) : Size.Empty,
-        Margin = new Padding(0, 2, 0, 2),
-    };
+        var l = new Label { Text = text, Font = Theme.FontFor(TypeRole.Title, text), AutoSize = true, UseMnemonic = false };
+        l.Margin = Space.Pad(l, 0, 0, 0, 6);
+        return l;
+    }
 
+    /// <summary>Text that wraps at the width it has, never wider than <paramref name="maxWidth"/> logical pixels
+    /// (<see cref="ReadableWidth"/> when 0).</summary>
+    public static Label Text(string text, bool muted = false, int maxWidth = 0)
+    {
+        var l = new WrapLabel { Text = text, Tag = muted ? "muted" : null, Cap = maxWidth > 0 ? maxWidth : ReadableWidth };
+        l.Margin = Space.Pad(l, 0, 2, 0, 2);
+        return l;
+    }
+
+    /// <summary>A button in the product page's style: quiet (ghost), or filled with the accent colour when
+    /// <paramref name="accent"/> is set. It keeps four pixels around its face for the focus ring, so buttons in a row
+    /// sit eight pixels apart without margins.</summary>
     public static Button Button(string text, EventHandler? click = null, bool accent = false)
     {
-        var b = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 3, 10, 3), Margin = new Padding(0, 0, 6, 0), Tag = accent ? "accent" : null };
+        var b = new OsmiumButton { Text = text, IsPrimary = accent, Tag = accent ? "accent" : null };
+        b.Margin = Padding.Empty;
         if (click is not null) b.Click += click;
         return b;
     }
@@ -47,22 +63,28 @@ internal static class Ui
         catch (System.Runtime.InteropServices.ExternalException) { Error("Another program is using the clipboard. Try again."); }
     }
 
+    /// <summary>A row of controls (a tool bar, a row of buttons) that wraps onto more lines when it is too narrow.</summary>
     public static FlowLayoutPanel Bar(params Control[] controls)
     {
-        var f = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = new Padding(0, 4, 0, 6) };
+        var f = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true };
+        f.Padding = Padding.Empty;
+        f.Margin = Space.Pad(f, 0, 0, 0, Space.Md);
         f.Controls.AddRange(controls);
         return f;
     }
 
     public static ComboBox Combo(IEnumerable<string> items, string? selected = null)
     {
-        var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140, Margin = new Padding(0, 2, 6, 0) };
+        var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        c.Width = c.LogicalToDeviceUnits(140);
+        c.Margin = Space.Pad(c, 4, 8, 4, 0); // centred on the faces of the buttons beside it
         foreach (var i in items) c.Items.Add(i);
         if (selected is not null && c.Items.Contains(selected)) c.SelectedItem = selected;
         else if (c.Items.Count > 0) c.SelectedIndex = 0;
         return c;
     }
 
+    /// <summary>A details list with these columns (widths in logical pixels).</summary>
     public static FastList List(params (string Name, int Width)[] cols)
     {
         var l = new FastList();
@@ -75,26 +97,36 @@ internal static class Ui
         Page(new PageHeader(title, subtitle), content, top);
 
     /// <summary>A page: its header's lines, the <paramref name="top"/> rows (tool bars, status lines), then
-    /// <paramref name="content"/> filling the rest. The header can be changed while the page is shown.</summary>
+    /// <paramref name="content"/> filling the rest. The header can be changed while the page is shown. Everything is as
+    /// wide as the window: tool bars and text wrap, lists scroll inside themselves.</summary>
     public static Control Page(PageHeader header, Control content, params Control[] top)
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(20, 16, 20, 12) };
+        // 24 logical pixels to the window's edges. Rows of buttons start 4 pixels further out, where their faces keep
+        // the room for the focus ring, so the faces line up with the text and the cards.
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, AutoScroll = false };
+        root.Padding = Space.Pad(root, Space.Xl - Space.Xs, 20, Space.Xl - Space.Xs, Space.Lg);
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        int edge = root.LogicalToDeviceUnits(Space.Xs);
         // Every row is placed by number: a hidden line (an empty spec) leaves its row empty, so the rows after it keep
         // their styles.
         int row = 0;
         foreach (var line in header.Lines)
         {
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            line.Margin = new Padding(edge, line.Margin.Top, edge, line.Margin.Bottom);
             root.Controls.Add(line, 0, row++);
         }
         foreach (var t in top)
         {
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.Dock = DockStyle.Fill;
+            int side = t is FlowLayoutPanel ? 0 : edge;
+            t.Margin = new Padding(side, 0, side, root.LogicalToDeviceUnits(Space.Md));
             root.Controls.Add(t, 0, row++);
         }
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         content.Dock = DockStyle.Fill;
+        content.Margin = new Padding(edge, 0, edge, 0);
         root.Controls.Add(content, 0, row);
         return root;
     }
@@ -102,31 +134,38 @@ internal static class Ui
     /// <summary>Content in a card, with an optional heading above it.</summary>
     public static CardPanel Card(Control content, string? heading = null) => new(content, heading);
 
-    /// <summary>The page's main action.</summary>
-    public static Button Primary(string text, EventHandler? click = null) => Button(text, click, accent: true);
+    /// <summary>The page's main action: a primary button, 36 logical pixels high.</summary>
+    public static Button Primary(string text, EventHandler? click = null)
+    {
+        var b = (OsmiumButton)Button(text, click, accent: true);
+        b.Large = true;
+        return b;
+    }
 
-    /// <summary>A line of facts in the spec style (muted, small).</summary>
-    public static Label Spec(string text) => new() { Text = text, Font = Theme.Spec, AutoSize = true, Tag = "muted", UseMnemonic = false, Margin = new Padding(0, 2, 0, 2) };
+    /// <summary>A line of facts in the spec style: capitals in the product page's monospaced face, muted.</summary>
+    public static Label Spec(string text)
+    {
+        var l = new Label { Text = TypeScale.Cased(TypeRole.Spec, text), Font = Theme.FontFor(TypeRole.Spec, text), AutoSize = true, Tag = "muted", UseMnemonic = false };
+        l.Margin = Space.Pad(l, 0, 2, 0, 2);
+        return l;
+    }
 
     /// <summary>A short label for a state: EXPERIMENTAL, CAUTION, ENCRYPTED…</summary>
     public static Label Tag(string text, TagKind kind = TagKind.Neutral)
     {
-        var l = new Label { Text = text, Font = Theme.Small, AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 0, 6, 0) };
-        switch (kind)
-        {
-            case TagKind.Neutral: l.Tag = "muted"; break;
-            case TagKind.Warning: l.Tag = "experimental"; break;
-            case TagKind.Danger: l.Tag = "danger"; break;
-            default:
-                l.Tag = "keep"; // Theme.Apply leaves its colour alone
-                l.ForeColor = kind == TagKind.Success ? Theme.P.SuccessText : Theme.P.AccentInk;
-                break;
-        }
+        var l = new TagLabel(text, kind);
+        l.Margin = Space.Pad(l, 0, 2, 6, 2);
         return l;
     }
 
     /// <summary>A one-pixel line across its parent, between sections.</summary>
-    public static Control Divider() => new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Theme.P.Line, Tag = "keep", Margin = new Padding(0, 6, 0, 6) };
+    public static Control Divider()
+    {
+        var d = new Panel { Dock = DockStyle.Top, BackColor = Theme.P.Line, Tag = "keep" };
+        d.Height = 1; // layout: device pixels on purpose (a hairline stays one pixel at every scale)
+        d.Margin = Space.Pad(d, 0, 6, 0, 6);
+        return d;
+    }
 
     public static string Bytes(long b) => Osmium.Desktop.Tray.TrayText.Bytes(b);
 
@@ -139,19 +178,51 @@ internal static class Ui
     public static void Info(string text, string title = "Osmium")
     {
         if (Unattended is { } report) { report($"{title}: {text}"); return; }
-        MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        ShowMessage(BuildMessage(MessageKind.Information, text, title));
     }
 
     public static void Error(string text, string title = "Osmium")
     {
         if (Unattended is { } report) { report($"{title}: {text}"); return; }
-        MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        ShowMessage(BuildMessage(MessageKind.Error, text, title));
     }
 
+    /// <summary>A yes-or-no question. No is the default answer: Enter and Esc both give it.</summary>
     public static bool Confirm(string text, string title = "Osmium")
     {
         if (Unattended is { } report) { report($"{title}: {text}"); return false; }
-        return MessageBox.Show(text, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+        return ShowMessage(BuildMessage(MessageKind.Question, text, title, "Yes", "No")) == DialogResult.Yes;
+    }
+
+    /// <summary>
+    /// A question answered with the caller's own words ("Extract anyway" / "Stop"). <paramref name="no"/> is the default
+    /// answer and Esc gives it, unless <paramref name="yesIsDefault"/>. True when the answer was <paramref name="yes"/>.
+    /// </summary>
+    public static bool Ask(string text, string yes, string no, string title = "Osmium", bool yesIsDefault = false)
+    {
+        if (Unattended is { } report) { report($"{title}: {text}"); return false; }
+        return ShowMessage(BuildMessage(MessageKind.Question, text, title, yes, no, yesIsDefault)) == DialogResult.Yes;
+    }
+
+    /// <summary>A message dialog, not shown yet: one button (<paramref name="no"/>, or OK) without <paramref name="yes"/>,
+    /// otherwise the two answers.</summary>
+    internal static MessageDialog BuildMessage(MessageKind kind, string text, string title = "Osmium", string? yes = null, string? no = null, bool yesIsDefault = false) =>
+        new(kind, text, title, yes, no, yesIsDefault);
+
+    /// <summary>Shows a message over the active Osmium window, or on its own in front of everything when there is none
+    /// (a message from the notification area).</summary>
+    private static DialogResult ShowMessage(MessageDialog dialog)
+    {
+        using (dialog)
+        {
+            var owner = Form.ActiveForm is { IsDisposed: false, Visible: true } active && active != dialog ? active : null;
+            if (owner is null)
+            {
+                dialog.StartPosition = FormStartPosition.CenterScreen;
+                dialog.TopMost = true;
+            }
+            return dialog.ShowDialog(owner);
+        }
     }
 
     /// <summary>Runs work off the UI thread and marshals the result back; exceptions are shown, never crash the tray.</summary>
@@ -171,8 +242,6 @@ internal static class Ui
     }
 }
 
-/// <summary>What a <see cref="Ui.Tag"/> stands for, which sets its colour.</summary>
-internal enum TagKind { Neutral, Accent, Warning, Danger, Success }
 
 /// <summary>
 /// TextBox with the keyboard behaviour Osmium wants on top of WinForms (which already makes Ctrl+Backspace delete the
@@ -206,140 +275,6 @@ internal sealed class EditBox : TextBox
     }
 }
 
-/// <summary>
-/// Flicker-free details ListView with list shortcuts: Ctrl+A selects every row, Ctrl+C copies the selected rows
-/// (tab-separated, so they paste into a spreadsheet), Enter and double-click run <see cref="DefaultAction"/>.
-/// </summary>
-internal sealed class FastList : ListView
-{
-    private int _scaledFor = 96;
-
-    /// <summary>The page's default action for the selected rows (Enter, double-click), if it has one.</summary>
-    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public Action? DefaultAction { get; set; }
-
-    /// <summary>The selected rows, one per line, columns separated by tabs.</summary>
-    public string SelectionAsText() => string.Join(Environment.NewLine, SelectedItems.Cast<ListViewItem>()
-        .Select(i => string.Join("\t", i.SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => s.Text))));
-
-    protected override void OnKeyDown(KeyEventArgs e)
-    {
-        base.OnKeyDown(e);
-        if (e.Handled) return;
-        switch (e.KeyData)
-        {
-            case Keys.Control | Keys.A when MultiSelect:
-                BeginUpdate();
-                foreach (ListViewItem i in Items) i.Selected = true;
-                EndUpdate();
-                e.SuppressKeyPress = true;
-                break;
-            case Keys.Control | Keys.C:
-                Ui.CopyToClipboard(SelectionAsText());
-                e.SuppressKeyPress = true;
-                break;
-            case Keys.Enter when DefaultAction is not null && SelectedItems.Count > 0:
-                DefaultAction();
-                e.SuppressKeyPress = true;
-                break;
-        }
-    }
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (e.Button == MouseButtons.Left && DefaultAction is not null && HitTest(e.Location).Item is not null) DefaultAction();
-    }
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        if (DeviceDpi != _scaledFor)
-        {
-            foreach (ColumnHeader c in Columns) c.Width = c.Width * DeviceDpi / _scaledFor;
-            _scaledFor = DeviceDpi;
-        }
-        FitFlexColumn();
-    }
-
-    public FastList()
-    {
-        View = View.Details;
-        FullRowSelect = true;
-        HideSelection = false;
-        DoubleBuffered = true;
-        BorderStyle = BorderStyle.None;
-    }
-
-    private int _flexColumn = -1, _flexMin;
-    private EmptyState? _empty;
-
-    /// <summary>Gives the width the other columns leave to <paramref name="column"/> whenever the list is resized,
-    /// never less than <paramref name="minWidth"/> logical pixels.</summary>
-    public void Flex(int column, int minWidth)
-    {
-        _flexColumn = column;
-        _flexMin = minWidth;
-        FitFlexColumn();
-    }
-
-    /// <summary>Right-aligns the text of these columns (numbers, sizes). The first column always stays left-aligned.</summary>
-    public void RightAlign(params int[] columns)
-    {
-        foreach (int c in columns) Columns[c].TextAlign = HorizontalAlignment.Right;
-    }
-
-    /// <summary>The height of one row in device pixels.</summary>
-    public int RowHeight =>
-        IsHandleCreated && (VirtualMode ? VirtualListSize : Items.Count) > 0 ? GetItemRect(0).Height
-        : Math.Max(Font.Height + LogicalToDeviceUnits(4), SmallImageList?.ImageSize.Height ?? 0);
-
-    /// <summary>Shows one of <paramref name="icons"/> before each row's first column (<see cref="ListViewItem.ImageKey"/>),
-    /// or none. Icons no taller than <see cref="RowHeight"/> (16 pixels at 100 %) leave the rows as tall as they are.</summary>
-    public void SetIcons(ImageList? icons) => SmallImageList = icons;
-
-    /// <summary>What the list shows while it has no rows (null: nothing). Set it once the list's rows are known, then
-    /// call <see cref="ItemsChanged"/> after adding or removing rows.</summary>
-    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public EmptyState? Empty
-    {
-        get => _empty;
-        set
-        {
-            if (ReferenceEquals(_empty, value)) return;
-            if (_empty is not null) Controls.Remove(_empty);
-            _empty = value;
-            if (value is not null)
-            {
-                value.Dock = DockStyle.Fill;
-                Controls.Add(value);
-            }
-            ItemsChanged();
-        }
-    }
-
-    /// <summary>Call after adding or removing rows: shows or hides <see cref="Empty"/>.</summary>
-    public void ItemsChanged()
-    {
-        if (_empty is not null) _empty.Visible = (VirtualMode ? VirtualListSize : Items.Count) == 0;
-    }
-
-    protected override void OnSizeChanged(EventArgs e)
-    {
-        base.OnSizeChanged(e);
-        FitFlexColumn();
-    }
-
-    private void FitFlexColumn()
-    {
-        if (_flexColumn < 0 || _flexColumn >= Columns.Count) return;
-        int others = 0;
-        foreach (ColumnHeader c in Columns) if (c.Index != _flexColumn) others += c.Width;
-        int width = Math.Max(LogicalToDeviceUnits(_flexMin), ClientSize.Width - others);
-        if (Columns[_flexColumn].Width != width) Columns[_flexColumn].Width = width;
-    }
-}
-
 /// <summary>Owner-drawn navigation button with a glyph and a selection marker.</summary>
 internal sealed class NavButton : Button
 {
@@ -354,9 +289,9 @@ internal sealed class NavButton : Button
         Glyph = glyph;
         FlatStyle = FlatStyle.Flat;
         FlatAppearance.BorderSize = 0;
-        Height = 40;
-        Width = 190;
-        Margin = new Padding(4, 2, 4, 2);
+        Height = LogicalToDeviceUnits(40);
+        Width = LogicalToDeviceUnits(190);
+        Margin = Space.Pad(this, 4, 2, 4, 2);
         Cursor = Cursors.Hand;
         TabStop = true;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);

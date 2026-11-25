@@ -1,9 +1,11 @@
+// Layout: logical units only
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using Osmium.Desktop.Settings;
 using Osmium.Desktop.Shell;
+using Osmium.Desktop.Theming;
 
 namespace Osmium.App;
 
@@ -47,50 +49,84 @@ internal static partial class Native
     }
 }
 
-/// <summary>Colours for custom-drawn parts; standard controls use WinForms' own colour mode.</summary>
+/// <summary>
+/// The colours of the current theme by role, from the product page's palette (<see cref="ColorTokens"/>). The positional
+/// names are the roles' older names: <see cref="Background"/> is <see cref="Page"/>, <see cref="Surface"/> is
+/// <see cref="Card"/>, <see cref="Border"/> is <see cref="Line"/>, <see cref="Experimental"/> is <see cref="Warning"/>
+/// and <see cref="Hover"/> is <see cref="Subtle"/>.
+/// </summary>
 internal sealed record Palette(Color Background, Color Surface, Color Border, Color Text, Color Muted, Color Accent, Color AccentText, Color Danger, Color Experimental, Color Hover)
 {
-    public static readonly Palette Dark = new(Color.FromArgb(32, 32, 32), Color.FromArgb(43, 43, 43), Color.FromArgb(60, 60, 60),
-        Color.FromArgb(240, 240, 240), Color.FromArgb(160, 160, 160), Color.FromArgb(96, 140, 255), Color.White,
-        Color.FromArgb(255, 99, 99), Color.FromArgb(232, 89, 12), Color.FromArgb(55, 55, 55))
+    public static readonly Palette Light = FromTokens(dark: false);
+    public static readonly Palette Dark = FromTokens(dark: true);
+
+    /// <summary>A token's colour, opaque.</summary>
+    public static Color Of(ColorToken token, bool dark) => FromRgb(ColorTokens.Get(token, dark));
+
+    public static Color FromRgb(int rgb) => Color.FromArgb(unchecked((int)0xFF000000) | (rgb & 0xFFFFFF));
+
+    private static Palette FromTokens(bool dark)
     {
-        Success = Color.FromArgb(0x6C, 0xCB, 0x5F), SuccessText = Color.FromArgb(0x6C, 0xCB, 0x5F),
-    };
+        Color C(ColorToken t) => Of(t, dark);
+        return new Palette(C(ColorToken.Page), C(ColorToken.Card), C(ColorToken.Line), C(ColorToken.Text), C(ColorToken.Muted),
+            C(ColorToken.Accent), C(ColorToken.AccentText), C(ColorToken.Danger), C(ColorToken.Warning), C(ColorToken.Subtle))
+        {
+            IsDark = dark,
+            Sunk = C(ColorToken.Sunk),
+            Code = C(ColorToken.Code),
+            TextSecondary = C(ColorToken.TextSecondary),
+            LineSoft = C(ColorToken.LineSoft),
+            LineStrong = C(ColorToken.LineStrong),
+            AccentInk = C(ColorToken.AccentInk),
+            AccentHover = C(ColorToken.AccentHover),
+            AccentPressed = C(ColorToken.AccentPressed),
+            Mark = C(ColorToken.Mark),
+            MarkRest = C(ColorToken.MarkRest),
+            Live = C(ColorToken.Live),
+            WarningText = C(ColorToken.WarningText),
+            Success = C(ColorToken.Success),
+            SuccessText = C(ColorToken.SuccessText),
+            Focus = C(ColorToken.Focus),
+        };
+    }
 
-    public static readonly Palette Light = new(Color.FromArgb(243, 243, 243), Color.White, Color.FromArgb(229, 229, 229),
-        Color.FromArgb(27, 27, 27), Color.FromArgb(95, 95, 95), Color.FromArgb(58, 42, 150), Color.White,
-        Color.FromArgb(196, 43, 28), Color.FromArgb(232, 89, 12), Color.FromArgb(232, 232, 240));
-
-    // Colours by role. Each starts as the colour above that plays that role today.
+    /// <summary>The dark theme's colours.</summary>
+    public bool IsDark { get; init; }
 
     /// <summary>The page behind cards and lists.</summary>
     public Color Page => Background;
     /// <summary>Cards, lists and editors.</summary>
     public Color Card { get; init; } = Surface;
-    /// <summary>Tracks, wells and selected rows: a step below the card.</summary>
+    /// <summary>Tracks, a pressed ghost button, the selected segment: a step below the card.</summary>
     public Color Sunk { get; init; } = Hover;
-    /// <summary>Behind monospaced text (logs, rules).</summary>
+    /// <summary>Behind monospaced text (pipelines, logs, rules).</summary>
     public Color Code { get; init; } = Surface;
-    /// <summary>Second-level text: ledes, descriptions.</summary>
+    /// <summary>Second-level text: ledes, labels, column headers.</summary>
     public Color TextSecondary { get; init; } = Text;
+    /// <summary>Card borders and dividers.</summary>
     public Color Line { get; init; } = Border;
+    /// <summary>Row separators, the rail divider, the status line's rule.</summary>
     public Color LineSoft { get; init; } = Border;
+    /// <summary>A ghost button's border under the pointer.</summary>
     public Color LineStrong { get; init; } = Border;
-    /// <summary>Accent-coloured text and glyphs on the page or a card.</summary>
+    /// <summary>Accent-coloured text and glyphs on the page or a card: links, Accent tags.</summary>
     public Color AccentInk { get; init; } = Accent;
     public Color AccentHover { get; init; } = Accent;
     public Color AccentPressed { get; init; } = Accent;
     /// <summary>Filled part of meters and bars, selection markers.</summary>
     public Color Mark { get; init; } = Accent;
-    /// <summary>Marks at rest (unselected, not yet started).</summary>
+    /// <summary>Marks at rest (unselected, not yet started); on cards only.</summary>
     public Color MarkRest { get; init; } = Muted;
-    /// <summary>Something happening now (a running job).</summary>
+    /// <summary>Something happening now (a running job's dot). Never text on a light surface.</summary>
     public Color Live { get; init; } = Accent;
+    /// <summary>Paused meters, warning dots, tag and banner borders.</summary>
     public Color Warning { get; init; } = Experimental;
+    /// <summary>Warning text on any surface.</summary>
     public Color WarningText { get; init; } = Experimental;
-    public Color Success { get; init; } = Color.FromArgb(0x10, 0x7C, 0x10);
-    public Color SuccessText { get; init; } = Color.FromArgb(0x10, 0x7C, 0x10);
-    /// <summary>Quiet backgrounds: hover, a highlighted drop target.</summary>
+    public Color Success { get; init; } = Color.FromArgb(0x0F, 0x7A, 0x3D);
+    /// <summary>Success text on any surface.</summary>
+    public Color SuccessText { get; init; } = Color.FromArgb(0x0D, 0x6E, 0x37);
+    /// <summary>Quiet backgrounds: hover in the rail, menus and owner-drawn lists.</summary>
     public Color Subtle { get; init; } = Hover;
     /// <summary>Keyboard focus rings.</summary>
     public Color Focus { get; init; } = Accent;
@@ -101,21 +137,27 @@ internal static class Theme
     public static bool IsDark { get; private set; }
     public static Palette P { get; private set; } = Palette.Light;
     public static Font Body { get; private set; } = SystemFonts.MessageBoxFont ?? Control.DefaultFont;
+    /// <summary>The title of a page or dialog (the same as <see cref="Title"/>).</summary>
     public static Font Heading { get; private set; } = Control.DefaultFont;
+    /// <summary>Small text (the same as <see cref="Caption"/>).</summary>
     public static Font Small { get; private set; } = Control.DefaultFont;
+    /// <summary>Emphasised body text (the same as <see cref="BodyStrong"/>).</summary>
     public static Font Bold { get; private set; } = Control.DefaultFont;
     public static Font Glyph { get; private set; } = Control.DefaultFont;
     public static Font Mono { get; private set; } = Control.DefaultFont;
 
-    // Fonts by role. Each starts as the font above that plays that role today.
+    // Fonts by role (TypeScale has every role's face and size). Title, CardHeading, Brand, Spec, Tag and Number use the
+    // product page's typefaces, for Osmium's own words only: file names, paths and messages stay in Body or Mono.
 
     /// <summary>A page's title.</summary>
     public static Font Title { get; private set; } = Control.DefaultFont;
     public static Font CardHeading { get; private set; } = Control.DefaultFont;
     /// <summary>The "Osmium" wordmark in the navigation rail.</summary>
     public static Font Brand { get; private set; } = Control.DefaultFont;
-    /// <summary>The fact line above a page's title.</summary>
+    /// <summary>The fact line above a page's title (shown in capitals).</summary>
     public static Font Spec { get; private set; } = Control.DefaultFont;
+    /// <summary>State labels (shown in capitals).</summary>
+    public static Font Tag { get; private set; } = Control.DefaultFont;
     /// <summary>The sentence below a page's title.</summary>
     public static Font Lede { get; private set; } = Control.DefaultFont;
     public static Font BodyStrong { get; private set; } = Control.DefaultFont;
@@ -126,6 +168,27 @@ internal static class Theme
     public static Font NumberLive { get; private set; } = Control.DefaultFont;
     /// <summary>Icon glyphs of empty states.</summary>
     public static Font GlyphLarge { get; private set; } = Control.DefaultFont;
+
+    private static readonly Dictionary<TypeRole, Font> Roles = [];
+    private static readonly Dictionary<TypeRole, Font> Fallbacks = [];
+
+    /// <summary>A role's font.</summary>
+    public static Font Role(TypeRole role) => Roles.TryGetValue(role, out var f) ? f : Body;
+
+    /// <summary>The system font that stands in for a role's bundled face (the same font for roles without one).</summary>
+    public static Font Fallback(TypeRole role) => Fallbacks.TryGetValue(role, out var f) ? f : Role(role);
+
+    /// <summary>A role's font for <paramref name="text"/>: its own, or the system stand-in when the bundled face lacks a
+    /// character of the text (it covers Latin only).</summary>
+    public static Font FontFor(TypeRole role, string text) => BrandFonts.Covers(Role(role), text) ? Role(role) : Fallback(role);
+
+    /// <summary>A role's text colour in the current theme.</summary>
+    public static Color ColorOf(TypeRole role) => TypeScale.Get(role).Color switch
+    {
+        TypeColor.TextSecondary => P.TextSecondary,
+        TypeColor.Muted => P.Muted,
+        _ => P.Text,
+    };
 
     public static void Initialize(ThemeMode mode)
     {
@@ -139,23 +202,78 @@ internal static class Theme
 #pragma warning disable WFO5001 // dark mode API marked experimental in some .NET versions
         Application.SetColorMode(IsDark ? SystemColorMode.Dark : SystemColorMode.Classic);
 #pragma warning restore WFO5001
-        string family = FontExists("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI";
-        Body = new Font(family, 9f);
-        Small = new Font(family, 8f);
-        Bold = new Font(family, 9f, FontStyle.Bold);
-        Heading = new Font(FontExists("Segoe UI Variable Display") ? "Segoe UI Variable Display" : "Segoe UI", 15f, FontStyle.Bold);
-        Glyph = new Font(FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets", 12f);
-        Mono = new Font(FontExists("Cascadia Mono") ? "Cascadia Mono" : "Consolas", 9f);
-        Title = Heading;
-        CardHeading = Bold;
-        Brand = new Font(Heading.FontFamily, 13f, FontStyle.Bold);
-        Spec = Small;
-        Lede = Body;
-        BodyStrong = Bold;
-        Caption = Small;
-        Number = Bold;
-        NumberLive = Bold;
-        GlyphLarge = new Font(Glyph.FontFamily, 24f);
+        BrandFonts.Load();
+        MakeRoleFonts(1f);
+    }
+
+    /// <summary>Creates every role's font at <paramref name="scale"/> times its size and points the properties at them.</summary>
+    private static void MakeRoleFonts(float scale)
+    {
+        foreach (var spec in TypeScale.All)
+        {
+            float size = spec.Size * scale;
+            var system = SystemFont(spec, size);
+            Fallbacks[spec.Role] = system;
+            Roles[spec.Role] = spec.Bundled ? BrandFonts.Create(spec.Face, size) ?? system : system;
+        }
+        MakeRoleProperties();
+    }
+
+    private static Dictionary<TypeRole, Font>? _unscaledRoles, _unscaledFallbacks;
+
+    /// <summary>
+    /// Makes the text of windows built from now on <paramref name="factor"/> times larger, as Windows' text size setting
+    /// does (1 goes back to normal and frees the larger fonts): the self-test builds dialogs with larger text to see that
+    /// nothing is cut. Windows built while the text is larger must be closed before going back.
+    /// </summary>
+    internal static void ScaleText(float factor)
+    {
+        if (factor == 1f)
+        {
+            if (_unscaledRoles is null || _unscaledFallbacks is null) return;
+            var scaled = Roles.Values.Concat(Fallbacks.Values).Distinct().ToList();
+            foreach (var (role, font) in _unscaledRoles) Roles[role] = font;
+            foreach (var (role, font) in _unscaledFallbacks) Fallbacks[role] = font;
+            _unscaledRoles = _unscaledFallbacks = null;
+            MakeRoleProperties();
+            foreach (var font in scaled) font.Dispose();
+            return;
+        }
+        if (_unscaledRoles is null)
+        {
+            _unscaledRoles = new(Roles);
+            _unscaledFallbacks = new(Fallbacks);
+        }
+        MakeRoleFonts(factor);
+    }
+
+    private static void MakeRoleProperties()
+    {
+        Body = Role(TypeRole.Body);
+        BodyStrong = Bold = Role(TypeRole.BodyStrong);
+        Caption = Small = Role(TypeRole.Caption);
+        Title = Heading = Role(TypeRole.Title);
+        CardHeading = Role(TypeRole.CardHeading);
+        Brand = Role(TypeRole.Brand);
+        Spec = Role(TypeRole.Spec);
+        Tag = Role(TypeRole.Tag);
+        Lede = Role(TypeRole.Lede);
+        Number = Role(TypeRole.Number);
+        NumberLive = Role(TypeRole.NumberLive);
+        Mono = Role(TypeRole.Mono);
+        Glyph = Role(TypeRole.Glyph);
+        GlyphLarge = Role(TypeRole.GlyphLarge);
+    }
+
+    /// <summary>The first installed system face of a role (its own face unless it is bundled, then its fallbacks), in
+    /// the regular style; plain Segoe UI is made bold for heavy roles.</summary>
+    private static Font SystemFont(TypeSpec spec, float size)
+    {
+        var faces = spec.Bundled ? spec.Fallbacks : [spec.Face, .. spec.Fallbacks];
+        foreach (var face in faces)
+            if (FontExists(face))
+                return new Font(face, size, face == TypeScale.Segoe && spec.Weight >= 600 ? FontStyle.Bold : FontStyle.Regular);
+        return new Font(Control.DefaultFont.FontFamily, size, spec.Weight >= 600 ? FontStyle.Bold : FontStyle.Regular);
     }
 
     public static bool SystemUsesDarkApps()
@@ -177,45 +295,75 @@ internal static class Theme
         catch (ArgumentException) { return false; }
     }
 
-    /// <summary>Applies palette colours to a control tree (colour mode handles most native controls).</summary>
+    /// <summary>
+    /// Applies the palette to a control tree. The root gets the colour of the surface it sits on (a card's, or the
+    /// page's); panels and labels inside take their container's colour, so text inside a card sits on the card colour.
+    /// Inputs and lists are card-coloured (the code colour with <c>Tag = "code"</c>), labels tagged "muted",
+    /// "secondary", "danger", "experimental", "warning" or "success" take that role's colour, containers tagged
+    /// "surface" are card-coloured, and anything tagged "keep" keeps its own colours. Native controls follow the
+    /// application's colour mode.
+    /// </summary>
     public static void Apply(Control root)
     {
-        root.BackColor = P.Background;
-        root.ForeColor = P.Text;
+        if (root.Tag as string != "keep")
+        {
+            root.BackColor = SurfaceBehind(root);
+            root.ForeColor = P.Text;
+        }
         foreach (Control c in root.Controls) ApplyChild(c);
+    }
+
+    /// <summary>The colour of the surface <paramref name="c"/> sits on: the nearest card, or the page.</summary>
+    private static Color SurfaceBehind(Control c)
+    {
+        for (var p = c.Parent; p is not null; p = p.Parent)
+        {
+            if (p is CardPanel or Banner or EmptyState || p.Tag as string == "surface") return P.Card;
+            if (p is Form) break;
+        }
+        return P.Page;
     }
 
     private static void ApplyChild(Control c)
     {
-        switch (c)
+        string? tag = c.Tag as string;
+        if (tag == "keep")
         {
-            case Button b when b.Tag as string == "accent":
-                b.FlatStyle = FlatStyle.Flat;
-                b.BackColor = P.Accent;
-                b.ForeColor = P.AccentText;
-                b.FlatAppearance.BorderSize = 0;
+            if (c is CardPanel or Banner or EmptyState or StatTiles or Meter or SegmentedChoice) c.Invalidate();
+        }
+        else switch (c)
+        {
+            case OsmiumButton or NavButton:
+                c.Invalidate(); // they paint themselves from the palette
                 break;
             case Button b:
                 b.FlatStyle = FlatStyle.Flat;
-                b.BackColor = P.Surface;
-                b.ForeColor = P.Text;
-                b.FlatAppearance.BorderColor = P.Border;
+                b.BackColor = tag == "accent" ? P.Accent : P.Card;
+                b.ForeColor = tag == "accent" ? P.AccentText : P.Text;
+                b.FlatAppearance.BorderColor = tag == "accent" ? P.Accent : P.Line;
+                b.FlatAppearance.MouseOverBackColor = tag == "accent" ? P.AccentHover : P.Subtle;
+                b.FlatAppearance.MouseDownBackColor = tag == "accent" ? P.AccentPressed : P.Sunk;
                 break;
-            case TextBox or ListView or ListBox or ComboBox or NumericUpDown or TreeView or RichTextBox:
-                c.BackColor = P.Surface;
+            case TextBoxBase or ListView or ListBox or ComboBox or NumericUpDown or TreeView:
+                c.BackColor = tag == "code" ? P.Code : P.Card;
                 c.ForeColor = P.Text;
                 break;
-            case Label l when l.Tag as string == "muted":
-                l.ForeColor = P.Muted;
+            case Label l:
+                Color? fore = tag switch
+                {
+                    "muted" => P.Muted,
+                    "secondary" => P.TextSecondary,
+                    "danger" => P.Danger,
+                    "experimental" or "warning" => P.WarningText,
+                    "success" => P.SuccessText,
+                    _ => null,
+                };
+                if (fore is { } f) l.ForeColor = f;
+                if (l is LinkLabel link) link.LinkColor = link.ActiveLinkColor = P.AccentInk;
                 break;
-            case Label l when l.Tag as string == "danger":
-                l.ForeColor = P.Danger;
-                break;
-            case Label l when l.Tag as string == "experimental":
-                l.ForeColor = P.Experimental;
-                break;
-            case Panel or TableLayoutPanel or FlowLayoutPanel or UserControl or SplitContainer or GroupBox or CheckBox or RadioButton or Label:
-                if (c.Tag as string != "keep") { c.BackColor = c.Tag as string == "surface" ? P.Surface : P.Background; c.ForeColor = P.Text; }
+            case Panel or TableLayoutPanel or FlowLayoutPanel or UserControl or SplitContainer or GroupBox or CheckBox or RadioButton:
+                if (tag == "surface") c.BackColor = P.Card;
+                else if (tag == "code") c.BackColor = P.Code;
                 break;
         }
         foreach (Control child in c.Controls) ApplyChild(child);

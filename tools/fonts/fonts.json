@@ -1,0 +1,78 @@
+{
+  "source": "https://github.com/google/fonts",
+  "commit": "6ebe737e44fd64ee736bbc6feed6136a6dbfd222",
+  "retrieved": "2026-11-25",
+  "unicodes": "U+0020-007E, U+00A0-017F, U+2000-206F, U+20AC, U+2122, U+2190-2199, U+2212, U+2215, U+2713, U+2717, U+FFFD",
+  "families": [
+    {
+      "name": "Anybody",
+      "font": "ofl/anybody/Anybody[wdth,wght].ttf",
+      "license": "ofl/anybody/OFL.txt",
+      "licenseFile": "Anybody-OFL.txt",
+      "fontSha256": "b184bd7e6ca8348bbaecec98951565729d7e89b7872d4898a1f9981342b5b64c",
+      "licenseSha256": "7f0313b042b462fcae1934436cc747f9fd4433e3b08fd6459a4a5104b0bbd5db"
+    },
+    {
+      "name": "Martian Mono",
+      "font": "ofl/martianmono/MartianMono[wdth,wght].ttf",
+      "license": "ofl/martianmono/OFL.txt",
+      "licenseFile": "MartianMono-OFL.txt",
+      "fontSha256": "c3467843ec1c2574b05fbcfd7147c7bfbcf63ddca8fc2bcb9d117f1bfb1b22e7",
+      "licenseSha256": "ddafd2c3f37ef1d83ef284ca63e159befd3820850c5e9eded14ca52eee92c256"
+    },
+    {
+      "name": "Instrument Sans",
+      "font": "ofl/instrumentsans/InstrumentSans[wdth,wght].ttf",
+      "license": "ofl/instrumentsans/OFL.txt",
+      "licenseFile": "InstrumentSans-OFL.txt",
+      "fontSha256": "b24f1812584816958afcf22e22d08e44318c5e51651e25d2438efdde389b33b1",
+      "licenseSha256": "9e27a72ed30eb49a08678f6a5d6ed98ec7ba5368f541637ee0683ec9134ef966"
+    }
+  ],
+  "instances": [
+    {
+      "file": "AnybodyTitle.ttf",
+      "family": "Anybody Title",
+      "source": "Anybody",
+      "axes": {
+        "wght": 740,
+        "wdth": 75
+      },
+      "roles": "page titles, the wordmark",
+      "sha256": "47d53d64f226f64cef4d24ec4197f126c8aafdce0f8ce9d13b45b2cab9f7e0ce"
+    },
+    {
+      "file": "AnybodyHeading.ttf",
+      "family": "Anybody Heading",
+      "source": "Anybody",
+      "axes": {
+        "wght": 680,
+        "wdth": 86
+      },
+      "roles": "card and dialog headings",
+      "sha256": "e22389196af24be1103f0a0436aa201516fe2a1b98431f9cc1314500bab0f9a5"
+    },
+    {
+      "file": "MartianMonoSpec.ttf",
+      "family": "Martian Mono Spec",
+      "source": "Martian Mono",
+      "axes": {
+        "wght": 500,
+        "wdth": 87.5
+      },
+      "roles": "spec lines, tags",
+      "sha256": "0d43e2d6e70eefac6958ede88be33a62abdc11c0d2f4d95c749960ec16b6c1b2"
+    },
+    {
+      "file": "InstrumentSansNumber.ttf",
+      "family": "Instrument Sans Number",
+      "source": "Instrument Sans",
+      "axes": {
+        "wght": 650,
+        "wdth": 100
+      },
+      "roles": "big values in result tiles",
+      "sha256": "9e7f3cb9dc1b3e77343a6d1198da53d4e9bf0b8bf4477933c372aa4c0d4de71d"
+    }
+  ]
+}
