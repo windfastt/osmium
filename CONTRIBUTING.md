@@ -21,6 +21,7 @@ You need a .NET 10 SDK (10.0.100 or later, as `global.json` sets) and, for the w
 dotnet build Osmium.sln -c Release
 dotnet test -c Release --project tests/Osmium.Core.Tests
 dotnet test -c Release --project tests/Osmium.Desktop.Tests
+dotnet test -c Release --project tests/Osmium.Cli.Tests
 ```
 
 The tests use xUnit v3 on Microsoft.Testing.Platform (selected in `global.json`), which is why `dotnet test` takes
@@ -61,7 +62,7 @@ Never edit these by hand: change the source, then regenerate. CI fails when they
 | `src/Osmium.Desktop` | App logic without Windows Forms (settings, jobs, IPC, Explorer registration), unit-tested on Linux |
 | `src/Osmium.App` | The Windows Forms tray app, `Osmium.App.exe` |
 | `src/Osmium.Cli` | The command-line tool, `osmium.exe` |
-| `tests/` | `Osmium.Core.Tests` and `Osmium.Desktop.Tests` |
+| `tests/` | `Osmium.Core.Tests`, `Osmium.Desktop.Tests` and `Osmium.Cli.Tests` |
 | `build/`, `installer/` | Windows packaging script and Inno Setup script |
 | `tools/` | Website and settings-reference generators, benchmark scripts |
 

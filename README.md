@@ -214,6 +214,7 @@ turn it off, as CI does.
 dotnet build Osmium.sln -c Release
 dotnet test -c Release --project tests/Osmium.Core.Tests      # codecs, filters, format, planner, cluster
 dotnet test -c Release --project tests/Osmium.Desktop.Tests   # settings, jobs, IPC, Explorer registration
+dotnet test -c Release --project tests/Osmium.Cli.Tests       # the osmium command-line tool
 ```
 
 On Windows, `pwsh build/publish.ps1 -Arch x64` (or `-Arch arm64`, with optional `-Version 1.2.3` and

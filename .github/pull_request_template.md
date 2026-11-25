@@ -13,8 +13,8 @@
 ## Checklist
 
 - [ ] `dotnet build Osmium.sln -c Release` finishes with 0 warnings.
-- [ ] Both test suites pass: `dotnet test -c Release --project tests/Osmium.Core.Tests` and
-  `dotnet test -c Release --project tests/Osmium.Desktop.Tests`.
+- [ ] The test suites pass: `dotnet test -c Release --project tests/Osmium.Core.Tests`,
+  `tests/Osmium.Desktop.Tests` and `tests/Osmium.Cli.Tests`.
 - [ ] The change comes with tests; a fixed bug that can be reproduced on Linux has a regression test.
 - [ ] Existing golden vectors are unchanged and no method id was renumbered or reused. (If an output had to change,
   it is a new method with a new id and its own golden vectors, explained above.)
