@@ -33,7 +33,7 @@ def main():
     rows = [r for r in raw if r.get("ok")]
     for ds in dict.fromkeys(r["dataset"] for r in rows):
         rs = sorted((r for r in rows if r["dataset"] == ds), key=lambda r: r["bytes"])
-        xz = next(r for r in rs if r["family"] == "xz")
+        xz = next((r for r in rs if r["family"] == "xz"), None)  # absent when xz did not run (e.g. crosscheck --only)
         title, desc = DESC[ds]
         print(f"### {title} — {rs[0]['dataset_bytes'] / 2**20:.1f} MiB, {rs[0]['files']} files\n")
         print(desc + "\n")
@@ -42,7 +42,7 @@ def main():
         for r in rs:
             osm = r["family"].startswith("osmium")
             name = f"**Osmium {r['family'][7:].capitalize()}**" if osm else NAMES[r["family"]]
-            vs = "—" if r is xz else f"{(r['bytes'] / xz['bytes'] - 1) * 100:+.1f} %".replace("-", "−")
+            vs = "—" if xz is None or r is xz else f"{(r['bytes'] / xz['bytes'] - 1) * 100:+.1f} %".replace("-", "−")
             print(f"| {name} | {r['bytes']:,} | {r['ratio'] * 100:.2f} % | {vs} | {t(r['compress_s'])} | {t(r['decompress_s'])} | ✔ identical |")
         print()
     missing = [r for r in raw if not r.get("ok")]
