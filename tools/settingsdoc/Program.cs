@@ -49,7 +49,8 @@ foreach (var cat in SettingReflector.Categories(s))
 sb.AppendLine("## Watch-folder entries");
 sb.AppendLine();
 sb.AppendLine("Each watched folder (Settings → Watch folders) has: path, include subfolders, include/exclude patterns");
-sb.AppendLine($"(default exclude `{new WatchFolderConfig().Exclude}`), settle time ({new WatchFolderConfig().SettleSeconds} s), minimum size, profile and output subfolder (`{new WatchFolderConfig().OutputSubfolder}`). Originals are never deleted.");
+sb.AppendLine($"(default exclude `{new WatchFolderConfig().Exclude}`), settle time ({new WatchFolderConfig().SettleSeconds} s), minimum size, profile and output subfolder (`{new WatchFolderConfig().OutputSubfolder}`). The originals are kept unless");
+sb.AppendLine($"**{all.Single(d => d.Key == "Compression.RecycleOriginals").Label}** (Compression) is on; even then nothing is ever deleted for good.");
 sb.AppendLine();
 sb.AppendLine("## Profiles");
 sb.AppendLine();

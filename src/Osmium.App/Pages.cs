@@ -352,7 +352,7 @@ internal sealed class JobsPage : UserControl, IPage
             string[] cols =
             [
                 j.Name, j.Kind.ToString(), j.State.ToString(),
-                j.State is JobState.Running or JobState.Paused ? $"{j.Fraction:P0} {j.Phase}" : j.Error ?? j.Phase,
+                j.State is JobState.Running or JobState.Paused ? $"{j.Fraction:P0} {j.Phase}" : Osmium.Desktop.Tray.TrayText.FinishedStatus(j),
                 Ui.Bytes(j.BytesIn), Ui.Bytes(j.BytesOut), j.BytesIn > 0 ? $"{j.Ratio:P1}" : "",
                 Osmium.Desktop.Tray.TrayText.Duration(j.Elapsed), j.Eta is { } e ? Osmium.Desktop.Tray.TrayText.Duration(e) : "",
             ];
@@ -1052,7 +1052,8 @@ internal sealed class SettingsPage : UserControl, IPage
                 Fill();
                 MarkEdited(SettingsEdits.WatchFolders);
             }),
-            Ui.Text("New files are compressed to an \"_osmium\" subfolder once they stop changing; originals are kept.", muted: true));
+            Ui.Text("New files are compressed to an \"_osmium\" subfolder once they stop changing. The originals are kept unless "
+                + "Compression → \"After a verified compression, move the originals to the Recycle Bin\" is on.", muted: true, maxWidth: 760));
         _watchPanel.Controls.Add(list);
         _watchPanel.Controls.Add(bar);
         Theme.Apply(_watchPanel);

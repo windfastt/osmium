@@ -66,7 +66,7 @@ public static class TrayText
     {
         JobState.Completed when j.Kind == JobKind.Compress => (
             Truncate("Compression finished", BalloonTitleMax),
-            Truncate($"{j.Name} — {Bytes(j.BytesIn)} → {Bytes(j.BytesOut)} ({1 - j.Ratio:P0} smaller) in {Duration(j.Elapsed)}", BalloonBodyMax), false),
+            WithOriginals($"{j.Name} — {Bytes(j.BytesIn)} → {Bytes(j.BytesOut)} ({1 - j.Ratio:P0} smaller) in {Duration(j.Elapsed)}", j.Recycle), false),
         JobState.Completed when j.Kind == JobKind.Test => ("Archive OK", Truncate($"{j.Name} — every file verified.", BalloonBodyMax), false),
         JobState.Completed => ("Extraction finished", Truncate($"{j.Name} — {Bytes(j.BytesIn)} extracted in {Duration(j.Elapsed)}", BalloonBodyMax), false),
         JobState.Canceled => ("Job canceled", Truncate(j.Name, BalloonBodyMax), false),
@@ -78,7 +78,24 @@ public static class TrayText
         long saved = finished.Where(j => j.Kind == JobKind.Compress && j.State == JobState.Completed).Sum(j => Math.Max(0, j.BytesIn - j.BytesOut));
         int failed = finished.Count(j => j.State == JobState.Failed);
         string body = $"{finished.Count} jobs finished" + (saved > 0 ? $" — {Bytes(saved)} saved" : "") + (failed > 0 ? $", {failed} failed" : "");
-        return ("Osmium", Truncate(body, BalloonBodyMax));
+        var recycled = finished.Select(j => j.Recycle).OfType<RecycleSummary>().ToList();
+        var originals = recycled.Count == 0 ? null : new RecycleSummary(recycled.Sum(r => r.Moved), recycled.Sum(r => r.Kept), recycled.Sum(r => r.Gone));
+        return ("Osmium", WithOriginals(body, originals));
+    }
+
+    /// <summary>What happened to the originals of a job that moves them to the Recycle Bin: "Originals: 2 moved to the Recycle Bin, 1 kept".</summary>
+    public static string Originals(RecycleSummary r) => "Originals: " + r;
+
+    /// <summary>The Jobs page's status of a finished job: its phase or error, and what happened to its originals.</summary>
+    public static string FinishedStatus(JobSnapshot j) =>
+        j.Error ?? (j.Recycle is { } r ? $"{j.Phase}. {Originals(r)}" : j.Phase);
+
+    /// <summary>A balloon body with the originals' line last, kept whole when the body has to be shortened.</summary>
+    private static string WithOriginals(string body, RecycleSummary? recycle)
+    {
+        if (recycle is null) return Truncate(body, BalloonBodyMax);
+        string line = "\n" + Originals(recycle);
+        return Truncate(body, BalloonBodyMax - line.Length) + line;
     }
 
     /// <summary>Ring progress bucket (0..25) used to pick a pre-rendered tray frame.</summary>

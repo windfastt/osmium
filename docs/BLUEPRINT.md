@@ -257,7 +257,9 @@ record RuleActions(PipelineSpec? Pipeline, bool? Store, bool? Exclude, string[]?
   exceeds the budget.
 - Codecs are single-threaded per task (determinism); parallelism is across blocks and trials.
 - **Crash safety**: output goes to `<name>.osa.partial-xxxx`; it is renamed only after the index is written, flushed
-  and the archive structurally re-verified. Sources are never touched; "delete sources" is not offered in v1.
+  and the archive structurally re-verified. The engine never touches the sources. Since 0.2.0 the app can move them to
+  the Recycle Bin after a verified compression when that setting is on (`Compression.RecycleOriginals`); nothing is
+  ever deleted for good.
 
 ## 11. Distributed compression (`Osmium.Core/Distributed`)
 

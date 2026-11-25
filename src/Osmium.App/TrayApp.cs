@@ -57,7 +57,7 @@ internal sealed class TrayApp : ApplicationContext
         _icons = new TrayIcons(_appIcon);
         LoadRules();
 
-        Jobs = new JobManager(() => Settings, () => GlobalRules, historyFile ?? AppPaths.HistoryFile);
+        Jobs = new JobManager(() => Settings, () => GlobalRules, historyFile ?? AppPaths.HistoryFile, new ShellRecycler());
         Jobs.JobFinished += j => _ui.Post(_ => OnJobFinished(j), null);
         Jobs.BusyChanged += busy => _ui.Post(_ => OnBusyChanged(busy), null);
         Jobs.PasswordPrompt = archive =>

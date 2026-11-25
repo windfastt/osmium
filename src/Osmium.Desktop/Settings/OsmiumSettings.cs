@@ -53,6 +53,12 @@ public sealed class CompressionSettings
     public List<string> Excludes { get; set; } = ["Thumbs.db", "desktop.ini", "*.osmium-part-*", "*.osa.partial-*"];
     [Setting("Include hidden files", Order = 7)]
     public bool IncludeHidden { get; set; } = true;
+    [Setting("After a verified compression, move the originals to the Recycle Bin",
+        Description = "Needs Verify every block. Only files and folders the archive holds completely and unchanged move, and only on drives with a Recycle Bin; the job's log says why anything stays. "
+            + "When the Recycle Bin is full, Windows makes room by removing its oldest items, as it does for every delete.",
+        Order = 8, Dangerous = true, Keywords = "delete remove trash recycle bin originals sources",
+        WarningText = "Osmium moves the files it compressed to the Recycle Bin after the archive is written and every block is verified. Files that were not compressed, and drives without a Recycle Bin, are never touched.")]
+    public bool RecycleOriginals { get; set; }
 }
 
 [SettingsCategory("Codecs", Order = 2, Glyph = "", Description = "Which algorithms the planner may use, and their resource limits.")]

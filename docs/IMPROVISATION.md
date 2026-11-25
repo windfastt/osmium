@@ -70,7 +70,6 @@ because of it, what was deliberately not adopted, and the backlog of further ide
 - Windows 11 top-level context menu (signed sparse package + IExplorerCommand); toasts with actions.
 - PAKE for passphrase-based clusters; IPv6 discovery; cross-worker verification of symmetric-codec blocks.
 - Duplicate index copy, `osmium salvage`, recovery records, multi-volume, append/update (needs random nonces).
-- Recycle Bin removal of sources after verified compression.
 
 ## 5. Measured decisions
 

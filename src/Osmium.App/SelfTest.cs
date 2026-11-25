@@ -17,7 +17,8 @@ namespace Osmium.App;
 /// <summary>
 /// <c>Osmium.App.exe --selftest-ui &lt;dir&gt; [dark]</c>: runs the real app on a sample folder it creates (Analyze, a
 /// compression job with profile max through the job manager, the archive it wrote, a Lab run, the Tune dialog) and
-/// renders every page and dialog to PNG. It writes manifest.json (manifest-dark.json for the dark run) listing each
+/// renders every page and dialog to PNG. It also moves folders it creates in its own temporary folder to the Recycle
+/// Bin, directly and through a job with "move the originals to the Recycle Bin" on, and checks what stays. It writes manifest.json (manifest-dark.json for the dark run) listing each
 /// PNG with its size, theme and caption, and selftest.log (selftest-dark.log). A failed step, a message box, a UI
 /// exception or an error in the app log makes the exit code 1. Runs in CI on windows-latest, which is how the
 /// WinForms layer gets exercised although development happens on Linux; nothing in the screenshots is mocked up.
@@ -263,6 +264,105 @@ internal static partial class SelfTest
                 string file = "tray-frames" + suffix + ".png";
                 strip.Save(Path.Combine(outDir, file), ImageFormat.Png);
                 shots.Add(new Shot(file, strip.Width, strip.Height, theme, "Notification-area icon: progress from 0 to 100 %, then paused and failed at 50 %"));
+            });
+
+            // Everything the Recycle Bin steps move or keep lies in the self-test's own temporary folder (deleted at the
+            // end); what they move goes to the Recycle Bin of the machine running the test.
+            string recycleRoot = Path.Combine(LongPath(tmp), "recycle");
+            string Own(string path) => Path.GetFullPath(path).StartsWith(recycleRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                ? path : throw new InvalidOperationException($"{path} is outside the self-test's folder");
+            // A page saved with "Webpage, complete": the shell treats the page and its "_files" folder as connected.
+            string SavedPage(string folder, string name)
+            {
+                Directory.CreateDirectory(Path.Combine(folder, name + "_files"));
+                File.WriteAllText(Path.Combine(folder, name + "_files", "style.css"), "body { margin: 0 }");
+                string page = Own(Path.Combine(folder, name + ".html"));
+                File.WriteAllText(page, $"<html><head><link rel=\"stylesheet\" href=\"{name}_files/style.css\"></head><body>A saved page.</body></html>");
+                return page;
+            }
+
+            Step("Recycle Bin: the shell recycler moves a folder and nothing else", () =>
+            {
+                // Before the shell deletes anything: no Recycle Bin, no path, or a canceled job means the item stays.
+                const uint recycle = ShellRecycler.TSF_DELETE_RECYCLE_IF_POSSIBLE;
+                Func<string, string?> unchanged = _ => null;
+                if (new RecycleGate(unchanged, CancellationToken.None).PreDelete(0, null, 0) != ShellRecycler.Refuse
+                    || new RecycleGate(unchanged, CancellationToken.None).PreDelete(recycle, null, 0) != ShellRecycler.Refuse
+                    || new RecycleGate(unchanged, new CancellationToken(canceled: true)).PreDelete(recycle, null, 0) != ShellRecycler.Refuse)
+                    throw new InvalidOperationException("the Recycle Bin gate would allow a delete it must refuse");
+                string folder = Own(Path.Combine(recycleRoot, "direct", "a folder"));
+                Directory.CreateDirectory(Path.Combine(folder, "sub"));
+                File.WriteAllText(Path.Combine(folder, "sub", "file.txt"), "Moved to the Recycle Bin by the Osmium UI self-test.");
+                var recycler = new ShellRecycler();
+                if (recycler.DriveTypeOf(folder) is var drive and not DriveType.Fixed)
+                    throw new InvalidOperationException($"the temporary folder is on a {drive} drive, not a fixed one");
+
+                // Refused at the last moment (as for an item that changed): the shell must leave it where it is.
+                string refused = Own(Path.Combine(recycleRoot, "direct", "refused"));
+                Directory.CreateDirectory(refused);
+                File.WriteAllText(Path.Combine(refused, "file.txt"), "Must stay where it is.");
+                var refusal = recycler.Recycle([refused], _ => "it changed after it was read", CancellationToken.None).Single();
+                if (refusal.Recycled || !File.Exists(Path.Combine(refused, "file.txt")))
+                    throw new InvalidOperationException("the shell moved an item that the progress sink refused: " + refusal.Reason);
+                if (refusal.Reason != "checked again just before it moved: it changed after it was read")
+                    throw new InvalidOperationException("the refused item was not refused by the last check before it moved: " + refusal.Reason);
+
+                var outcome = recycler.Recycle([folder], unchanged, CancellationToken.None).Single();
+                if (!outcome.Recycled) throw new InvalidOperationException("the folder was not moved to the Recycle Bin: " + outcome.Reason);
+                if (Directory.Exists(folder)) throw new InvalidOperationException("the folder is still in place");
+                if (recycler.LastPreDeletes == 0) throw new InvalidOperationException("the shell moved the folder without asking the progress sinks first");
+                if (outcome.BinPath is not { } binPath || !Directory.Exists(binPath))
+                    throw new InvalidOperationException($"the shell named no Recycle Bin item that exists ({outcome.BinPath ?? "no path"})");
+                log.Add($"      in the Recycle Bin as {binPath}; the shell asked {recycler.LastPreDeletes} time(s) before deleting");
+
+                // A page and its connected "_files" folder: each moves alone, and the other one stays.
+                string page = SavedPage(Path.Combine(recycleRoot, "direct", "page"), "page");
+                string pageFiles = Path.Combine(Path.GetDirectoryName(page)!, "page_files");
+                var pageOutcome = recycler.Recycle([page], unchanged, CancellationToken.None).Single();
+                if (!pageOutcome.Recycled || File.Exists(page)) throw new InvalidOperationException("the page was not moved to the Recycle Bin: " + pageOutcome.Reason);
+                if (!File.Exists(Path.Combine(pageFiles, "style.css"))) throw new InvalidOperationException("the page's \"_files\" folder went along with the page");
+                string other = SavedPage(Path.Combine(recycleRoot, "direct", "other"), "other");
+                string otherFiles = Own(Path.Combine(Path.GetDirectoryName(other)!, "other_files"));
+                var filesOutcome = recycler.Recycle([otherFiles], unchanged, CancellationToken.None).Single();
+                if (!filesOutcome.Recycled || Directory.Exists(otherFiles)) throw new InvalidOperationException("the \"_files\" folder was not moved to the Recycle Bin: " + filesOutcome.Reason);
+                if (!File.Exists(other)) throw new InvalidOperationException("the page went along with its \"_files\" folder");
+            });
+
+            Step("Recycle Bin option: a compression job", () =>
+            {
+                string moved = Own(Path.Combine(recycleRoot, "job", "originals"));
+                string kept = Own(Path.Combine(recycleRoot, "job", "kept"));
+                string archive = Own(Path.Combine(recycleRoot, "job", "originals.osa"));
+                Directory.CreateDirectory(Path.Combine(moved, "sub"));
+                File.WriteAllText(Path.Combine(moved, "a.txt"), string.Concat(Enumerable.Repeat("Compressed, then moved to the Recycle Bin.\n", 200)));
+                File.WriteAllText(Path.Combine(moved, "sub", "b.txt"), "A second file.");
+                Directory.CreateDirectory(kept);
+                File.WriteAllText(Path.Combine(kept, "a.txt"), "Compressed, and kept with its folder.");
+                File.WriteAllText(Path.Combine(kept, "Thumbs.db"), "Left out by the default exclude patterns."); // so the archive lacks a file of the folder
+                string page = SavedPage(Path.Combine(recycleRoot, "job"), "saved page"); // compressed alone: its "_files" folder must stay
+                string pageFiles = Path.Combine(recycleRoot, "job", "saved page_files");
+                app.Settings.Compression.RecycleOriginals = true;
+                try
+                {
+                    var id = app.Jobs.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [moved, kept, page], Output = archive, Profile = "store" });
+                    WaitFor(() => app.Jobs.Snapshot().FirstOrDefault(j => j.Id == id) is { IsActive: false }, JobTimeout, "The compression job with the Recycle Bin option");
+                    var job = app.Jobs.Snapshot().First(j => j.Id == id);
+                    var jobLog = app.Jobs.GetLog(id);
+                    string why = string.Join(" | ", jobLog.Where(l => l.StartsWith("kept ", StringComparison.Ordinal) || l.StartsWith("warning: ", StringComparison.Ordinal)));
+                    if (job.State != JobState.Completed) throw new InvalidOperationException($"the job ended {job.State}: {job.Error}");
+                    if (!File.Exists(archive)) throw new InvalidOperationException("the archive was not written");
+                    if (Directory.Exists(moved) || !jobLog.Contains("moved to the Recycle Bin: " + moved))
+                        throw new InvalidOperationException("the compressed folder was not moved to the Recycle Bin: " + why);
+                    if (!File.Exists(Path.Combine(kept, "Thumbs.db")) || !jobLog.Any(l => l.StartsWith($"kept {kept}: ", StringComparison.Ordinal) && l.Contains("Thumbs.db")))
+                        throw new InvalidOperationException("the folder holding an excluded file was not kept: " + why);
+                    if (File.Exists(page) || !jobLog.Contains("moved to the Recycle Bin: " + page))
+                        throw new InvalidOperationException("the compressed page was not moved to the Recycle Bin: " + why);
+                    if (!File.Exists(Path.Combine(pageFiles, "style.css")))
+                        throw new InvalidOperationException("the page's \"_files\" folder, which was not compressed, went along with the page");
+                    if (job.Recycle != new RecycleSummary(2, 1)) throw new InvalidOperationException($"the job reported \"{job.Recycle}\" instead of 2 moved, 1 kept");
+                    log.Add($"      originals: {job.Recycle}");
+                }
+                finally { app.Settings.Compression.RecycleOriginals = false; }
             });
 
             Step("handle counts", () =>

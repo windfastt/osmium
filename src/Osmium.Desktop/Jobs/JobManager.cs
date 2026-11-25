@@ -35,6 +35,21 @@ public sealed record JobSnapshot(
 {
     public double Ratio => BytesIn == 0 ? 0 : (double)BytesOut / BytesIn;
     public bool IsActive => State is JobState.Queued or JobState.Running or JobState.Paused;
+    /// <summary>
+    /// For a compress job that ran with "move the originals to the Recycle Bin": how many inputs moved and how many
+    /// stayed where they were. Null when the setting was off or the job did not get that far.
+    /// </summary>
+    public RecycleSummary? Recycle { get; init; }
+}
+
+/// <summary>
+/// How many inputs of a compress job moved to the Recycle Bin, how many stayed where they were, and how many are no
+/// longer in place although the Recycle Bin did not confirm holding them (the job log names them).
+/// </summary>
+public sealed record RecycleSummary(int Moved, int Kept, int Gone = 0)
+{
+    public override string ToString() =>
+        $"{Moved} moved to the Recycle Bin, {Kept} kept" + (Gone > 0 ? $", {Gone} no longer in place and not confirmed in the Recycle Bin" : "");
 }
 
 /// <summary>Sequential job queue used by the tray app. Thread-safe; the UI polls <see cref="Snapshot"/>.</summary>
@@ -54,10 +69,12 @@ public sealed class JobManager : IDisposable
         public PauseGate Gate { get; } = new();
         public CancellationTokenSource Cts { get; } = new();
         public List<string> Log { get; } = [];
+        public RecycleSummary? Recycle;
     }
 
     private readonly Func<OsmiumSettings> _settings;
     private readonly Func<RuleSet> _globalRules;
+    private readonly IRecycler? _recycler;
     private readonly List<Job> _jobs = [];
     private readonly object _lock = new();
     private readonly SemaphoreSlim _signal = new(0);
@@ -70,11 +87,21 @@ public sealed class JobManager : IDisposable
     public event Action<bool>? BusyChanged;
     public Func<string, string?>? PasswordPrompt { get; set; }
 
-    public JobManager(Func<OsmiumSettings> settings, Func<RuleSet> globalRules, string? historyFile = null)
+    /// <summary>Reads the index of a written archive (path, password): what it holds, for moving the originals.</summary>
+    internal Func<string, Func<string?>, IReadOnlyList<ArchiveEntry>> ReadIndex { get; set; } = static (path, password) =>
+    {
+        using var archive = OsaReader.Open(path, password);
+        return archive.Entries;
+    };
+
+    /// <param name="recycler">Moves the originals of compress jobs to the Recycle Bin when the setting asks for it;
+    /// without one, originals always stay.</param>
+    public JobManager(Func<OsmiumSettings> settings, Func<RuleSet> globalRules, string? historyFile = null, IRecycler? recycler = null)
     {
         _settings = settings;
         _globalRules = globalRules;
         _historyFile = historyFile;
+        _recycler = recycler;
         LoadHistory();
         _loop = Task.Run(LoopAsync);
     }
@@ -113,7 +140,7 @@ public sealed class JobManager : IDisposable
             eta = TimeSpan.FromSeconds(j.Clock.Elapsed.TotalSeconds * (1 - j.Fraction) / j.Fraction);
         string name = j.Request.Name ?? (j.Request.Kind == JobKind.Compress ? Path.GetFileName(j.Request.Output) : Path.GetFileName(j.Request.Inputs.FirstOrDefault() ?? "?"));
         return new JobSnapshot(j.Id, name, j.Request.Kind, j.State, j.Phase, j.Fraction, j.In, j.Out, j.Total, j.Clock.Elapsed, eta,
-            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, withLog ? LogCopy(j) : []);
+            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, withLog ? LogCopy(j) : []) { Recycle = j.Recycle };
     }
 
     private static List<string> LogCopy(Job j)
@@ -250,6 +277,9 @@ public sealed class JobManager : IDisposable
     {
         var s = _settings();
         var r = j.Request;
+        // Read once: the whole job uses the settings in effect when it started, and the originals move only if the
+        // blocks were verified with exactly this value.
+        bool verify = s.Compression.VerifyBlocks, recycle = s.Compression.RecycleOriginals;
         j.Phase = "Scanning";
         var scan = Scanner.Scan(r.Inputs, new ScanOptions { Excludes = s.Compression.Excludes, IncludeHidden = s.Compression.IncludeHidden }, ct);
         var po = BuildPlanOptions(s, r, _globalRules(), m => { lock (j.Log) j.Log.Add(m); }) with
@@ -275,17 +305,19 @@ public sealed class JobManager : IDisposable
                 lock (j.Log) j.Log.Add("cluster unavailable: " + e.Message);
             }
         }
+        ArchivePlan plan;
+        BuildResult result;
         try
         {
-            var plan = await new Planner(po).BuildAsync(scan, ct);
+            plan = await new Planner(po).BuildAsync(scan, ct);
             j.Total = plan.TotalInput;
             lock (j.Log) j.Log.AddRange(plan.Groups.SelectMany(g => g.Explain));
-            var result = await ArchiveBuilder.BuildAsync(plan, new BuildOptions
+            result = await ArchiveBuilder.BuildAsync(plan, new BuildOptions
             {
                 OutputPath = r.Output,
                 Password = r.Password,
                 KdfIterations = s.Security.KdfIterations,
-                VerifyBlocks = s.Compression.VerifyBlocks,
+                VerifyBlocks = verify,
                 Overwrite = r.Overwrite,
                 Threads = po.Threads + (cluster?.RemoteSlots ?? 0),
                 MemoryBudget = po.MemoryBudget,
@@ -312,6 +344,108 @@ public sealed class JobManager : IDisposable
         {
             if (cluster is not null) await cluster.DisposeAsync();
         }
+        if (recycle) MoveOriginals(j, verify, plan, result, ct);
+    }
+
+    /// <summary>
+    /// Once the archive is complete: moves the inputs that every rule of <see cref="RecycleCandidates"/> allows to the
+    /// Recycle Bin, in one operation, and logs for each input "moved to the Recycle Bin: path" or "kept path: reason".
+    /// Never throws: the archive is good whatever happens here, so the job completes, with a warning when moving
+    /// failed. Whatever could not be checked or moved stays where it is.
+    /// </summary>
+    private void MoveOriginals(Job j, bool verified, ArchivePlan plan, BuildResult result, CancellationToken ct)
+    {
+        j.Phase = "Moving the originals to the Recycle Bin";
+        var r = j.Request;
+        void Log(string line) { lock (j.Log) j.Log.Add(line); }
+        RecycleDecision decision;
+        Func<string, string?> recheck = _ => "it could not be checked again";
+        try
+        {
+            var facts = new RecycleFacts
+            {
+                Inputs = r.Inputs, Outcome = ct.IsCancellationRequested ? JobState.Canceled : JobState.Completed,
+                VerifiedBlocks = verified, Build = result,
+            };
+            if (_recycler is null) decision = RecycleDecision.KeepAll(r.Inputs, "Osmium has no Recycle Bin to use on this system");
+            else if (RecycleCandidates.JobBlocker(facts) is { } blocker) decision = RecycleDecision.KeepAll(r.Inputs, blocker);
+            else
+            {
+                // In the archive means listed by the archive's own index: the planner leaves files out (rules, unreadable
+                // files), so the scan alone does not say what the archive holds.
+                var (files, dirs) = RecycleCandidates.InArchive(plan.Files.Select(f => f.Src), plan.Dirs, ReadIndex(result.Path, () => r.Password));
+                var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
+                decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf);
+                // The same rules once more for each input just before it moves: it may have changed since.
+                recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf);
+            }
+        }
+        catch (Exception e)
+        {
+            Log("warning: the originals could not be checked, so none were moved: " + e.Message);
+            decision = RecycleDecision.KeepAll(r.Inputs, "it could not be checked");
+        }
+
+        var move = decision.Move;
+        // The inputs that are to stay and are in place now: afterwards, each must still be there.
+        var staying = decision.Keep.Select(k => k.Path).Where(InPlace).ToHashSet(StringComparer.Ordinal);
+        var outcomes = new Dictionary<string, RecycleOutcome>(StringComparer.Ordinal);
+        if (move.Count > 0)
+        {
+            try
+            {
+                var handedOver = move.ToHashSet(StringComparer.Ordinal);
+                foreach (var o in _recycler!.Recycle(move, recheck, ct))
+                {
+                    if (handedOver.Contains(o.Path)) outcomes[o.Path] = o;
+                    else Log($"warning: the Recycle Bin operation also affected {o.Path}, which was not to move: {o.Reason}");
+                }
+            }
+            catch (Exception e) { Log("warning: moving the originals to the Recycle Bin failed: " + e.Message); }
+        }
+
+        int moved = 0, kept = 0, gone = 0, failed = 0;
+        foreach (var input in decision.Inputs)
+        {
+            bool inPlace = InPlace(input.Path);
+            if (!input.Moves)
+            {
+                if (inPlace || !staying.Contains(input.Path))
+                {
+                    kept++;
+                    Log($"kept {input.Path}: {input.Reason}");
+                }
+                else
+                {
+                    gone++;
+                    Log($"warning: {input.Path} was to stay ({input.Reason}), but it is no longer in place");
+                }
+                continue;
+            }
+            outcomes.TryGetValue(input.Path, out var o);
+            if (o is { Recycled: true } && !inPlace)
+            {
+                moved++;
+                Log("moved to the Recycle Bin: " + input.Path);
+            }
+            else if (inPlace)
+            {
+                kept++;
+                failed++;
+                Log($"kept {input.Path}: {(o is { Recycled: true } ? "it is still in place, although the Recycle Bin reported it as moved" : o?.Reason ?? "the Recycle Bin did not take it")}");
+            }
+            else
+            {
+                gone++;
+                failed++;
+                Log($"warning: {input.Path} is no longer in place, but the Recycle Bin did not confirm that it holds it{(o?.Reason is { } why ? $" ({why})" : "")}");
+            }
+        }
+        if (failed > 0) Log($"warning: {failed} of {move.Count} item{(move.Count == 1 ? "" : "s")} could not be moved to the Recycle Bin");
+        j.Recycle = new RecycleSummary(moved, kept, gone);
+        Log("originals: " + j.Recycle);
+
+        static bool InPlace(string path) => Path.IsPathFullyQualified(path) && (File.Exists(path) || Directory.Exists(path));
     }
 
     private void Extract(Job j, CancellationToken ct, bool test)
@@ -344,7 +478,8 @@ public sealed class JobManager : IDisposable
         }
     }
 
-    private sealed record HistoryEntry(string Name, JobKind Kind, JobState State, long In, long Out, string? Output, DateTime Created, double Seconds, string? Error);
+    private sealed record HistoryEntry(string Name, JobKind Kind, JobState State, long In, long Out, string? Output, DateTime Created, double Seconds, string? Error,
+        RecycleSummary? Recycle = null);
 
     private void SaveHistory()
     {
@@ -354,7 +489,7 @@ public sealed class JobManager : IDisposable
             List<HistoryEntry> h;
             lock (_lock)
                 h = _jobs.Where(j => !(j.State is JobState.Queued or JobState.Running or JobState.Paused)).TakeLast(50)
-                    .Select(j => new HistoryEntry(Snap(j).Name, j.Request.Kind, j.State, j.In, j.Out, j.Output, j.Created, j.Clock.Elapsed.TotalSeconds, j.Error)).ToList();
+                    .Select(j => new HistoryEntry(Snap(j).Name, j.Request.Kind, j.State, j.In, j.Out, j.Output, j.Created, j.Clock.Elapsed.TotalSeconds, j.Error, j.Recycle)).ToList();
             Directory.CreateDirectory(Path.GetDirectoryName(_historyFile)!);
             File.WriteAllText(_historyFile, JsonSerializer.Serialize(h));
         }
@@ -371,6 +506,7 @@ public sealed class JobManager : IDisposable
                 var j = new Job(new JobRequest { Kind = h.Kind, Name = h.Name, Output = h.Output ?? "" })
                 {
                     State = h.State, In = h.In, Out = h.Out, Output = h.Output, Created = h.Created, Error = h.Error, Phase = h.State.ToString(), Fraction = 1,
+                    Recycle = h.Recycle,
                 };
                 lock (_lock) _jobs.Add(j);
             }

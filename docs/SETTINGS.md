@@ -4,7 +4,7 @@ Generated from the `[Setting]` metadata in `src/Osmium.Desktop/Settings/OsmiumSe
 definitions — the Settings page and the Tune dialog render exactly these. Stored in `%APPDATA%\Osmium\settings.json`
 (portable mode: `.\data\settings.json`).
 
-**63 settings in 11 categories**, plus 37 codec/filter parameters usable in pipelines, rules and the Tune dialog.
+**64 settings in 11 categories**, plus 37 codec/filter parameters usable in pipelines, rules and the Tune dialog.
 
 ## General
 
@@ -35,6 +35,7 @@ Defaults for new archives.
 | **Store planner log in archive**<br>Lets 'Explain' show why each pipeline was chosen (archive-relative paths only). | on |  |  |
 | **Exclude patterns**<br>One glob per line, e.g. *.tmp or node_modules/** | `Thumbs.db`, `desktop.ini`, `*.osmium-part-*`, `*.osa.partial-*` |  |  |
 | **Include hidden files**<br> | on |  |  |
+| **After a verified compression, move the originals to the Recycle Bin**<br>Needs Verify every block. Only files and folders the archive holds completely and unchanged move, and only on drives with a Recycle Bin; the job's log says why anything stays. When the Recycle Bin is full, Windows makes room by removing its oldest items, as it does for every delete. | off |  | **caution** |
 
 ## Codecs
 
@@ -149,7 +150,8 @@ Features that may be very slow, use huge memory, or change in future versions. A
 ## Watch-folder entries
 
 Each watched folder (Settings → Watch folders) has: path, include subfolders, include/exclude patterns
-(default exclude `*.osa;*.tmp;~$*;*.part;*.crdownload;*.partial-*`), settle time (10 s), minimum size, profile and output subfolder (`_osmium`). Originals are never deleted.
+(default exclude `*.osa;*.tmp;~$*;*.part;*.crdownload;*.partial-*`), settle time (10 s), minimum size, profile and output subfolder (`_osmium`). The originals are kept unless
+**After a verified compression, move the originals to the Recycle Bin** (Compression) is on; even then nothing is ever deleted for good.
 
 ## Profiles
 
