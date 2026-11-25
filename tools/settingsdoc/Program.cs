@@ -33,7 +33,7 @@ foreach (var cat in SettingReflector.Categories(s))
     foreach (var d in all.Where(d => d.Category == cat.Name))
     {
         string range = d.Choices is { } c ? string.Join(" · ", c)
-            : !double.IsNaN(d.Min) ? $"{d.Min:N0} – {d.Max:N0}{d.Unit}" : "";
+            : !double.IsNaN(d.Min) ? $"{d.Min.ToString("N0", CultureInfo.InvariantCulture)} – {d.Max.ToString("N0", CultureInfo.InvariantCulture)}{d.Unit}" : "";
         var notes = new List<string>();
         if (d.Experimental) notes.Add("**experimental**");
         if (d.Dangerous) notes.Add("**caution**");
