@@ -12,6 +12,9 @@
     <ProjectReference Include="..\Osmium.Desktop\Osmium.Desktop.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Osmium.Cli.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- `osmium license` prints these, so the single-file executable carries its own notices. -->
     <EmbeddedResource Include="..\..\LICENSE" LogicalName="Osmium.LICENSE.txt" />
     <EmbeddedResource Include="..\..\THIRD-PARTY-NOTICES.md" LogicalName="Osmium.THIRD-PARTY-NOTICES.txt" />

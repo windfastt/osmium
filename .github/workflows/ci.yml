@@ -36,6 +36,7 @@ jobs:
       - run: dotnet build Osmium.sln -c Release
       - run: dotnet test -c Release --project tests/Osmium.Core.Tests
       - run: dotnet test -c Release --project tests/Osmium.Desktop.Tests
+      - run: dotnet test -c Release --project tests/Osmium.Cli.Tests
       - name: Product page matches tools/site (python3 tools/site/build.py regenerates it)
         run: python3 tools/site/build.py --check
       - name: Settings reference matches the code (tools/settingsdoc regenerates docs/SETTINGS.md)
@@ -77,6 +78,7 @@ jobs:
         run: |
           dotnet test -c Release --project tests/Osmium.Core.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet test -c Release --project tests/Osmium.Desktop.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet test -c Release --project tests/Osmium.Cli.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Publish, portable ZIP, installer
         shell: pwsh
@@ -87,7 +89,7 @@ jobs:
       - name: UI self-test (real work, every page and dialog, light and dark)
         if: matrix.arch == 'x64'
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: |
           $exe = "artifacts/publish/win-x64/Osmium.App.exe"
           foreach ($mode in @('', 'dark')) {
@@ -156,6 +158,7 @@ jobs:
         run: |
           dotnet test -c Release --project tests/Osmium.Core.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet test -c Release --project tests/Osmium.Desktop.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet test -c Release --project tests/Osmium.Cli.Tests; if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Publish (no installer)
         shell: pwsh

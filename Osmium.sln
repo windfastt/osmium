@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Osmium.Desktop", "src\Osmiu
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Osmium.Desktop.Tests", "tests\Osmium.Desktop.Tests\Osmium.Desktop.Tests.csproj", "{08A285EF-7B35-4631-82D0-E50807E7B9FD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Osmium.Cli.Tests", "tests\Osmium.Cli.Tests\Osmium.Cli.Tests.csproj", "{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -101,6 +103,18 @@ Global
 		{08A285EF-7B35-4631-82D0-E50807E7B9FD}.Release|x64.Build.0 = Release|Any CPU
 		{08A285EF-7B35-4631-82D0-E50807E7B9FD}.Release|x86.ActiveCfg = Release|Any CPU
 		{08A285EF-7B35-4631-82D0-E50807E7B9FD}.Release|x86.Build.0 = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|x64.Build.0 = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Debug|x86.Build.0 = Debug|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|x64.ActiveCfg = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|x64.Build.0 = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|x86.ActiveCfg = Release|Any CPU
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -112,5 +126,6 @@ Global
 		{400E2545-5F44-47C2-943F-1BA79584CBFC} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{9F2EE399-B683-441D-A756-6E59D051A45C} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{08A285EF-7B35-4631-82D0-E50807E7B9FD} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{3CDD3EA9-92FE-47E6-BF73-4C446076BBE0} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal
