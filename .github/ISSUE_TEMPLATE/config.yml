@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/windfastt/osmium/security/policy
+    about: Report security problems privately, as the security policy describes. Please do not open a public issue for them.
+  - name: Website
+    url: https://windfastt.github.io/osmium/
+    about: What Osmium does, benchmark results and downloads.
+  - name: Documentation
+    url: https://github.com/windfastt/osmium#documentation
+    about: Changelog, roadmap, settings reference, archive format and architecture.

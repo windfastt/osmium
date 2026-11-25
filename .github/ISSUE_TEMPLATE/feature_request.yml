@@ -1,0 +1,64 @@
+name: Feature request
+description: Suggest a new feature, a change to an existing one or a documentation improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the suggestion. Please check the [roadmap](https://github.com/windfastt/osmium/blob/main/ROADMAP.md) and the [existing issues](https://github.com/windfastt/osmium/issues?q=is%3Aissue) first.
+
+        If you would like to build a larger change yourself, agree on the approach here before you open a pull request; see [CONTRIBUTING.md](https://github.com/windfastt/osmium/blob/main/CONTRIBUTING.md). Never attach private files.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should Osmium do? Describe the behavior you would like to see.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Choose every area the change touches.
+      multiple: true
+      options:
+        - Compression (profiles, codecs, filters, planner)
+        - Archive format (.osa)
+        - App (window, tray menu, settings)
+        - Explorer integration
+        - Command line
+        - Cluster (several PCs)
+        - Installer or packaging
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways to solve the problem, including any workaround you use today.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Measurements or examples
+      description: For compression ideas, name the kind of data, the tools and settings, and the sizes and times you measured. Describe files instead of attaching them.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I checked the roadmap and the existing issues for the same request.
+          required: true

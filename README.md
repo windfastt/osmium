@@ -1,162 +1,277 @@
-# Osmium
+<p align="center">
+  <img src="docs/img/logo.svg" width="88" height="88" alt="">
+</p>
+<h1 align="center">Osmium</h1>
+<p align="center">A file compressor for Windows that plans a compression pipeline for each kind of data.</p>
+<p align="center">
+  <a href="https://github.com/windfastt/osmium/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/windfastt/osmium/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3a2a96" alt="License: MIT"></a>
+  <a href="https://github.com/windfastt/osmium/releases/latest"><img src="https://img.shields.io/github/v/release/windfastt/osmium?color=3a2a96" alt="Latest release"></a>
+</p>
+<p align="center">
+  <a href="https://windfastt.github.io/osmium/">Website</a> ·
+  <a href="https://github.com/windfastt/osmium/releases/latest">Download</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-**A Windows file compressor that lives in your notification area and goes as far as you let it to make files smaller.**
+Osmium packs files and folders into `.osa` archives, a format only Osmium reads. It works out what each file
+contains, groups files by kind of data and chooses filters and a codec for each group; by default it decodes and
+checks every block before writing it. It runs as a notification-area app with Explorer menu entries and as the
+`osmium` command-line tool, and it is free software under the MIT License.
 
-Osmium (named after the densest natural element) picks a compression pipeline *per group of files*: it detects what
-each file is, applies reversible pre-processing (x86/ARM64 branch converters, delta/transpose for records, audio and
-image predictors, a text dictionary), races candidate codecs on samples, hill-climbs their parameters, and can bring
-in an original context-mixing codec and other PCs on your network when you ask for the smallest output it can find.
+## Highlights
 
-| | |
-|---|---|
-| **Tray app** | progress ring in the notification area, quick profile switch, pause/resume, recent jobs, watch folders |
-| **Explorer** | right-click → *Osmium* → *Add to archive…* / *Compress to .osa (profile)*; *Extract here / to folder / Test* on `.osa` |
-| **Profiles** | Store · Fast · Balanced · Max · Ultra · Insane · Exhaustive (experimental) |
-| **Codecs** | Osmium CM (context mixing), LZMA, PPMd, Zstandard (long range), Brotli, BZip2, Deflate, Store |
-| **Filters** | x86/x64, ARM64, delta, byte-plane transpose, 16-bit PCM (+LMS), 2-D image (MED), text dictionary + capitalization |
-| **Per-file control** | right-click a file → *Tune…* to build its pipeline by hand, or *Deep auto-tune*; save as a rule |
-| **Rules** | JSON rules: force/forbid pipelines, override parameters (`"lzma.dict": "256M"`), store, exclude, own block |
-| **Dedup** | whole-file (SHA-256 confirmed) and content-defined chunking (FastCDC) |
-| **Multi-PC** | lend idle PCs as workers; trials and heavy blocks are distributed over an authenticated, encrypted channel |
-| **Safety** | by default every block is decoded and compared before writing; atomic writes; hashes on every block and file; AES-256-GCM encryption |
-| **Settings** | 63 settings in 11 categories (searchable, [reference](docs/SETTINGS.md)) plus 37 codec/filter parameters; an *Experimental* page behind a master switch |
+- **A pipeline for each kind of data.** Files are sorted by content (text, x86/x64 and ARM64 code, fixed-size records,
+  16-bit audio, bitmaps, other binary data, already-compressed files). Each group gets optional reversible filters and
+  one of eight codecs: Osmium CM (context mixing), LZMA, PPMd, Zstandard, Brotli, BZip2, Deflate or Store.
+- **Seven profiles.** Store, Fast and Balanced (default) use fixed choices; Max trial-compresses candidates on samples;
+  Ultra and Insane also tune parameters and may use context mixing, which extracts slowly. Exhaustive is experimental.
+- **Checked before it is written.** By default every block is decoded and compared with its input before it is
+  written. Archives are written to a temporary file, read back and only then renamed into place.
+- **Optional password encryption.** AES-256-GCM with a key from PBKDF2-HMAC-SHA512 (600,000 iterations by default).
+  File names, sizes and times are encrypted too; the Osmium version that wrote the archive, the key-derivation
+  settings and the number and sizes of its blocks stay visible. A lost password cannot be recovered.
+- **Duplicates stored once:** whole files from Balanced to Ultra, content-defined chunks in Insane and Exhaustive.
+- **Windows integration.** A notification-area app with a progress ring, Explorer menu entries, the `.osa` file
+  association and optional watch folders, plus the `osmium` command-line tool, also available as a single file.
+- **Per-file control.** JSON rules force or forbid pipelines, override codec parameters, and store or exclude
+  files. In the app, right-click a file on the *Compress* page for *Tune…* or *Deep auto-tune…*.
+- **Optional help from other PCs.** Off by default. PCs that share a pairing key can run trial compressions and
+  some blocks for your jobs. Your PC decodes and checks every block they return and recomputes about 5 % of their
+  trial results; a worker caught returning a wrong result is not used for the rest of the job.
 
 ## Results
 
-Archive size as a share of the original (smaller is better), on a 4-core machine; every archive was unpacked and
-compared file by file. Full tables, commands and versions: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Osmium 0.1.1 and eight other tools in nine settings, on two folders. Each cell gives the archive size as a share of
+the original (smaller is better) and, below it, the wall-clock time to compress / extract.
 
-| | Mixed folder (16 MiB) | Windows application folder (124 MiB) |
-|---|---|---|
-| `zip -9` | 47.7 % | 41.0 % |
-| `tar \| xz -9e` | 36.4 % | 28.8 % |
-| 7-Zip LZMA2 `-mx=9` | 34.8 % | 28.2 % |
-| `tar \| lrzip -z` | 31.7 % | 26.5 % |
-| ZPAQ `-m5` | 31.8 % | **25.6 %** |
-| Osmium **Max** | 32.3 % · 10.5 s | 28.8 % · 2 min 17 s |
-| Osmium **Ultra** | 29.6 % · 5 min 40 s | 27.3 % · 18 min 47 s |
-| Osmium **Insane** | **29.5 %** · 17 min 29 s | not run |
+| Tool and setting | Mixed folder, 16.0 MiB | Program files, 124.0 MiB |
+|---|---:|---:|
+| Osmium Insane | **29.52 %**<br><sub>17 min 29 s / 33.9 s</sub> | not run |
+| Osmium Ultra | 29.64 %<br><sub>5 min 40 s / 28.0 s</sub> | 27.30 %<br><sub>18 min 47 s / 7 min 39 s</sub> |
+| lrzip `-z -L 9`, on a tar | 31.66 %<br><sub>24.3 s / 26.4 s</sub> | 26.49 %<br><sub>68.2 s / 63.8 s</sub> |
+| ZPAQ `-m5` | 31.78 %<br><sub>40.9 s / 42.4 s</sub> | **25.61 %**<br><sub>2 min 38 s / 2 min 31 s</sub> |
+| Osmium Max | 32.28 %<br><sub>10.5 s / 0.5 s</sub> | 28.83 %<br><sub>2 min 17 s / 5.2 s</sub> |
+| Osmium Balanced (default) | 33.46 %<br><sub>6.9 s / 0.7 s</sub> | 29.06 %<br><sub>69.4 s / 3.0 s</sub> |
+| 7-Zip LZMA2 `-mx=9`, 256 MB dictionary | 34.82 %<br><sub>2.0 s / 0.3 s</sub> | 28.19 %<br><sub>33.0 s / 1.9 s</sub> |
+| xz `-9e -T1`, on a tar | 36.41 %<br><sub>6.0 s / 0.3 s</sub> | 28.81 %<br><sub>65.4 s / 2.1 s</sub> |
+| Brotli `-q 11 -w 24`, on a tar | 38.75 %<br><sub>38.0 s / 0.1 s</sub> | 30.53 %<br><sub>5 min 09 s / 0.5 s</sub> |
+| Zstandard `--ultra -22 --long=31 -T1`, on a tar | 41.85 %<br><sub>5.6 s / &lt; 0.1 s</sub> | 31.21 %<br><sub>53.8 s / 0.2 s</sub> |
+| 7-Zip PPMd, order 32, 1 GB | 44.09 %<br><sub>3.9 s / 3.9 s</sub> | 35.55 %<br><sub>27.8 s / 28.0 s</sub> |
+| bzip2 `-9`, on a tar | 47.62 %<br><sub>1.1 s / 0.8 s</sub> | 40.96 %<br><sub>9.3 s / 4.4 s</sub> |
+| zip `-r -9` (extracted with 7-Zip) | 47.70 %<br><sub>1.7 s / 0.1 s</sub> | 41.01 %<br><sub>10.6 s / 0.9 s</sub> |
+| Osmium Fast | 49.12 %<br><sub>0.5 s / 0.2 s</sub> | 38.91 %<br><sub>1.3 s / 0.3 s</sub> |
 
-* In our mixed-folder test Osmium made the smallest archive: Insane is 18.9 % smaller than `xz -9e` and 6.8 % smaller than lrzip, because
-  every kind of data gets its own pipeline (text, x64 code, .NET IL, records, audio, images).
-* On a folder of program files ZPAQ -m5 and lrzip are still 6.2 % and 3.0 % smaller than Ultra: their x86 models are
-  stronger than Osmium CM's today. Max matches `xz -9e` there, since both are LZMA with a branch filter.
-* Ultra and Insane may choose context mixing, which extracts about as slowly as it compresses (one thread per
-  block). After compressing, Osmium reports the expected extraction time and memory; `osmium info` shows them for any archive.
+**Conditions.** One run per folder on 24 November 2026, on one machine (4 vCPU Intel Xeon at 2.3 GHz, 16 GB RAM,
+Linux 6.18, .NET 10), not on Windows. Tool versions and the compression commands are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md); [tools/crosscheck.py](tools/crosscheck.py), which ran the comparison, has
+the exact compression and extraction commands. The *mixed folder* (33 files, 16.0 MiB) holds license texts (some
+duplicated), a CSV, a .NET assembly, two x64 ELF binaries, generated 12-byte records, a WAV, a BMP, and PNG and gzip
+files. *Program files* (284 files, 124.0 MiB) is Osmium's own self-contained Windows x64 build, mostly .NET
+ReadyToRun DLLs. xz and Zstandard ran single-threaded (their multi-threaded modes lose ratio), the other tools with
+their default threading and Osmium on all four cores, so compression times are not like for like. Tools marked
+"on a tar" were timed on a ready-made tar; making and unpacking the tar is not included. Every output was unpacked
+and checked against the original: 27 of 27 runs were identical. Insane was not run on the program files (the script
+skips it above 64 MiB). Other data, versions and hardware will give different results.
 
-## Install
+- Mixed folder: Insane's archive is 18.9 % smaller than xz's and 6.8 % smaller than lrzip's (the smallest other
+  result), but Insane took 17 min 29 s to compress against 24.3 s for lrzip. Fast is larger than zip there.
+- Program files: ZPAQ and lrzip made smaller archives than Ultra (Ultra's is 6.6 % larger than ZPAQ's). Max is
+  0.05 % larger than xz, and Balanced, the default, is larger than xz and 7-Zip LZMA2.
+- Context mixing decodes about as fast as it encodes, one thread per block: Ultra's archive of the program files took
+  7 min 39 s to extract, against 2.1 s for xz and 2 min 31 s for ZPAQ. After compressing, `osmium` prints an
+  estimate of the extraction time and memory, and `osmium info` shows it for any archive.
 
-* **Installer:** `Osmium-<version>-win-x64-setup.exe` (or `-arm64`) from the CI artifacts / Releases. Per-user by
-  default (no admin prompt); choose *Install for all users* to install machine-wide. Tasks: start with Windows,
-  Explorer menu, `.osa` association, Send To, add `osmium` to PATH, firewall rule for cluster workers.
-* **Portable:** unzip `Osmium-<version>-win-x64-portable.zip`; settings live in `.\data` (marker file `osmium.portable`).
-* **CLI only:** the single-file `osmium-<version>-win-x64.exe` also works as a stand-alone extractor.
+## Download
 
-Windows 10 1809+ or Windows 11, x64 or ARM64. No separate .NET install is needed.
+Files in the [latest release](https://github.com/windfastt/osmium/releases/latest), where `<arch>` is `x64` or `arm64`:
 
-> The builds are not code-signed yet, so Windows SmartScreen may say *"Windows protected your PC"* the first time:
-> choose **More info → Run anyway**. The installer script already supports signing (`ISCC /DSignToolName=…` with an
-> Inno Setup `SignTool` definition) once a code-signing certificate is available.
+| File | What it is |
+|---|---|
+| `Osmium-<version>-win-<arch>-setup.exe` | Installer for the app and the `osmium` command-line tool |
+| `Osmium-<version>-win-<arch>-portable.zip` | The app and the command-line tool to unzip anywhere; settings stay in a `data` folder next to them |
+| `osmium-<version>-win-<arch>.exe` | The command-line tool alone, as one self-contained file; enough to extract archives on a PC without Osmium |
+| `SHA256SUMS.txt` | SHA-256 checksums of the files above |
 
-## Use
+The installer requires Windows 10 version 1809 or later, or Windows 11; no separate .NET installation is needed. It
+installs for the current user without an admin prompt (*Install for all users* needs admin rights). *Start with
+Windows*, the Explorer menu and the `.osa` association are ticked by default; a desktop icon, *Send to* (per-user
+installs only), adding `osmium` to PATH and a firewall rule for the cluster (all-users installs only) are not.
+Uninstalling removes Osmium's registrations and asks before deleting settings, rules, job history and logs.
 
-**Tray / window** — drop files on the *Compress* page, pick a profile, press *Compress*. Right-click a file to patch
-its pipeline. *Jobs* shows progress, ratio, ETA and the planner's log; *Archives* browses, tests and extracts;
-*Lab* benchmarks every candidate on one file; *Rules* edits per-file rules; *Cluster* manages workers.
+**Testing.** Automated tests run on Linux and on GitHub's Windows Server x64 runners, not on Windows 10 or on a
+Windows 11 x64 PC. The ARM64 downloads of 0.1.1 were built on x64 and not run in CI; on `main`, CI also tests the
+engine and the command-line tool on Windows 11 ARM64.
 
-**Command line**
+**Not code-signed yet.** Windows SmartScreen may warn before the installer or the program runs. You can first compare
+the file's checksum with `SHA256SUMS.txt` from the same release (in PowerShell: `Get-FileHash <file>`): a match shows
+that the file is complete and is the one attached to the release, but it is not a signature. Running unsigned software
+is your decision. Signed builds are on the [roadmap](ROADMAP.md), once a code-signing certificate is available.
+
+## Quick start
+
+**App.** Osmium runs in the notification area. Click its icon, drop files or folders on the *Compress* page, choose a
+profile and press *Compress*. *Jobs* shows progress and the planner's decisions; *Archives* opens, tests and extracts
+`.osa` files. To encrypt, tick *Encrypt (AES-256, names hidden)*.
+
+**Explorer.** Right-click files or folders and choose *Osmium* → *Add to archive…* or *Compress to .osa (Balanced)*.
+Right-click an `.osa` file for *Extract here*, *Extract to folder* or *Test archive*. On Windows 11 these entries are
+under *Show more options*.
+
+**Command line.** `osmium` is on PATH only if you ticked that option in the installer.
 
 ```powershell
-osmium a backup.osa C:\Projects --profile ultra            # compress
-osmium a logs.osa D:\logs --rules rules.json --explain       # with per-file rules, show decisions
-osmium a secret.osa docs --password-stdin                    # AES-256-GCM, file names hidden
-osmium x backup.osa C:\Restore                               # extract (verified)
-osmium t backup.osa                                          # full test: every block and file hash
-osmium info backup.osa                                       # pipelines, sizes, extraction time and memory
-osmium lab big.wav --profile insane                          # benchmark all candidates on one file
-osmium tune game.pak --export-rule rules.json                # search the best pipeline, save it as a rule
-osmium a out.osa data --pipeline "delta(stride=4)+lzma(dict=128M,lc=0,lp=2,pb=2)"
+osmium a backup.osa C:\Projects --profile ultra    # compress (the default profile is balanced)
+osmium t backup.osa                                # test: decode every block, check every file's hash
+osmium x backup.osa C:\Restore                     # extract; keeps existing files, renames the extracted copy
+osmium info backup.osa                             # pipelines, sizes, extraction time and memory
+osmium a logs.osa D:\logs --rules rules.json --explain   # per-file rules; show the decisions
+osmium help                                        # every command and option
 ```
 
-**Rules** (`%APPDATA%\Osmium\rules.json`, or `--rules`):
+`--skip` makes `x` skip files that already exist, and `--overwrite` replaces them. To encrypt on the command line,
+pipe the password to `--password-stdin`; `x`, `t` and `l` ask for it when needed.
+A rules file looks like this. The app keeps its rules in `%APPDATA%\Osmium\rules.json` (portable: `data\rules.json`);
+the command-line tool reads only the file given with `--rules`. Check one with `osmium rules check rules.json`.
 
 ```json
 { "rules": [
-  { "id": "logs", "match": { "globs": ["**/*.log"], "minSize": 1048576 },
-    "actions": { "params": { "ppmd.order": "16", "lzma.dict": "256M" } } },
+  { "id": "logs", "match": { "globs": ["**/*.log"] }, "actions": { "params": { "lzma.dict": "256M" } } },
   { "id": "game-data", "match": { "path": "data/level01.pak" },
-    "actions": { "pipeline": "delta(stride=4)+cm(mem=24)", "solid": "own" } },
-  { "id": "no-cm-for-exe", "match": { "kinds": ["CodeX86"] }, "actions": { "forbidCodecs": ["cm"] } },
-  { "id": "skip-temp", "match": { "globs": ["**/*.tmp", "node_modules/**"] }, "actions": { "exclude": true } }
+    "actions": { "pipeline": "delta(stride=4)+lzma", "solid": "own" } },
+  { "id": "skip-temp", "match": { "globs": ["**/*.tmp"] }, "actions": { "exclude": true } }
 ] }
 ```
 
-**Several PCs**
+### Using several PCs (optional)
+
+Off by default. PCs that share a pairing key can run trial compressions for your jobs and, while your own cores are
+busy, blocks whose codec decodes much faster than it encodes, such as LZMA and Zstandard. The automated test runs over
+loopback on one machine; LAN discovery and use across several PCs are not covered. In the app, save the key on the
+*Cluster* page, then turn on *Lend this PC to the cluster* (tray menu) on the helpers and *Use cluster workers for my
+jobs* (Settings) where you compress. On the command line:
 
 ```powershell
-osmium keygen                                             # once; share the OSM1-… key
-osmium worker --key OSM1-…                                 # on each helper PC (or: tray → Lend this PC)
+osmium keygen                                  # once: prints a new OSM1-… key; keep it secret
+osmium worker --key OSM1-…                     # on each helper PC
 osmium a big.osa D:\data --profile insane --workers auto --cluster-key OSM1-…
 ```
 
-Workers authenticate with the key (mutual HMAC over an ECDH handshake, AES-256-GCM traffic), must run the same engine
-version, and never receive file names — but they do see file **contents**, so only pair machines you trust. Every
-block a worker compresses is decoded and compared locally before it is written, and trial results from workers are
-spot-checked; a worker that returns a wrong result is quarantined. Ports: TCP 46510, UDP 46511.
+`osmium worker` and `osmium a` also read the key from the `OSMIUM_CLUSTER_KEY` environment variable, which keeps it
+off the command line, where other programs on the PC can read it.
+
+- Both sides prove they hold the key (HMAC-SHA256 over an ECDH P-256 handshake), and job data is encrypted with
+  AES-256-GCM. PC names, core counts and memory sizes are sent unencrypted during the handshake. A helper sends its
+  own to any PC on the network that presents the cluster's identifier (visible in discovery broadcasts), before that
+  PC has proven it holds the key.
+- Workers see the content of the samples and blocks they compress, never file names or the password: pair only PCs
+  you trust. Encrypted jobs stay local unless you allow them (`--allow-remote-encrypted`, or a setting in the app).
+  Your PC decodes and checks every block a worker returns and spot-checks about 5 % of its trial results (none for
+  Deflate or Brotli); a worker caught returning a wrong result is not used for the rest of the job.
+- Helper PCs must accept TCP 46510 (changeable) and, for discovery (`--workers auto`), UDP 46511 (IPv4 broadcast on
+  the local network). The installer's optional firewall rule covers only the tray app, on private networks; in 0.1.1
+  it opens TCP 46510 only.
 
 ## How it works
 
-`scan → analyze (signatures, entropy, stride) → rules → dedup → group by data class → aligned solid blocks →
-choose a pipeline per group (sample trials with successive halving, parameter hill-climbing, optional top-2 race)
-→ compress blocks in parallel within a memory budget (locally or on workers) → decode-and-compare every block →
-write frames in order → re-read the archive → atomic rename`.
+1. **Analyze.** Each file is identified by its signature and by statistics of its content, such as entropy and stride.
+2. **Group.** Rules apply, duplicates are set aside, and files of the same kind go into solid blocks.
+3. **Try candidates** (Max and higher; lower profiles use fixed choices). Candidate pipelines are compressed on
+   samples of each group; higher profiles try more of them and move the best on to larger samples.
+4. **Search parameters** (Ultra and higher). From the winner, Osmium tries one step up or down on each parameter and
+   adding or removing a filter, keeping what helps. Insane also compresses each block with the best two pipelines
+   and keeps the smaller result.
+5. **Compress, verify, commit.** Blocks are compressed in parallel within a memory budget. By default each block is
+   decoded and compared with its input before it is written, and a block that does not get smaller is stored. The
+   archive is written to a temporary file, read back and renamed into place. `osmium explain <archive>` shows the
+   planner's decisions, which the archive stores by default (`--no-plan-log` leaves them out); `osmium a … --explain`
+   prints them while compressing.
 
-* [docs/BLUEPRINT.md](docs/BLUEPRINT.md) — architecture
-* [docs/FORMAT.md](docs/FORMAT.md) — the `.osa` binary format
-* [docs/SETTINGS.md](docs/SETTINGS.md) — every setting, profile and codec/filter parameter (generated from the code)
-* [docs/PLAN.md](docs/PLAN.md) — how it was planned (three architect agents + a critic) and built
-* [docs/IMPROVISATION.md](docs/IMPROVISATION.md) — critic findings, what changed, measurements, backlog
-* [docs/CHECKLIST.md](docs/CHECKLIST.md) — status of every feature
-* [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — comparison with eight other compressors
-* [ROADMAP.md](ROADMAP.md) — what comes next, starting with the measured gaps
-* [CHANGELOG.md](CHANGELOG.md) — release notes
-* `docs/index.html` — the product page, served by GitHub Pages from `/docs`
+## Documentation
 
-## Build
+| Document | Contents |
+|---|---|
+| [Changelog](CHANGELOG.md) | What changed in each release; the 0.2.0 section is unreleased |
+| [Roadmap](ROADMAP.md) | What 0.2.0 is building and what is planned after it |
+| [Benchmarks](docs/BENCHMARKS.md) | Method, tool versions, commands and full results of the 0.1.1 comparison |
+| [Settings reference](docs/SETTINGS.md) | Every setting, profile and codec or filter parameter, generated from the code |
+| [Archive format](docs/FORMAT.md) | The `.osa` 1.0 format: header, frames, pipelines, index, encryption, integrity checks |
+| [Architecture](docs/BLUEPRINT.md) | How Osmium is built: container, codecs, filters, analysis, planner, cluster, app, security |
+| [Contributing](CONTRIBUTING.md) | How to build and test, and the rules for changes |
+| [Security policy](SECURITY.md) | How to report a vulnerability privately |
+| [Third-party notices](THIRD-PARTY-NOTICES.md) | Third-party components and their license texts |
+
+## Building from source
+
+You need a .NET 10 SDK (10.0.100 or later). Everything builds on Windows and Linux; the app runs only on Windows.
+The .NET SDK collects usage data by default (this is the SDK, not Osmium); set `DOTNET_CLI_TELEMETRY_OPTOUT=1` to
+turn it off, as CI does.
 
 ```bash
-dotnet build Osmium.sln -c Release                       # any OS with the .NET 10 SDK
-dotnet test -c Release --project tests/Osmium.Core.Tests     # 60 engine, container, planner and cluster tests
-dotnet test -c Release --project tests/Osmium.Desktop.Tests  # 15 settings, IPC, jobs, shell-registration tests
+dotnet build Osmium.sln -c Release
+dotnet test -c Release --project tests/Osmium.Core.Tests      # codecs, filters, format, planner, cluster
+dotnet test -c Release --project tests/Osmium.Desktop.Tests   # settings, jobs, IPC, Explorer registration
 ```
 
-```powershell
-pwsh build/publish.ps1 -Arch x64            # Windows: publish + portable ZIP + installer (Inno Setup 6)
-```
+On Windows, `pwsh build/publish.ps1 -Arch x64` (or `-Arch arm64`, with optional `-Version 1.2.3` and
+`-SkipInstaller`) writes the self-contained app and command-line tool, the single-file tool, the license files, the
+portable ZIP and the installer to `artifacts/`. If Inno Setup 6 is missing, the script installs it with Chocolatey.
 
-CI (`.github/workflows/ci.yml`) runs the tests on Linux and Windows (including a golden-hash test that proves the
-context-mixing codec produces identical output on both), publishes x64 and ARM64, renders the app's pages and dialogs to
-PNG with `Osmium.App.exe --selftest-ui` (light and dark), smoke-tests the CLI, builds the installers and publishes a
-release for `v*` tags.
+CI builds and tests on Linux, Windows x64 and natively on Windows 11 ARM64, checks `docs/index.html` and
+`docs/SETTINGS.md` against their generators, builds the downloads, and on Windows x64 runs a UI self-test (real work
+on a generated sample folder, every page and dialog in light and dark) and a command-line round trip. Golden vectors
+pin the bytes Osmium CM and every filter produce for fixed inputs. A `v*` tag publishes a release with `SHA256SUMS.txt`.
 
-## Status and limitations
+## Status
 
-* The engine, container, planner, cluster, CLI and the desktop logic are tested on Linux in this repository.
-  The WinForms UI and the installer compile here but are exercised on Windows by CI (self-test screenshots,
-  installer compile); first run on a real desktop is the remaining validation step.
-* Windows 11 shows the Explorer verbs under *Show more options* (a top-level entry needs a signed MSIX sparse package).
-* Already-compressed media (JPEG, PNG, MP4, ZIP) is stored as-is; recompressing them losslessly (preflate/packJPG
-  style) is on the backlog.
-* On program files (EXEs and DLLs), ZPAQ -m5 and lrzip -z still produce smaller archives than Ultra; see Results.
-* Osmium writes and reads its own `.osa` format only.
+The latest release is **0.1.1** (24 November 2026). **0.2.0** is in progress on `main` and not in any download yet;
+builds from `main` still report 0.1.1. The work includes license texts in every download and `osmium license`, the UDP
+firewall rule, app fixes and better handling of archives from newer versions; still being built are a context-mixing
+codec for x86/x64 code, a cheaper parameter search and `osmium salvage` for damaged archives. See the
+[roadmap](ROADMAP.md) and the unreleased section of the [changelog](CHANGELOG.md).
 
-## License
+Limitations today:
+- Osmium reads and writes only its own `.osa` format.
+- Already-compressed files (JPEG, PNG, MP4, ZIP, 7z and similar) are stored as they are; recompressing them is planned.
+- Archives that use context mixing (possible from Ultra up) extract slowly.
 
-MIT — see [LICENSE](LICENSE). Osmium is provided "as is", without warranty of any kind; keep backups and test archives
-(`osmium t`) before deleting originals. The downloads include third-party components under their own licenses, listed
-with their full texts in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); every download carries that file and
-`osmium license` prints it.
+## License and legal
 
-Windows and .NET are trademarks of the Microsoft group of companies. 7-Zip, ZPAQ, xz, Zstandard, Brotli, bzip2, lrzip
-and Info-ZIP are names of their respective owners, used here only to identify those products in the benchmarks.
-Osmium is an independent project, not affiliated with or endorsed by any of them.
+Osmium is free software under the [MIT License](LICENSE), copyright Osmium contributors. From the license:
+
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+> THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+> TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+Keep backups, and test archives with `osmium t` before you delete the originals.
+
+**Third-party software.** The downloads contain ZstdSharp.Port, SharpCompress (with its Bouncy Castle notice), the
+LZMA SDK, System.IO.Hashing and the .NET runtimes (including Windows Forms), under their own licenses; the installer
+is built with Inno Setup. They are listed with their license texts in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+From 0.2.0 the installer and the portable ZIP contain `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` and the .NET
+runtime's `dotnet-LICENSE.txt` and `dotnet-THIRD-PARTY-NOTICES.txt`; the single-file tool prints its notices with
+`osmium license` and has the .NET runtime's license and notices attached to the release next to it. Osmium CM is a context-mixing codec that uses techniques described for the
+PAQ/lpaq family of compressors.
+
+**Trademarks.** Microsoft, Windows, SmartScreen, PowerShell and .NET are trademarks of the Microsoft group of
+companies. GitHub is a trademark of GitHub, Inc. Intel and Xeon are trademarks of Intel Corporation or its
+subsidiaries. Arm is a trademark of Arm Limited (or its subsidiaries). Linux, 7-Zip, ZPAQ, xz, Zstandard, Brotli,
+bzip2, lrzip, Info-ZIP, Inno Setup, Chocolatey and the other product, project and format names here are the property
+of their respective owners and are used only to identify them. Osmium is an independent project, not affiliated with,
+sponsored or endorsed by any of them, or by other projects named Osmium.
+
+**Privacy.** Osmium has no telemetry, analytics, crash reporting or update check; Windows itself may report crashes to
+Microsoft, depending on its diagnostic settings. It opens network connections only for the optional cluster, which is
+off by default, and then only to PCs that answer its local-network discovery or that you list yourself. While this PC
+lends itself to the cluster (*Lend this PC to the cluster*, or `osmium worker`), Osmium also listens on TCP 46510 (or
+the port you set) on all network interfaces and answers discovery probes made with the same key on UDP 46511;
+discovery sends IPv4 broadcasts to the local network. Settings, rules, job history and logs are stored in files
+(`%APPDATA%\Osmium` and `%LOCALAPPDATA%\Osmium`, or `data` in a portable copy); the cluster key is stored there in
+plain text, and `%APPDATA%` follows Windows roaming profiles where they are used. The
+[product page](https://windfastt.github.io/osmium/) sets no cookies, runs no analytics and loads nothing from other
+sites; the Markdown documents GitHub Pages renders from `/docs` load one script from cdnjs.cloudflare.com. The site is
+hosted on GitHub Pages, and GitHub may log visits.
