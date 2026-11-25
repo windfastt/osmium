@@ -135,7 +135,8 @@ public sealed class OsaReader : IDisposable
     /// <summary>Total file bytes ÷ stored raw block bytes. Large values mean heavy dedup — or an expansion bomb.</summary>
     public double ExpansionFactor => TotalStoredRaw == 0 ? 1 : (double)TotalUnpacked / TotalStoredRaw;
     public long MaxBlockDecodeMemory => Index.Blocks.Count == 0 ? 0 : Index.Blocks.Max(b => b.DecodeMemory + b.RawSize);
-    public double EstimatedDecodeSeconds => Index.Blocks.Sum(b => b.Descriptor.Spec.EstimateDecodeSeconds(b.RawSize));
+    /// <summary>Estimated decode time; blocks that need a newer Osmium cannot be decoded and are left out.</summary>
+    public double EstimatedDecodeSeconds => Index.Blocks.Where(b => b.Descriptor.NewerVersion is null).Sum(b => b.Descriptor.Spec.EstimateDecodeSeconds(b.RawSize));
 
     public void Dispose() => _handle.Dispose();
 }
