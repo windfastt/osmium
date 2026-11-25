@@ -28,7 +28,7 @@ internal sealed class ArchivesPage : UserControl, IPage
         _list.Dock = DockStyle.Fill;
         body.Controls.Add(_list);
         body.Controls.Add(_info);
-        Controls.Add(Ui.Page("Archives", "Browse, test and extract .osa archives. Every extracted file is verified against its stored hash.", body, tools, _path));
+        Controls.Add(Ui.Page("Archives", "List, test and extract .osa archives. Every extracted file is verified against its stored hash.", body, tools, _path));
     }
 
     public void Activated() { }
