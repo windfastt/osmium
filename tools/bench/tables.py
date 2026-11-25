@@ -15,9 +15,9 @@ NAMES = {
 
 
 DESC = {
-    "mixed-folder": ("Mixed folder", "20 license texts (4 of them duplicates) and a 1.3 MiB CSV; a .NET IL assembly (6.3 MiB) and two x64 ELF "
-                     "binaries; 1.2 MB of 12-byte telemetry records; a 16-bit stereo WAV; a 24-bit BMP; three PNG and three gzip files; "
-                     "an empty file and a file with a non-ASCII name."),
+    "mixed-folder": ("Mixed folder", "18 license texts (4 of them duplicates); a .NET IL assembly (6.3 MiB) and two x64 ELF binaries; three "
+                     "PNG and three gzip files; an empty file and a file with a non-ASCII name; and four files generated for the test: "
+                     "a 1.3 MiB CSV, 1.2 MB of 12-byte telemetry records, a 16-bit stereo WAV and a 24-bit BMP."),
     "windows-app": ("Windows application folder", "Osmium's own self-contained win-x64 publish output: 273 DLLs (.NET ReadyToRun "
                     "assemblies, which carry IL plus precompiled x64 code, and native runtime DLLs), 3 EXEs, 4 PDBs and 4 JSON files — "
                     "the kind of payload an installer ships."),
