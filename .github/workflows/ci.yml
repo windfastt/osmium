@@ -257,5 +257,5 @@ jobs:
             if [ -s notes.md ]; then gh release edit "$TAG" --title "$title" --notes-file notes.md $pre; fi
           else
             if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
-            gh release create "$TAG" dist/* --title "$title" "${notes[@]}" $pre
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$title" "${notes[@]}" $pre
           fi
