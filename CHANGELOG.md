@@ -8,7 +8,9 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 ### Fixed
 - **Licensing:** every download now carries the license texts it must: `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` (now
   with full license texts and copyright lines for ZstdSharp/Zstandard, SharpCompress and its Bouncy Castle notice, the
-  LZMA SDK and its NuGet packaging, System.IO.Hashing, the .NET runtimes and Windows Forms, and Inno Setup) and the
+  code SharpCompress carries from other projects (DotNetZip and zlib, Apache Ant's BZip2 with Ant's NOTICE lines,
+  Info-ZIP, UnRAR, PPMd, SharpZipLib's LZW decoder, ADC), the LZMA SDK and its NuGet packaging, System.IO.Hashing, the
+  .NET runtimes and Windows Forms, and Inno Setup) and the
   bundled .NET runtime's own license and notices (`dotnet-LICENSE.txt`, `dotnet-THIRD-PARTY-NOTICES.txt`). Before,
   the portable ZIP and the command-line executable shipped no license at all.
 - **Installer:** the optional firewall rule also opens UDP 46511, which LAN discovery of cluster workers needs.
