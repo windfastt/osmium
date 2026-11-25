@@ -26,6 +26,12 @@ public sealed class JobRequest
     public bool Overwrite { get; set; }
     public string? Name { get; set; }
     public string? Origin { get; set; }
+    /// <summary>Extract: the archive paths to extract; a folder's path selects everything below it. Null or empty:
+    /// everything (see <see cref="EntrySelection.Build"/>).</summary>
+    public List<string>? Include { get; set; }
+    /// <summary>Extract: an archive folder whose contents go to the output root, keeping the structure below it;
+    /// entries outside it are not extracted (see <see cref="EntrySelection.MapPath"/>). Null: paths as stored.</summary>
+    public string? IncludeBase { get; set; }
 }
 
 public sealed record JobSnapshot(
@@ -40,6 +46,11 @@ public sealed record JobSnapshot(
     /// stayed where they were. Null when the setting was off or the job did not get that far.
     /// </summary>
     public RecycleSummary? Recycle { get; init; }
+    /// <summary>For an extract job: how many of the entries it was asked for are not on disk afterwards for a reason
+    /// other than the user's choice (damaged, unsafe name, link, unsupported, newer version).</summary>
+    public int LeftOut { get; init; }
+    /// <summary>One line per entry counted in <see cref="LeftOut"/>, naming it and why.</summary>
+    public IReadOnlyList<string> LeftOutDetails { get; init; } = [];
 }
 
 /// <summary>
@@ -70,6 +81,8 @@ public sealed class JobManager : IDisposable
         public CancellationTokenSource Cts { get; } = new();
         public List<string> Log { get; } = [];
         public RecycleSummary? Recycle;
+        public int LeftOut { get; set; }
+        public IReadOnlyList<string> LeftOutDetails { get; set; } = [];
     }
 
     private readonly Func<OsmiumSettings> _settings;
@@ -140,7 +153,10 @@ public sealed class JobManager : IDisposable
             eta = TimeSpan.FromSeconds(j.Clock.Elapsed.TotalSeconds * (1 - j.Fraction) / j.Fraction);
         string name = j.Request.Name ?? (j.Request.Kind == JobKind.Compress ? Path.GetFileName(j.Request.Output) : Path.GetFileName(j.Request.Inputs.FirstOrDefault() ?? "?"));
         return new JobSnapshot(j.Id, name, j.Request.Kind, j.State, j.Phase, j.Fraction, j.In, j.Out, j.Total, j.Clock.Elapsed, eta,
-            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, withLog ? LogCopy(j) : []) { Recycle = j.Recycle };
+            j.Detail, j.Error, j.Output ?? j.Request.Output, j.Created, withLog ? LogCopy(j) : [])
+        {
+            Recycle = j.Recycle, LeftOut = j.LeftOut, LeftOutDetails = j.LeftOutDetails,
+        };
     }
 
     private static List<string> LogCopy(Job j)
@@ -454,7 +470,19 @@ public sealed class JobManager : IDisposable
         string archive = r.Inputs[0];
         j.Phase = "Opening";
         using var reader = OsaReader.Open(archive, () => r.Password ?? PasswordPrompt?.Invoke(archive));
-        j.Total = reader.TotalUnpacked;
+        // Extracting a selection: only the chosen entries, and with a base folder only what lies below it, relative to it.
+        Func<ArchiveEntry, bool>? selection = null;
+        Func<string, string?>? mapPath = null;
+        long size = reader.TotalUnpacked;
+        if (!test && (r.Include is { Count: > 0 } || !string.IsNullOrEmpty(r.IncludeBase)))
+        {
+            var include = EntrySelection.Build(r.Include);
+            string? includeBase = r.IncludeBase;
+            selection = e => include(e.Path);
+            if (!string.IsNullOrEmpty(includeBase)) mapPath = p => EntrySelection.MapPath(p, includeBase);
+            size = reader.Entries.Where(e => !e.IsDirectory && include(e.Path) && (mapPath is null || mapPath(e.Path) is not null)).Sum(e => e.Size);
+        }
+        j.Total = size;
         var progress = new Progress<ExtractProgress>(p =>
         {
             j.Phase = test ? "Testing" : "Extracting";
@@ -464,8 +492,8 @@ public sealed class JobManager : IDisposable
         });
         var res = test
             ? Extractor.Test(reader, progress, ct)
-            : Extractor.Extract(reader, r.Output, null, new ExtractOptions { Overwrite = r.Overwrite ? OverwriteMode.Overwrite : OverwriteMode.Rename }, progress, ct);
-        j.In = reader.TotalUnpacked;
+            : Extractor.Extract(reader, r.Output, selection, new ExtractOptions { Overwrite = r.Overwrite ? OverwriteMode.Overwrite : OverwriteMode.Rename, MapPath = mapPath }, progress, ct);
+        j.In = size;
         j.Out = reader.FileLength;
         j.Output = test ? archive : r.Output;
         lock (j.Log) j.Log.AddRange(res.Errors.Select(e => "error: " + e));
