@@ -60,6 +60,18 @@ public sealed record ExtractOptions
     public bool KeepBroken { get; init; }
     public int MaxParallelBlocks { get; init; } = Math.Max(1, Environment.ProcessorCount);
     public long MemoryBudget { get; init; } = MemoryBudgets.Default();
+    /// <summary>
+    /// Maps an entry's archive path to its output path relative to the destination ("docs/a.txt" → "a.txt"); null
+    /// leaves the entry out, and it is not counted anywhere. The result still goes through <see cref="PathSafety.Resolve"/>,
+    /// so it cannot lead outside the destination. Null: every entry keeps its archive path.
+    /// </summary>
+    public Func<string, string?>? MapPath { get; init; }
+    /// <summary>
+    /// <see cref="OverwriteMode.Overwrite"/> only: called with the full path of an existing file once its replacement
+    /// has been written and verified, just before it replaces the file. An exception from it fails that one file,
+    /// which is then not replaced. May be called from several threads at once.
+    /// </summary>
+    public Action<string>? BeforeReplace { get; init; }
     /// <summary>The Mark-of-the-Web to give extracted files instead of the archive's own (tests).</summary>
     internal string? Zone { get; init; }
     /// <summary>Writes the Mark-of-the-Web instead of <see cref="Extractor.WriteZoneIdentifier"/> (tests).</summary>
@@ -74,7 +86,15 @@ public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkippe
     public int FilesNeedingNewerVersion { get; init; }
     /// <summary>Problems that did not stop a file from being extracted, e.g. a Mark-of-the-Web that could not be written.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+    /// <summary>Entries (files and folders) not extracted because their path is unsafe (<see cref="PathSafety"/>);
+    /// each is also in <see cref="Errors"/>, and none is in <see cref="FilesFailed"/>.</summary>
+    public int SkippedUnsafe { get; init; }
+    /// <summary>The files written and kept, in archive order, with the path each was written to (empty when testing).</summary>
+    public IReadOnlyList<WrittenFile> Written { get; init; } = [];
 }
+
+/// <summary>A file extraction wrote: its entry and the full path it was written to (renamed when the name was taken).</summary>
+public sealed record WrittenFile(ArchiveEntry Entry, string Path);
 
 public static class MemoryBudgets
 {
@@ -97,6 +117,7 @@ public static class Extractor
         public int Remaining = entry.Segments.Count;
         public long[] SegmentFileOffsets { get; } = Offsets(entry);
         public bool Failed;
+        public bool Written;                               // verified and in place at Target
         public XxHash128? Running;                       // test mode: incremental hash in file order
         public int NextSeg;
         public Dictionary<int, byte[]>? Pending;           // test mode: segments that arrived early
@@ -119,21 +140,47 @@ public static class Extractor
     public static ExtractResult Test(OsaReader reader, IProgress<ExtractProgress>? progress, CancellationToken ct) =>
         Run(reader, null, null, new ExtractOptions(), progress, ct, test: true);
 
+    /// <summary>Decodes and verifies the entries <paramref name="selection"/> accepts (all when null) without writing files.</summary>
+    public static ExtractResult Test(OsaReader reader, Func<ArchiveEntry, bool>? selection, IProgress<ExtractProgress>? progress, CancellationToken ct) =>
+        Test(reader, selection, new ExtractOptions(), progress, ct);
+
+    /// <summary>As the public overload, decoding within <paramref name="options"/>' memory budget and parallelism.</summary>
+    internal static ExtractResult Test(OsaReader reader, Func<ArchiveEntry, bool>? selection, ExtractOptions options,
+        IProgress<ExtractProgress>? progress, CancellationToken ct) =>
+        Run(reader, null, selection, options, progress, ct, test: true);
+
     private static ExtractResult Run(OsaReader reader, string? destination, Func<ArchiveEntry, bool>? selection,
         ExtractOptions options, IProgress<ExtractProgress>? progress, CancellationToken ct, bool test)
     {
         var errors = new ConcurrentQueue<string>();
         var entries = reader.Entries.Where(e => selection?.Invoke(e) ?? true).ToList();
+        // Output paths relative to the destination: the archive's own, or what MapPath makes of them (null: left out).
+        var mapped = new Dictionary<ArchiveEntry, string>();
+        if (options.MapPath is { } map)
+        {
+            var kept = new List<ArchiveEntry>(entries.Count);
+            foreach (var e in entries)
+            {
+                if (map(e.Path) is not { } p) continue;
+                mapped[e] = p;
+                kept.Add(e);
+            }
+            entries = kept;
+        }
         var files = new List<FileState>();
-        int skipped = 0;
+        int skipped = 0, unsafePaths = 0;
         if (!test) Directory.CreateDirectory(destination!);
 
         // Directories first (also implicit parents), then file targets.
         foreach (var e in entries.Where(e => e.IsDirectory))
         {
             if (test) continue;
-            try { Directory.CreateDirectory(PathSafety.Resolve(destination!, e.Path)); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { errors.Enqueue($"{e.Path}: {ex.Message}"); }
+            try { Directory.CreateDirectory(PathSafety.Resolve(destination!, OutPath(e))); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (ex is CorruptDataException) unsafePaths++;
+                errors.Enqueue($"{e.Path}: {ex.Message}");
+            }
         }
         foreach (var e in entries.Where(e => !e.IsDirectory))
         {
@@ -142,7 +189,7 @@ public static class Extractor
             {
                 try
                 {
-                    target = PathSafety.Resolve(destination!, e.Path);
+                    target = PathSafety.Resolve(destination!, OutPath(e));
                     if (File.Exists(target))
                     {
                         switch (options.Overwrite)
@@ -156,6 +203,7 @@ public static class Extractor
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CorruptDataException)
                 {
+                    if (ex is CorruptDataException) unsafePaths++;
                     errors.Enqueue($"{e.Path}: {ex.Message}");
                     continue;
                 }
@@ -231,13 +279,17 @@ public static class Extractor
                 progress?.Report(new ExtractProgress(Interlocked.Read(ref done), total, filesDone, files.Count, null));
             });
 
-        if (!test) ApplyDirectoryMetadata(entries.Where(e => e.IsDirectory), destination!, options);
+        if (!test) ApplyDirectoryMetadata(entries.Where(e => e.IsDirectory), destination!, options, OutPath);
         progress?.Report(new ExtractProgress(total, total, filesDone, files.Count, null));
         return new ExtractResult(ok, failed, skipped, errors.ToList())
         {
             FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
             Warnings = [.. warnings],
+            SkippedUnsafe = unsafePaths,
+            Written = [.. files.Where(f => f.Written).Select(f => new WrittenFile(f.Entry, f.Target!))],
         };
+
+        string OutPath(ArchiveEntry e) => mapped.TryGetValue(e, out var p) ? p : e.Path;
 
         bool Complete(FileState f, byte[]? _)
         {
@@ -269,11 +321,22 @@ public static class Extractor
                 }
                 if (!test)
                 {
+                    if (options.Overwrite == OverwriteMode.Overwrite && options.BeforeReplace is { } beforeReplace && File.Exists(f.Target!))
+                    {
+                        try { beforeReplace(f.Target!); }
+                        catch (Exception ex)
+                        {
+                            errors.Enqueue($"{f.Entry.Path}: {ex.Message}");
+                            Cleanup(f);
+                            return false;
+                        }
+                    }
                     // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                     // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
                     if (zone is not null && writeZone(f.PartPath!, zone) is { } why) warnings.Enqueue(ZoneWarning(f.Entry.Path, why));
                     Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: options.Overwrite == OverwriteMode.Overwrite);
                     ApplyFileMetadata(f.Target!, f.Entry, options);
+                    f.Written = true;
                 }
                 return true;
             }
@@ -401,13 +464,14 @@ public static class Extractor
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
-    internal static void ApplyDirectoryMetadata(IEnumerable<ArchiveEntry> dirs, string root, ExtractOptions o)
+    /// <param name="outPath">The output path of each folder relative to <paramref name="root"/> (null: its archive path).</param>
+    internal static void ApplyDirectoryMetadata(IEnumerable<ArchiveEntry> dirs, string root, ExtractOptions o, Func<ArchiveEntry, string>? outPath = null)
     {
         foreach (var d in dirs.OrderByDescending(d => d.Path.Count(c => c == '/')))
         {
             try
             {
-                var p = PathSafety.Resolve(root, d.Path);
+                var p = PathSafety.Resolve(root, outPath?.Invoke(d) ?? d.Path);
                 if (o.RestoreTimes && d.ModifiedUtc is { } m) Directory.SetLastWriteTimeUtc(p, m);
                 if (o.RestoreAttributes && d.Attributes is { } a && OperatingSystem.IsWindows()) File.SetAttributes(p, a | FileAttributes.Directory);
             }

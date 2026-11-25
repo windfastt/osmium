@@ -1,0 +1,201 @@
+using Osmium.Core.Container;
+using Osmium.Core.Pipeline;
+
+namespace Osmium.Core.Archives;
+
+/// <summary>
+/// An .osa archive through the common interface: <see cref="OsaReader"/> lists it and <see cref="Extractor"/> tests and
+/// extracts it, verifying every file against its stored hash. The file list of an encrypted archive is encrypted, so
+/// the password is checked when it opens, before anything is written.
+/// </summary>
+public sealed class OsaArchiveSource : IArchiveSource
+{
+    private readonly ImportLimits _limits;
+    private readonly Dictionary<ArchiveEntry, int> _indexOf = [];
+
+    private OsaArchiveSource(OsaReader reader, ImportLimits limits)
+    {
+        Reader = reader;
+        _limits = limits;
+        var items = new List<ArchiveItem>(reader.Entries.Count);
+        for (int i = 0; i < reader.Entries.Count; i++)
+        {
+            var e = reader.Entries[i];
+            _indexOf[e] = i;
+            string? method = e.Segments.Count > 0 ? reader.Blocks[e.Segments[0].Frame].Descriptor.Spec.ToString() : null;
+            items.Add(new ArchiveItem(i, e.Path, e.IsDirectory, e.IsDirectory ? null : e.Size, null, e.ModifiedUtc, reader.Header.Encrypted, method));
+        }
+        Items = items;
+        Details = Describe(reader);
+    }
+
+    /// <summary>The archive's reader, for what only .osa has (its blocks, the planner log).</summary>
+    public OsaReader Reader { get; }
+
+    public string Path => Reader.Path;
+    public ArchiveKind Kind => ArchiveKind.Osa;
+    public string FormatName => $".osa {Osa.Major}.{Osa.Minor}";
+    public bool IsEncrypted => Reader.Header.Encrypted;
+    public long FileLength => Reader.FileLength;
+    public long? TotalSize => Reader.TotalUnpacked;
+    public bool ItemsComplete => true;
+    public IReadOnlyList<ArchiveItem> Items { get; }
+    public IReadOnlyList<ArchiveDetail> Details { get; }
+    public IReadOnlyList<string> Warnings => Reader.Warnings;
+
+    /// <summary>Opens an .osa archive (<see cref="ArchiveSources.Open"/> does this for .osa files).</summary>
+    public static OsaArchiveSource Open(string path, ArchiveOpenOptions options, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var reader = OsaReader.Open(path, options.Password);
+        try
+        {
+            CheckEntries(reader.Entries, options.Limits);
+            return new OsaArchiveSource(reader, options.Limits);
+        }
+        catch
+        {
+            reader.Dispose();
+            throw;
+        }
+    }
+
+    public ArchiveExtractResult Extract(string destination, ArchiveExtractRequest request, IProgress<ExtractProgress>? progress, CancellationToken ct)
+    {
+        var limits = request.Limits ?? _limits;
+        var selection = Selection(request.Indices, request.Select);
+        var map = PrefixMap(request.StripPrefix);
+        var chosen = Reader.Entries.Where(e => !e.IsDirectory && (selection?.Invoke(e) ?? true) && (map is null || map(e.Path) is not null)).ToList();
+        long output = chosen.Sum(e => e.Size);
+        CheckExpansion(output, limits);
+        CheckFreeSpace(destination, output, limits);
+        var result = Extractor.Extract(Reader, destination, selection, new ExtractOptions
+        {
+            Overwrite = request.Overwrite,
+            RestoreTimes = request.RestoreTimes,
+            RestoreAttributes = request.RestoreAttributes,
+            KeepBroken = request.KeepBroken,
+            MemoryBudget = limits.MemoryBudgetBytes,
+            MapPath = map,
+            BeforeReplace = request.BeforeReplace,
+        }, progress, ct);
+        // A file whose path is unsafe is refused before anything is written; every other chosen file that is neither
+        // written, skipped nor waiting for a newer Osmium failed (damaged, or an I/O error such as a folder that could
+        // not be created).
+        int unsafeFiles = chosen.Count(e => PathSafety.Validate(map?.Invoke(e.Path) ?? e.Path) is not null);
+        int renamed = result.Written.Count(w => w.Path != Expected(w.Entry));
+        return Map(result, chosen.Count - unsafeFiles - result.FilesSkipped, renamed);
+
+        string Expected(ArchiveEntry e)
+        {
+            try { return PathSafety.Resolve(destination, map?.Invoke(e.Path) ?? e.Path); }
+            catch (CorruptDataException) { return ""; }
+        }
+    }
+
+    public ArchiveExtractResult Test(Func<ArchiveItem, bool>? select, IProgress<ExtractProgress>? progress, CancellationToken ct)
+    {
+        var selection = Selection(null, select);
+        var chosen = Reader.Entries.Where(e => !e.IsDirectory && (selection?.Invoke(e) ?? true)).ToList();
+        CheckExpansion(chosen.Sum(e => e.Size), _limits);
+        var result = Extractor.Test(Reader, selection, new ExtractOptions { MemoryBudget = _limits.MemoryBudgetBytes }, progress, ct);
+        return Map(result, chosen.Count, renamed: 0);
+    }
+
+    public void Dispose() => Reader.Dispose();
+
+    /// <param name="attempted">Chosen files that went into decoding or writing: each one is written, failed or newer.</param>
+    private ArchiveExtractResult Map(ExtractResult r, int attempted, int renamed)
+    {
+        int newer = r.FilesNeedingNewerVersion;
+        return new ArchiveExtractResult
+        {
+            FilesOk = r.FilesOk,
+            FilesFailed = Math.Max(0, attempted - r.FilesOk - newer),
+            SkippedExisting = r.FilesSkipped,
+            SkippedUnsafe = r.SkippedUnsafe,
+            Renamed = renamed,
+            NeedNewerVersion = newer,
+            Errors = r.Errors,
+            Warnings = r.Warnings,
+            Written = [.. r.Written.Select(w => new ExtractedFile(_indexOf[w.Entry], w.Path))],
+        };
+    }
+
+    private Func<ArchiveEntry, bool>? Selection(IReadOnlySet<int>? indices, Func<ArchiveItem, bool>? select) =>
+        indices is not null ? e => indices.Contains(_indexOf[e])
+        : select is not null ? e => select(Items[_indexOf[e]])
+        : null;
+
+    /// <summary>"docs/img": "docs/img/a.png" → "a.png"; entries outside the folder, and the folder itself, map to null.</summary>
+    private static Func<string, string?>? PrefixMap(string? prefix)
+    {
+        prefix = prefix?.TrimEnd('/');
+        if (string.IsNullOrEmpty(prefix)) return null;
+        string folder = prefix + "/";
+        return p => p.Length > folder.Length && p.StartsWith(folder, StringComparison.Ordinal) ? p[folder.Length..] : null;
+    }
+
+    private static void CheckEntries(IReadOnlyList<ArchiveEntry> entries, ImportLimits limits)
+    {
+        if (entries.Count > limits.MaxEntries)
+            throw new EntryLimitException($"This archive holds {entries.Count:N0} entries, more than the {limits.MaxEntries:N0} Osmium accepts.");
+        foreach (var e in entries)
+        {
+            int depth = e.Path.Count(c => c == '/') + 1;
+            if (depth > limits.MaxPathDepth)
+                throw new EntryLimitException($"A path in this archive is {depth} folders deep, more than the {limits.MaxPathDepth} Osmium accepts.");
+        }
+    }
+
+    private void CheckExpansion(long output, ImportLimits limits)
+    {
+        if (!limits.AllowLargeExpansion && output > limits.ExpansionFloorBytes && output > limits.MaxExpansionRatio * FileLength)
+            throw new ExpansionLimitException(limits.MaxExpansionRatio, output);
+    }
+
+    private static void CheckFreeSpace(string destination, long output, ImportLimits limits)
+    {
+        if (output <= 0) return;
+        long free, size;
+        try
+        {
+            var drive = new DriveInfo(System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(destination))!);
+            if (!drive.IsReady) return;
+            free = drive.AvailableFreeSpace;
+            size = drive.TotalSize;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return; } // a volume that does not say
+        double reserve = Math.Max(limits.FreeSpaceReserveBytes, limits.FreeSpaceReserveFraction * size);
+        if ((double)free - output < reserve)
+            throw new FreeSpaceException($"Not enough free space: the files need {Bytes(output)} and {Bytes(reserve >= long.MaxValue ? long.MaxValue : (long)reserve)} must stay free, but the drive has {Bytes(free)} free.");
+    }
+
+    /// <summary>The archive's properties, as the Archives page shows them.</summary>
+    private static List<ArchiveDetail> Describe(OsaReader r) =>
+    [
+        new("Format", $".osa {Osa.Major}.{Osa.Minor}"),
+        new("Created by", r.Header.Creator ?? "?"),
+        new("Profile", r.Index.MetaString("profile") ?? "?"),
+        new("Files", $"{r.Entries.Count(e => !e.IsDirectory):N0}"),
+        new("Folders", $"{r.Entries.Count(e => e.IsDirectory):N0}"),
+        new("Original size", Bytes(r.TotalUnpacked)),
+        new("Archive size", Bytes(r.FileLength)),
+        new("Ratio", $"{(double)r.FileLength / Math.Max(1, r.TotalUnpacked):P2}"),
+        new("Extraction", $"~{Duration(TimeSpan.FromSeconds(r.EstimatedDecodeSeconds))} single-core"),
+        new("Memory per block", $"up to {Bytes(r.MaxBlockDecodeMemory)}"),
+        new("Encrypted", r.Header.Encrypted ? "yes" : "no"),
+        new("Experimental features", r.Header.Experimental ? "yes" : "no"),
+    ];
+
+    private static string Bytes(long b) => b switch
+    {
+        < 1024 => $"{b} B",
+        < 1 << 20 => $"{b / 1024.0:F1} KB",
+        < 1 << 30 => $"{b / 1048576.0:F1} MB",
+        _ => $"{b / 1073741824.0:F2} GB",
+    };
+
+    private static string Duration(TimeSpan t) =>
+        t.TotalSeconds < 60 ? $"{t.TotalSeconds:F0}s" : t.TotalMinutes < 60 ? $"{(int)t.TotalMinutes}m {t.Seconds:D2}s" : $"{(int)t.TotalHours}h {t.Minutes:D2}m";
+}

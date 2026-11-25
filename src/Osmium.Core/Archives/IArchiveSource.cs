@@ -88,7 +88,9 @@ public sealed record ArchiveExtractRequest
 /// differs from the archive name when it was renamed).</summary>
 public sealed record ExtractedFile(int Index, string Path);
 
-/// <summary>What Extract or Test did. Counts are of file entries; folders are not counted.</summary>
+/// <summary>What Extract or Test did. <see cref="FilesOk"/>, <see cref="FilesFailed"/>, <see cref="SkippedExisting"/>,
+/// <see cref="Renamed"/>, <see cref="Unverified"/> and <see cref="NeedNewerVersion"/> count files; the other
+/// Skipped counts count every entry refused (files, folders and links alike).</summary>
 public sealed record ArchiveExtractResult
 {
     /// <summary>Written (Extract) or read back (Test) and verified, or, when the format stores no checksum, written
@@ -130,7 +132,7 @@ public sealed record ArchiveExtractResult
 /// 4. Cancellation removes only the partial files of this run.
 /// </summary>
 /// <remarks>
-/// Open through <c>ArchiveSources.Open</c>. One operation at a time per source; the source keeps the archive
+/// Open through <see cref="ArchiveSources.Open"/>. One operation at a time per source; the source keeps the archive
 /// file open until it is disposed. Extract creates <c>destination</c> when it is missing; files completed before a
 /// cancellation (OperationCanceledException) or a limit exception stay where they are. Limits are checked against
 /// declared sizes before anything is written where the format declares them, and again while writing.

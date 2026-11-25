@@ -20,6 +20,8 @@ public sealed class OsaReader : IDisposable
     public long FileLength { get; }
     public IReadOnlyList<ArchiveEntry> Entries => Index.Entries;
     public IReadOnlyList<BlockInfo> Blocks => Index.Blocks;
+    /// <summary>Problems found while opening that did not stop it (none yet).</summary>
+    public IReadOnlyList<string> Warnings { get; } = [];
 
     private OsaReader(string path, SafeFileHandle handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length, MethodRegistry reg)
     {
