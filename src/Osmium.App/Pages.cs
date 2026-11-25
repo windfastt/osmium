@@ -1074,6 +1074,7 @@ internal sealed class SettingsPage : UserControl, IPage
         try { _app.SaveSettings(merged); }
         finally { _applying = false; }
         _edited.Clear();
+        _renderer.ClearRejected();
         _working = _app.Settings.Clone();
         _dirty.Text = "Saved";
         Render();
@@ -1082,6 +1083,7 @@ internal sealed class SettingsPage : UserControl, IPage
     private void Revert()
     {
         _edited.Clear();
+        _renderer.ClearRejected();
         _working = _app.Settings.Clone();
         Render();
         _dirty.Text = "";
@@ -1102,6 +1104,7 @@ internal sealed class SettingsPage : UserControl, IPage
             p.PropertyType.GetCustomAttributes(typeof(SettingsCategoryAttribute), false).OfType<SettingsCategoryAttribute>().FirstOrDefault()?.Name == cat);
         if (prop is null) return;
         prop.SetValue(_working, prop.GetValue(defaults));
+        _renderer.ClearRejected(cat);
         foreach (var key in keys) _edited.Add(key);
         Render();
         _dirty.Text = "Unsaved changes";

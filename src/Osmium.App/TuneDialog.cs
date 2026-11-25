@@ -108,6 +108,7 @@ internal sealed class TuneDialog : Form
         if (!_paramState.ContainsKey(m.Name)) _paramState[m.Name] = ParamValues.Empty;
         // On/off parameters as checkboxes, choices by name, sizes as "64M"; the values map back unchanged.
         var descs = ParamDescriptors.For(m, () => _paramState[m.Name], p => { _paramState[m.Name] = p; SyncFromBuilder(); });
+        _params.ClearRejected();
         _params.Render(descs, descs, () => true, m.Description);
     }
 
@@ -195,6 +196,11 @@ internal sealed class TuneDialog : Form
     private void Accept()
     {
         Validate(); // commits a number still being typed (Enter can arrive before the box loses focus)
+        if (_params.Errors.Count > 0)
+        {
+            Ui.Error("Correct these parameters first:\n\n" + string.Join("\n", _params.Errors));
+            return;
+        }
         try
         {
             Pipeline = PipelineSpec.Parse(_pipeline.Text, MethodRegistry.Default).ToString();

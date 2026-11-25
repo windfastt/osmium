@@ -182,7 +182,11 @@ internal sealed class SettingsRenderer : Panel
     private readonly List<(SettingDescriptor D, Control Row, Control Editor)> _rows = [];
     /// <summary>The error line under each editor, and the errors shown now (that input was not applied).</summary>
     private readonly Dictionary<SettingDescriptor, Label> _errorLabels = [];
-    private readonly Dictionary<SettingDescriptor, string> _errors = [];
+    /// <summary>
+    /// Rejected input by setting key, kept across re-renders (changing category, searching): the rejected text is shown
+    /// again with its error and still blocks Apply. Cleared when the input is corrected or the edits are discarded.
+    /// </summary>
+    private readonly Dictionary<string, (string Label, string Category, object? Value, string Error)> _rejected = [];
     private IReadOnlyList<SettingDescriptor> _all = [];
     private Func<bool> _experimentalEnabled = () => true;
 
@@ -207,7 +211,6 @@ internal sealed class SettingsRenderer : Panel
         foreach (var c in old) c.Dispose();
         _rows.Clear();
         _errorLabels.Clear();
-        _errors.Clear();
         if (banner is not null)
         {
             var b = new Label { Text = banner, AutoSize = true, MaximumSize = new Size(Math.Max(300, ClientSize.Width - 40), 0), Padding = new Padding(8), Tag = "experimental", Margin = new Padding(0, 0, 0, 10) };
@@ -245,6 +248,7 @@ internal sealed class SettingsRenderer : Panel
             row.Controls.Add(new Label { Text = d.Description, AutoSize = true, MaximumSize = new Size(760, 0), Tag = "muted", Margin = new Padding(0, 1, 0, 3), UseMnemonic = false });
         var error = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(760, 0), Tag = "danger", Margin = new Padding(0, 3, 0, 0), UseMnemonic = false };
         _errorLabels[d] = error;
+        if (_rejected.TryGetValue(d.Key, out var rej)) { error.Text = rej.Error; error.Visible = true; }
         var editor = BuildEditor(d);
         row.Controls.Add(editor);
         row.Controls.Add(error);
@@ -252,11 +256,18 @@ internal sealed class SettingsRenderer : Panel
     }
 
     /// <summary>Settings whose last input was rejected, as "label: reason". The rejected input was not applied.</summary>
-    public IReadOnlyList<string> Errors => _errors.Select(kv => $"{kv.Key.Label}: {kv.Value}").ToList();
+    public IReadOnlyList<string> Errors => _rejected.Values.Select(r => $"{r.Label}: {r.Error}").ToList();
+
+    /// <summary>Forgets rejected input: of one category, or of all settings when <paramref name="category"/> is null.</summary>
+    public void ClearRejected(string? category = null)
+    {
+        foreach (var k in _rejected.Where(kv => category is null || kv.Value.Category == category).Select(kv => kv.Key).ToList())
+            _rejected.Remove(k);
+    }
 
     private Control BuildEditor(SettingDescriptor d)
     {
-        object? value = d.Get();
+        object? value = _rejected.TryGetValue(d.Key, out var rejected) ? rejected.Value : d.Get();
         var t = d.ValueType;
         if (t == typeof(bool))
         {
@@ -355,17 +366,17 @@ internal sealed class SettingsRenderer : Panel
             try { d.Set(value); }
             catch (Exception e) when (e is FormatException or InvalidCastException or ArgumentException or OverflowException) { err = e.Message; }
         }
-        SetError(d, err);
+        SetError(d, value, err);
         if (err is not null) return;
         UpdateStates();
         Changed?.Invoke(d);
     }
 
     /// <summary>Shows (or clears) the error line under a setting's editor.</summary>
-    private void SetError(SettingDescriptor d, string? message)
+    private void SetError(SettingDescriptor d, object? value, string? message)
     {
-        if (message is null) _errors.Remove(d);
-        else _errors[d] = message;
+        if (message is null) _rejected.Remove(d.Key);
+        else _rejected[d.Key] = (d.Label, d.Category, value, message);
         if (!_errorLabels.TryGetValue(d, out var label)) return;
         label.Text = message ?? "";
         label.Visible = message is not null;
