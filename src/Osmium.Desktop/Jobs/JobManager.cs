@@ -472,7 +472,7 @@ public sealed class JobManager : IDisposable
         if (res.FilesFailed > 0 || res.Errors.Count > 0)
         {
             int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
-            if (newer > 0 && damaged == 0)
+            if (newer > 0 && damaged == 0 && res.OnlyNewerVersionErrors())
                 throw new InvalidDataException($"{newer} file(s) need a newer version of Osmium; every other file verified.");
             throw new InvalidDataException($"{damaged} file(s) failed verification{(newer > 0 ? $", {newer} need a newer version of Osmium" : "")}; {res.Errors.Count} error(s).");
         }

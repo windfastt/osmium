@@ -83,3 +83,14 @@ public class IndexValidationTests
         Assert.Equal(0, new BlobReader(new BlobWriter().U(0).ToArray()).Int(0));
     }
 }
+
+public class ExtractResultWordingTests
+{
+    [Fact]
+    public void OtherErrorsAreNotNewerVersionErrors()
+    {
+        var newer = "This archive needs a newer version of Osmium: block 3 uses method id 99.";
+        Assert.True(new ExtractResult(0, 1, 0, [newer]).OnlyNewerVersionErrors());
+        Assert.False(new ExtractResult(0, 1, 0, [newer, "sub: Access denied"]).OnlyNewerVersionErrors());
+    }
+}

@@ -302,8 +302,10 @@ namespace Osmium.Cli
         {
             int newer = res.FilesNeedingNewerVersion, damaged = res.FilesFailed - newer;
             var parts = new List<string>();
+            bool onlyNewer = res.OnlyNewerVersionErrors();
             if (damaged > 0 || newer == 0) parts.Add($"{damaged} file(s) damaged");
-            if (newer > 0) parts.Add($"{newer} file(s) need a newer version of Osmium (the rest verified)");
+            if (newer > 0) parts.Add($"{newer} file(s) need a newer version of Osmium{(onlyNewer ? " (the rest verified)" : "")}");
+            if (!onlyNewer) parts.Add($"{res.Errors.Count} error(s)");
             return string.Join(", ", parts);
         }
 
