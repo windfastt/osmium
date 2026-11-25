@@ -9,9 +9,23 @@ namespace Osmium.Desktop.Tests;
 /// <c>LogicalToDeviceUnits(…)</c>, <c>Space.Px(…)</c> or <c>Space.Pad(…)</c>, or the line ends with
 /// <c>// layout: device pixels on purpose (reason)</c>. Zero is the same in every unit and always allowed.
 /// </summary>
-public partial class LayoutRulesTests
+public partial class LayoutRulesTests(ITestOutputHelper output)
 {
     public const string Marker = "// Layout: logical units only";
+
+    /// <summary>App files that never carry the marker, relative to src/Osmium.App with '/' separators; a name ending
+    /// in '*' matches every file that starts with it.</summary>
+    public static readonly IReadOnlyDictionary<string, string> ExemptFromMarker = new Dictionary<string, string>
+    {
+        ["SelfTest.cs"] = "hosts windows at device sizes on purpose: the 1040 x 760 screenshots",
+        ["SelfTest.*"] = "hosts windows at device sizes on purpose: the 1040 x 760 screenshots",
+        ["Program.cs"] = "no layout code",
+        ["ShellRecycler.cs"] = "no layout code",
+    };
+
+    /// <summary>False: <see cref="EveryAppFileIsMarkedOrExempt"/> only reports the unmarked files. True: it fails on
+    /// them.</summary>
+    public const bool RequireMarkerEverywhere = false;
 
     [GeneratedRegex(@"//\s*layout: device pixels on purpose \(.+\)\s*$")]
     private static partial Regex OnPurpose();
@@ -110,21 +124,70 @@ public partial class LayoutRulesTests
         throw new InvalidOperationException("Osmium.sln was not found above " + AppContext.BaseDirectory);
     }
 
+    private static string AppFolder() => Path.Combine(RepositoryRoot(), "src", "Osmium.App");
+
+    /// <summary>Every .cs file of the app outside bin and obj, with its path relative to the app folder ('/'-separated).</summary>
+    private static IEnumerable<(string File, string Relative)> AppSources(string app)
+    {
+        string bin = Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar;
+        string obj = Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar;
+        foreach (var file in Directory.GetFiles(app, "*.cs", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(app, file);
+            string inner = Path.DirectorySeparatorChar + relative;
+            if (inner.Contains(bin, StringComparison.Ordinal) || inner.Contains(obj, StringComparison.Ordinal)) continue;
+            yield return (file, relative.Replace(Path.DirectorySeparatorChar, '/'));
+        }
+    }
+
+    private static bool HasMarker(string text) => text.Split('\n').Take(20).Any(l => l.Contains(Marker, StringComparison.Ordinal));
+
+    /// <summary>True when <paramref name="relative"/> ('/'-separated, relative to the app folder) is in
+    /// <see cref="ExemptFromMarker"/>.</summary>
+    public static bool IsExempt(string relative) => ExemptFromMarker.Keys.Any(k =>
+        k.EndsWith('*') ? relative.StartsWith(k[..^1], StringComparison.Ordinal) : relative == k);
+
     [Fact]
     public void AppFilesThatOptInUseLogicalUnitsOnly()
     {
-        string app = Path.Combine(RepositoryRoot(), "src", "Osmium.App");
+        string app = AppFolder();
         Assert.True(Directory.Exists(app), app);
         var problems = new List<string>();
-        foreach (var file in Directory.GetFiles(app, "*.cs", SearchOption.AllDirectories))
+        foreach (var (file, relative) in AppSources(app))
         {
-            if (file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar) || file.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar)) continue;
             var text = File.ReadAllText(file);
-            if (!text.Split('\n').Take(20).Any(l => l.Contains(Marker, StringComparison.Ordinal))) continue;
-            problems.AddRange(RawPixelSizes(text).Select(p => $"{Path.GetRelativePath(app, file)}({p.Line}): {p.Text}"));
+            if (!HasMarker(text)) continue;
+            problems.AddRange(RawPixelSizes(text).Select(p => $"{relative}({p.Line}): {p.Text}"));
         }
         Assert.True(problems.Count == 0, "Sizes in device pixels (use LogicalToDeviceUnits, Space.Px or Space.Pad):\n" + string.Join("\n", problems));
     }
+
+    [Fact]
+    public void EveryAppFileIsMarkedOrExempt()
+    {
+        string app = AppFolder();
+        Assert.True(Directory.Exists(app), app);
+        var unmarked = AppSources(app)
+            .Where(s => !IsExempt(s.Relative) && !HasMarker(File.ReadAllText(s.File)))
+            .Select(s => s.Relative)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        string list = string.Join("\n", unmarked);
+        output.WriteLine(unmarked.Count == 0 ? "Every app file carries the layout marker or is exempt."
+            : $"{unmarked.Count} app files carry neither the layout marker nor an exemption:\n{list}");
+        if (RequireMarkerEverywhere)
+            Assert.True(unmarked.Count == 0, $"Add \"{Marker}\" to these files, or an exemption with its reason:\n{list}");
+    }
+
+    [Theory]
+    [InlineData("SelfTest.cs", true)]
+    [InlineData("SelfTest.Layout.cs", true)]
+    [InlineData("Program.cs", true)]
+    [InlineData("ShellRecycler.cs", true)]
+    [InlineData("Pages/CompressPage.cs", false)]
+    [InlineData("Pages/SelfTest.cs", false)]
+    [InlineData("Ui.cs", false)]
+    public void TheExemptionsMatchOnlyTheirFiles(string relative, bool exempt) => Assert.Equal(exempt, IsExempt(relative));
 
     [Fact]
     public void TheRuleFindsRawPixelSizesAndAcceptsLogicalOnes()
