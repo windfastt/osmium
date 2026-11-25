@@ -204,7 +204,9 @@ internal sealed class TrayApp : ApplicationContext
             ReportWorkerProblem("This PC is not lending itself: the saved cluster key is invalid. " + e.Message, "Not lending this PC: invalid cluster key");
             return;
         }
-        ClearWorkerProblem();
+        // The notified flag stays: a worker that keeps failing on every settings save is not announced again.
+        WorkerError = null;
+        _workerWarning = null;
         _workerCts = new CancellationTokenSource();
         _worker = new WorkerServer(new WorkerOptions
         {
@@ -425,7 +427,7 @@ internal sealed class TrayApp : ApplicationContext
         _menu.Items.Add(watch);
         // The check shows the setting; whether a worker really runs is in the text (and on the Cluster page).
         bool lending = Settings.Cluster.LendThisPc;
-        var lend = new ToolStripMenuItem(lending && WorkerError is not null ? "Lend this PC to the cluster (not running)" : "Lend this PC to the cluster", null, (_, _) =>
+        var lend = new ToolStripMenuItem(lending && (WorkerError is not null || string.IsNullOrWhiteSpace(Settings.Cluster.ClusterKey)) ? "Lend this PC to the cluster (not running)" : "Lend this PC to the cluster", null, (_, _) =>
         {
             var s = Settings.Clone();
             s.Cluster.LendThisPc = !s.Cluster.LendThisPc;
