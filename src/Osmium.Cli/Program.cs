@@ -82,6 +82,10 @@ namespace Osmium.Cli
             catch (OperationCanceledException) { Console.Error.WriteLine("Cancelled."); return 130; }
             catch (PasswordRequiredException e) { return Fail(e.Message + " Use --password or --password-stdin."); }
             catch (WrongPasswordException e) { return Fail(e.Message); }
+            catch (AggregateException e) when (e.Flatten().InnerExceptions.All(i => i is IOException or InvalidDataException or ArgumentException or FormatException or InvalidOperationException or UnauthorizedAccessException))
+            {
+                return Fail(e.Flatten().InnerExceptions[0]);
+            }
             catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException or FormatException or InvalidOperationException or UnauthorizedAccessException)
             {
                 return Fail(e);

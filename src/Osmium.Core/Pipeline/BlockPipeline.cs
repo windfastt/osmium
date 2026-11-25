@@ -79,8 +79,9 @@ public sealed record BlockDescriptor(PipelineSpec Spec, long[] InputSizes)
         for (int i = 0; i < n; i++)
         {
             ids[i] = r.Int(65535);
-            sizes[i] = (long)r.U();
-            if (sizes[i] > BlockLimits.MaxRawSize) throw new InvalidDataException($"Stage size {sizes[i]} exceeds the 1 GiB block limit.");
+            ulong size = r.U();
+            if (size > (ulong)BlockLimits.MaxRawSize) throw new InvalidDataException($"Stage size {size} exceeds the 1 GiB block limit.");
+            sizes[i] = (long)size;
             parameters[i] = ParamValues.Deserialize(r.Bytes(4096));
         }
         if (!r.End) throw new InvalidDataException("Trailing bytes in pipeline descriptor.");

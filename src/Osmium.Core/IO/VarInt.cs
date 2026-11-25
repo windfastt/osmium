@@ -128,6 +128,14 @@ public ref struct BlobReader
         return (int)v;
     }
 
+    /// <summary>A varint in [0, <paramref name="max"/>] as a signed value; larger values (which would wrap negative) are rejected.</summary>
+    public long Long(long max = long.MaxValue)
+    {
+        ulong v = U();
+        if (max < 0 || v > (ulong)max) throw new InvalidDataException($"Value {v} exceeds limit {max}.");
+        return (long)v;
+    }
+
     public long I() => VarInt.UnZigZag(U());
 
     public byte B()

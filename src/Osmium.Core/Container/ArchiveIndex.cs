@@ -101,11 +101,14 @@ public sealed class ArchiveIndex
         for (int i = 0; i < nb; i++)
         {
             var rr = new BlobReader(r.Bytes(1 << 20));
-            long gap = (long)rr.U();
-            long frameLen = (long)rr.U();
-            long raw = (long)rr.U();
-            long memKiB = (long)rr.U();
-            if (raw > BlockLimits.MaxRawSize) throw new CorruptDataException("Block larger than the 1 GiB limit.");
+            // Sizes are validated as non-negative where they are read: a wrapped (negative) value would defeat every later check.
+            const long Sane = long.MaxValue >> 12;
+            long gap = rr.Long(Sane);
+            long frameLen = rr.Long(Sane);
+            ulong rawU = rr.U();
+            long memKiB = rr.Long(Sane);
+            if (rawU > (ulong)BlockLimits.MaxRawSize) throw new CorruptDataException("Block larger than the 1 GiB limit.");
+            long raw = (long)rawU;
             // A block that needs a newer Osmium gets a stand-in, so the archive still opens and its other blocks extract.
             var desc = BlockDescriptor.DeserializeOrStandIn(rr.Bytes(1 << 16), registry, $"block {i}");
             offset += gap;
@@ -136,7 +139,7 @@ public sealed class ArchiveIndex
             UInt128 hash = 0;
             if (kind == EntryKind.File)
             {
-                size = (long)r2.U();
+                size = r2.Long();
                 int ns = r2.Int(1 << 24);
                 long sum = 0;
                 for (int s = 0; s < ns; s++)

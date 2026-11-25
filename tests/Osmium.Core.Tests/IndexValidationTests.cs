@@ -62,6 +62,21 @@ public class IndexValidationTests
     }
 
     [Fact]
+    public void BlockWithWrappedRawSizeIsCorrupt()
+    {
+        // A raw size of 2^64-1 reads back as -1; it must not make every segment look in range.
+        var idx = new ArchiveIndex();
+        idx.Blocks.Add(new BlockInfo(0, 0, Osa.FrameHeaderSize + 10, -1, 0, new BlockDescriptor(PipelineSpec.Parse("store", Reg), [100])));
+        idx.Entries.Add(new ArchiveEntry
+        {
+            Path = "a.txt", Kind = EntryKind.File, Size = long.MinValue + 100,
+            Segments = [new Segment(0, 0, long.MinValue), new Segment(0, 0, 100)],
+        });
+        var e = Assert.ThrowsAny<IOException>(() => ArchiveIndex.Deserialize(idx.Serialize(), 0, Reg));
+        Assert.IsType<CorruptDataException>(e);
+    }
+
+    [Fact]
     public void IntWithNegativeLimitAllowsNoValue()
     {
         Assert.Throws<InvalidDataException>(() => new BlobReader(new BlobWriter().U(0).ToArray()).Int(-1));
