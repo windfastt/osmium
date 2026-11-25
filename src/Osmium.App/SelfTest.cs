@@ -1,3 +1,23 @@
+// The UI self-test drives the app through these members. It relies on their signatures and on this behaviour: each one
+// returns, or its task completes, only once the page or dialog shows the result.
+//   TrayApp: new TrayApp(SettingsStore, OsmiumSettings, AppCommand, string pipeName, string? historyFile), EnsureMain(),
+//     Jobs, TrayMenu, AppIcon, ExitApp(bool confirm), Settings
+//   MainForm: Navigate(string), CompressPage, ArchivesPage, Page<T>(string)
+//   CompressPage: AddPaths(IEnumerable<string>), SelectProfile(string), AnalyzeAsync(), StartCompression()
+//   JobsPage: SelectJob(Guid)
+//   ArchivesPage: OpenArchiveAsync(string)
+//   LabPage: SetFile(string), SelectProfile(string), RunAsync()
+//   RulesPage: AddExample()
+//   ClusterPage: GenerateKey()
+//   SettingsPage: CategoryNames, ShowCategory(string)
+//   new TuneDialog(TrayApp, string path, string? current, string profile, bool startDeep) and its Analysis task
+//   new PasswordDialog(string prompt, bool confirm); new AboutDialog(Icon)
+//   TrayIcons.Progress(double, bool, bool); Ui.Unattended
+//   Recycle Bin: ShellRecycler (TSF_DELETE_RECYCLE_IF_POSSIBLE, Refuse, DriveTypeOf, Recycle, LastPreDeletes),
+//     RecycleGate(Func<string, string?>, CancellationToken).PreDelete, RecycleSummary, Settings.Compression.RecycleOriginals
+// Further steps go in SelfTest.Compress.cs, SelfTest.Archives.cs, SelfTest.Pages.cs and SelfTest.Layout.cs, which
+// implement the partial methods below through SelfTestContext.
+
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -35,12 +55,22 @@ internal static partial class SelfTest
     /// The main window's client area (navigation rail and page). Windows limits a window to the desktop plus its frame
     /// (1044 × 788 on a 1024 × 768 test machine), so a wider client area would be laid out wider than it is captured.
     /// </summary>
-    private static readonly Size MainClient = new(1040, 760);
+    internal static readonly Size MainClient = new(1040, 760);
     // Measured on a 4-core Linux machine: the job ~2 s, the Lab run ~10 s (it benchmarks CM candidates too).
-    private static readonly TimeSpan JobTimeout = TimeSpan.FromSeconds(120), LabTimeout = TimeSpan.FromSeconds(120),
+    internal static readonly TimeSpan JobTimeout = TimeSpan.FromSeconds(120), LabTimeout = TimeSpan.FromSeconds(120),
         WorkTimeout = TimeSpan.FromSeconds(60);
 
-    private sealed record Shot(string File, int Width, int Height, string Theme, string Caption);
+    internal sealed record Shot(string File, int Width, int Height, string Theme, string Caption);
+
+    // Further steps, each leaving the main window hosted at MainClient on the Compress page (SelfTestContext.RestoreMain).
+    /// <summary>Compress page steps; run after the "Archives page" step.</summary>
+    static partial void CompressSteps(SelfTestContext ctx);
+    /// <summary>Archives page steps; run right after <see cref="CompressSteps"/>.</summary>
+    static partial void ArchiveSteps(SelfTestContext ctx);
+    /// <summary>Steps for the other pages; run after the "Log page" step.</summary>
+    static partial void PageSteps(SelfTestContext ctx);
+    /// <summary>Layout checks; run after the "About dialog" step.</summary>
+    static partial void LayoutSteps(SelfTestContext ctx);
 
     public static int Run(string outDir)
     {
@@ -60,37 +90,8 @@ internal static partial class SelfTest
         var tmp = Path.Combine(Path.GetTempPath(), "osmium-selftest-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(tmp);
 
-        bool Step(string name, Action action)
-        {
-            problems.Clear();
-            int logged = AppLog.Snapshot().Count;
-            var clock = Stopwatch.StartNew();
-            try { action(); }
-            catch (Exception e) { problems.Add(e.ToString()); }
-            problems.AddRange(AppLog.Snapshot().Skip(logged).Where(e => e.Level == "error").Select(e => "app log: " + e.Message));
-            if (problems.Count == 0)
-            {
-                log.Add($"ok    {name} ({clock.Elapsed.TotalSeconds:F1} s)");
-                return true;
-            }
-            failures++;
-            log.Add($"FAIL  {name}: " + string.Join(Environment.NewLine + "      ", problems));
-            return false;
-        }
-
-        void Skip(string name, string why) => log.Add($"skip  {name}: {why}");
-
-        void Shoot(Control c, string id, string caption)
-        {
-            Pump();
-            using var bmp = new Bitmap(Math.Max(1, c.Width), Math.Max(1, c.Height), PixelFormat.Format24bppRgb);
-            c.DrawToBitmap(bmp, new Rectangle(Point.Empty, bmp.Size));
-            string file = id + suffix + ".png";
-            bmp.Save(Path.Combine(outDir, file), ImageFormat.Png);
-            shots.Add(new Shot(file, bmp.Width, bmp.Height, theme, caption));
-        }
-
         Stage? stage = null;
+        SelfTestContext? context = null;
         try
         {
             Theme.Initialize(dark ? ThemeMode.Dark : ThemeMode.Light);
@@ -101,131 +102,138 @@ internal static partial class SelfTest
                 historyFile: Path.Combine(tmp, "history.json"));
             stage = new Stage();
             stage.Show();
+            var ctx = context = new SelfTestContext(app, stage, dark, tmp, outDir, log, shots, problems);
 
-            List<string> files = [];
             string tone = "";
-            Step("sample folder", () =>
+            ctx.Step("sample folder", () =>
             {
-                files = CreateSampleFolder(Path.Combine(LongPath(Path.GetTempPath()), "Osmium sample"));
-                tone = files.Single(f => Path.GetFileName(f) == SampleFiles.Tone);
+                string folder = Path.Combine(LongPath(Path.GetTempPath()), "Osmium sample");
+                ctx.SampleFiles = CreateSampleFolder(folder);
+                ctx.SampleFolder = folder;
+                tone = ctx.SampleFiles.Single(f => Path.GetFileName(f) == SampleFiles.Tone);
             });
 
             MainForm? main = null;
-            Step("main window", () =>
+            ctx.Step("main window", () =>
             {
                 var m = app.EnsureMain();
                 stage.Host(m, MainClient);
                 m.Navigate("Compress");
                 main = m;
-                Shoot(m, "page-compress", "Compress page before any files are added");
+                ctx.Main = m;
+                ctx.Shoot(m, "page-compress", "Compress page before any files are added");
             });
 
-            Guid? jobId = null;
-            string? archive = null;
-            if (main is null || files.Count == 0) Skip("pages", "no main window or no sample files");
+            var files = ctx.SampleFiles;
+            if (main is null || files.Count == 0) ctx.Skip("pages", "no main window or no sample files");
             else
             {
-                Step("Compress page: Analyze", () =>
+                ctx.Step("Compress page: Analyze", () =>
                 {
                     var page = main.CompressPage;
                     page.AddPaths(files);
                     page.SelectProfile("max");
-                    Await(page.AnalyzeAsync(), WorkTimeout, "Analyze");
-                    Shoot(main, "page-compress-filled",
+                    ctx.Await(page.AnalyzeAsync(), WorkTimeout, "Analyze");
+                    ctx.Shoot(main, "page-compress-filled",
                         $"Compress page: the {files.Count} sample files after Analyze, with their detected types and the plan of profile max");
                 });
 
-                Step("compression job, profile max", () =>
+                ctx.Step("compression job, profile max", () =>
                 {
                     // The Compress button's own action: queues the job with the page's files and profile, shows Jobs.
                     var id = main.CompressPage.StartCompression() ?? throw new InvalidOperationException("the Compress button started no job");
-                    WaitFor(() => app.Jobs.Snapshot().FirstOrDefault(j => j.Id == id) is { IsActive: false }, JobTimeout, "The compression job (profile max)");
+                    ctx.WaitFor(() => app.Jobs.Snapshot().FirstOrDefault(j => j.Id == id) is { IsActive: false }, JobTimeout, "The compression job (profile max)");
                     var job = app.Jobs.Snapshot().First(j => j.Id == id);
                     if (job.State != JobState.Completed) throw new InvalidOperationException($"the job ended {job.State}: {job.Error}");
-                    jobId = id;
-                    archive = job.Output;
+                    ctx.JobId = id;
+                    ctx.JobArchive = job.Output;
                     main.Navigate("Jobs");
                     main.Page<JobsPage>("Jobs").SelectJob(id);
-                    Shoot(main, "page-jobs",
+                    ctx.Shoot(main, "page-jobs",
                         $"Jobs page: the sample files ({Ui.Bytes(job.BytesIn)}) compressed with profile max to {Ui.Bytes(job.BytesOut)}, with the job's planner log");
                 });
 
-                if (archive is null) Skip("Archives page", "no archive was written");
+                if (ctx.JobArchive is not { } archive) ctx.Skip("Archives page", "no archive was written");
                 else
-                    Step("Archives page", () =>
+                    ctx.Step("Archives page", () =>
                     {
                         main.Navigate("Archives");
-                        main.ArchivesPage.OpenArchive(archive);
-                        Shoot(main, "page-archives", $"Archives page: {Path.GetFileName(archive)} with its blocks, their pipelines and its files");
+                        ctx.Await(main.ArchivesPage.OpenArchiveAsync(archive), WorkTimeout, "Opening the archive");
+                        ctx.Shoot(main, "page-archives", $"Archives page: {Path.GetFileName(archive)} with its blocks, their pipelines and its files");
                     });
 
-                Step("Lab page: tone.wav, profile max", () =>
+                CompressSteps(ctx);
+                ArchiveSteps(ctx);
+
+                ctx.Step("Lab page: tone.wav, profile max", () =>
                 {
                     main.Navigate("Lab");
                     var lab = main.Page<LabPage>("Lab");
                     lab.SetFile(tone);
                     lab.SelectProfile("max");
-                    Await(lab.RunAsync(), LabTimeout, "The Lab run");
-                    Shoot(main, "page-lab", "Lab page: every candidate pipeline of profile max benchmarked on tone.wav, smallest first");
+                    ctx.Await(lab.RunAsync(), LabTimeout, "The Lab run");
+                    ctx.Shoot(main, "page-lab", "Lab page: every candidate pipeline of profile max benchmarked on tone.wav, smallest first");
                 });
 
-                Step("Rules page with the example rule", () =>
+                ctx.Step("Rules page with the example rule", () =>
                 {
                     main.Navigate("Rules");
                     main.Page<RulesPage>("Rules").AddExample();
-                    Shoot(main, "page-rules", "Rules page with the example rule added, not saved yet");
+                    ctx.Shoot(main, "page-rules", "Rules page with the example rule added, not saved yet");
                 });
 
-                Step("Cluster page with a new key", () =>
+                ctx.Step("Cluster page with a new key", () =>
                 {
                     main.Navigate("Cluster");
                     main.Page<ClusterPage>("Cluster").GenerateKey();
-                    Shoot(main, "page-cluster", "Cluster page with a newly generated cluster key, shown and not saved; no workers");
+                    ctx.Shoot(main, "page-cluster", "Cluster page with a newly generated cluster key, shown and not saved; no workers");
                 });
 
-                Step("Settings pages", () =>
+                ctx.Step("Settings pages", () =>
                 {
                     main.Navigate("Settings");
                     var settingsPage = main.Page<SettingsPage>("Settings");
                     foreach (var category in settingsPage.CategoryNames.ToList())
                     {
                         settingsPage.ShowCategory(category); // every category must render
-                        Pump();
+                        ctx.Pump();
                     }
                     settingsPage.ShowCategory("General");
-                    Shoot(main, "settings-general", "Settings: General, with the default values");
+                    ctx.Shoot(main, "settings-general", "Settings: General, with the default values");
                     settingsPage.ShowCategory("Experimental");
-                    Shoot(main, "settings-experimental", "Settings: Experimental, with the master switch turned on");
+                    ctx.Shoot(main, "settings-experimental", "Settings: Experimental, with the master switch turned on");
                 });
 
-                Step("Log page", () =>
+                ctx.Step("Log page", () =>
                 {
                     main.Navigate("Log");
-                    Shoot(main, "page-log", "Log page after the self-test's run");
+                    ctx.Shoot(main, "page-log", "Log page after the self-test's run");
                 });
+
+                PageSteps(ctx);
             }
 
-            if (tone.Length == 0) Skip("Tune dialog", "no sample files");
+            if (tone.Length == 0) ctx.Skip("Tune dialog", "no sample files");
             else
-                Step("Tune dialog", () =>
+                ctx.Step("Tune dialog", () =>
                 {
                     using var d = new TuneDialog(app, tone, null, "max", startDeep: false);
-                    stage.Host(d, d.ClientSize); // the client area it has as a window of its own
-                    Await(d.Analysis, WorkTimeout, "The Tune dialog's analysis");
-                    Shoot(d, "dialog-tune", "Tune dialog for tone.wav after its analysis, with the suggested pipeline and its parameters");
+                    ctx.Host(d, d.ClientSize); // the client area it has as a window of its own
+                    ctx.Await(d.Analysis, WorkTimeout, "The Tune dialog's analysis");
+                    ctx.Shoot(d, "dialog-tune", "Tune dialog for tone.wav after its analysis, with the suggested pipeline and its parameters");
                     d.Close();
                 });
 
-            Step("tray menu", () =>
+            ctx.Step("tray menu", () =>
             {
                 var menu = app.TrayMenu;
                 menu.AutoClose = false; // stays open while it is rendered
                 try
                 {
                     menu.Show(new Point(-10_000, -10_000)); // WinForms moves it onto the screen; only the rendering is used
-                    Pump();
+                    ctx.Pump();
                     if (!menu.Visible) throw new InvalidOperationException("the tray menu did not open");
-                    Shoot(menu, "tray-menu", jobId is null ? "Notification-area menu" : "Notification-area menu after the compression job finished");
+                    ctx.Shoot(menu, "tray-menu", ctx.JobId is null ? "Notification-area menu" : "Notification-area menu after the compression job finished");
                 }
                 finally
                 {
@@ -234,23 +242,25 @@ internal static partial class SelfTest
                 }
             });
 
-            Step("password dialog", () =>
+            ctx.Step("password dialog", () =>
             {
                 using var d = new PasswordDialog("Password for the new archive", confirm: true);
-                stage.Host(d, null);
-                Shoot(d, "dialog-password", "Password dialog for a new archive, before anything is typed");
+                ctx.Host(d, null);
+                ctx.Shoot(d, "dialog-password", "Password dialog for a new archive, before anything is typed");
                 d.Close();
             });
 
-            Step("About dialog", () =>
+            ctx.Step("About dialog", () =>
             {
                 using var d = new AboutDialog(app.AppIcon);
-                stage.Host(d, null);
-                Shoot(d, "dialog-about", "About dialog: version, engine fingerprint and licence");
+                ctx.Host(d, null);
+                ctx.Shoot(d, "dialog-about", "About dialog: version, engine fingerprint and licence");
                 d.Close();
             });
 
-            Step("tray icon frames", () =>
+            LayoutSteps(ctx);
+
+            ctx.Step("tray icon frames", () =>
             {
                 using var icons = new TrayIcons(app.AppIcon);
                 using var strip = new Bitmap(16 * 30, 32);
@@ -281,7 +291,7 @@ internal static partial class SelfTest
                 return page;
             }
 
-            Step("Recycle Bin: the shell recycler moves a folder and nothing else", () =>
+            ctx.Step("Recycle Bin: the shell recycler moves a folder and nothing else", () =>
             {
                 // Before the shell deletes anything: no Recycle Bin, no path, or a canceled job means the item stays.
                 const uint recycle = ShellRecycler.TSF_DELETE_RECYCLE_IF_POSSIBLE;
@@ -313,7 +323,7 @@ internal static partial class SelfTest
                 if (recycler.LastPreDeletes == 0) throw new InvalidOperationException("the shell moved the folder without asking the progress sinks first");
                 if (outcome.BinPath is not { } binPath || !Directory.Exists(binPath))
                     throw new InvalidOperationException($"the shell named no Recycle Bin item that exists ({outcome.BinPath ?? "no path"})");
-                log.Add($"      in the Recycle Bin as {binPath}; the shell asked {recycler.LastPreDeletes} time(s) before deleting");
+                ctx.Detail($"in the Recycle Bin as {binPath}; the shell asked {recycler.LastPreDeletes} time(s) before deleting");
 
                 // A page and its connected "_files" folder: each moves alone, and the other one stays.
                 string page = SavedPage(Path.Combine(recycleRoot, "direct", "page"), "page");
@@ -328,7 +338,7 @@ internal static partial class SelfTest
                 if (!File.Exists(other)) throw new InvalidOperationException("the page went along with its \"_files\" folder");
             });
 
-            Step("Recycle Bin option: a compression job", () =>
+            ctx.Step("Recycle Bin option: a compression job", () =>
             {
                 string moved = Own(Path.Combine(recycleRoot, "job", "originals"));
                 string kept = Own(Path.Combine(recycleRoot, "job", "kept"));
@@ -345,7 +355,7 @@ internal static partial class SelfTest
                 try
                 {
                     var id = app.Jobs.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [moved, kept, page], Output = archive, Profile = "store" });
-                    WaitFor(() => app.Jobs.Snapshot().FirstOrDefault(j => j.Id == id) is { IsActive: false }, JobTimeout, "The compression job with the Recycle Bin option");
+                    ctx.WaitFor(() => app.Jobs.Snapshot().FirstOrDefault(j => j.Id == id) is { IsActive: false }, JobTimeout, "The compression job with the Recycle Bin option");
                     var job = app.Jobs.Snapshot().First(j => j.Id == id);
                     var jobLog = app.Jobs.GetLog(id);
                     string why = string.Join(" | ", jobLog.Where(l => l.StartsWith("kept ", StringComparison.Ordinal) || l.StartsWith("warning: ", StringComparison.Ordinal)));
@@ -360,16 +370,16 @@ internal static partial class SelfTest
                     if (!File.Exists(Path.Combine(pageFiles, "style.css")))
                         throw new InvalidOperationException("the page's \"_files\" folder, which was not compressed, went along with the page");
                     if (job.Recycle != new RecycleSummary(2, 1)) throw new InvalidOperationException($"the job reported \"{job.Recycle}\" instead of 2 moved, 1 kept");
-                    log.Add($"      originals: {job.Recycle}");
+                    ctx.Detail($"originals: {job.Recycle}");
                 }
                 finally { app.Settings.Compression.RecycleOriginals = false; }
             });
 
-            Step("handle counts", () =>
+            ctx.Step("handle counts", () =>
             {
                 var h = Process.GetCurrentProcess().Handle;
                 uint gdi = GetGuiResources(h, 0), user = GetGuiResources(h, 1);
-                log.Add($"      GDI objects: {gdi}, USER objects: {user}");
+                ctx.Detail($"GDI objects: {gdi}, USER objects: {user}");
                 if (gdi > 5000 || user > 5000) throw new InvalidOperationException("handle leak suspected");
             });
 
@@ -387,6 +397,7 @@ internal static partial class SelfTest
             try { WriteManifest(Path.Combine(outDir, dark ? "manifest-dark.json" : "manifest.json"), theme, shots); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { failures++; log.Add("FAIL  manifest: " + e.Message); }
         }
+        failures += context?.Failures ?? 0;
         log.Add($"{shots.Count} screenshot(s)");
         log.Add(failures == 0 ? "SELFTEST PASSED" : $"SELFTEST FAILED ({failures})");
         File.WriteAllLines(Path.Combine(outDir, $"selftest{suffix}.log"), log);
@@ -468,7 +479,7 @@ internal static partial class SelfTest
     }
 
     /// <summary>Processes window messages (including await continuations) until <paramref name="done"/>.</summary>
-    private static void WaitFor(Func<bool> done, TimeSpan timeout, string what)
+    internal static void WaitFor(Func<bool> done, TimeSpan timeout, string what)
     {
         var clock = Stopwatch.StartNew();
         while (!done())
@@ -480,13 +491,13 @@ internal static partial class SelfTest
         Pump();
     }
 
-    private static void Await(Task task, TimeSpan timeout, string what)
+    internal static void Await(Task task, TimeSpan timeout, string what)
     {
         WaitFor(() => task.IsCompleted, timeout, what);
         task.GetAwaiter().GetResult();
     }
 
-    private static void Pump()
+    internal static void Pump()
     {
         for (int i = 0; i < 10; i++)
         {
@@ -499,7 +510,7 @@ internal static partial class SelfTest
     /// A borderless window that holds the main window and the dialogs as child windows: top-level windows are
     /// clamped to the runner's 1024 × 768 desktop, child windows are not, and a child window has no OS title bar.
     /// </summary>
-    private sealed class Stage : Form
+    internal sealed class Stage : Form
     {
         public Stage()
         {
@@ -525,4 +536,132 @@ internal static partial class SelfTest
             Pump();
         }
     }
+}
+
+/// <summary>
+/// What a self-test step works with: the running app and its main window, the sample files, the archive the compression
+/// job wrote, and the means to run steps, take screenshots, host windows and wait for work.
+/// </summary>
+internal sealed class SelfTestContext
+{
+    private readonly SelfTest.Stage _stage;
+    private readonly string _outDir;
+    private readonly List<string> _log, _problems;
+    private readonly List<SelfTest.Shot> _shots;
+    private MainForm? _main;
+    private Size? _mainMinimum;
+
+    internal SelfTestContext(TrayApp app, SelfTest.Stage stage, bool dark, string tempDir, string outDir,
+        List<string> log, List<SelfTest.Shot> shots, List<string> problems)
+    {
+        App = app;
+        _stage = stage;
+        Dark = dark;
+        TempDir = tempDir;
+        _outDir = outDir;
+        _log = log;
+        _shots = shots;
+        _problems = problems;
+    }
+
+    public TrayApp App { get; }
+
+    /// <summary>The main window, hosted in the stage at 1040 × 760. Throws when it could not be created (the step that
+    /// asks for it then fails).</summary>
+    public MainForm Main
+    {
+        get => _main ?? throw new InvalidOperationException("the main window was not created");
+        internal set => _main = value;
+    }
+
+    public bool Dark { get; }
+    /// <summary>"light" or "dark", as the manifest names it.</summary>
+    public string Theme => Dark ? "dark" : "light";
+    /// <summary>The self-test's own temporary folder, deleted at the end.</summary>
+    public string TempDir { get; }
+    /// <summary>The generated sample folder ("Osmium sample" in the temporary folder).</summary>
+    public string SampleFolder { get; internal set; } = "";
+    /// <summary>The files in <see cref="SampleFolder"/>, sorted by name.</summary>
+    public IReadOnlyList<string> SampleFiles { get; internal set; } = [];
+    /// <summary>The archive the compression job (profile max) wrote; null when the job did not complete.</summary>
+    public string? JobArchive { get; internal set; }
+    public Guid? JobId { get; internal set; }
+    /// <summary>Steps that failed so far.</summary>
+    public int Failures { get; private set; }
+
+    /// <summary>Runs one step: "ok" in the log, or "FAIL" with what went wrong (an exception, a message box, a UI
+    /// exception or an error in the app log). True when it passed.</summary>
+    public bool Step(string name, Action action)
+    {
+        _problems.Clear();
+        int logged = AppLog.Snapshot().Count;
+        var clock = Stopwatch.StartNew();
+        try { action(); }
+        catch (Exception e) { _problems.Add(e.ToString()); }
+        _problems.AddRange(AppLog.Snapshot().Skip(logged).Where(e => e.Level == "error").Select(e => "app log: " + e.Message));
+        if (_problems.Count == 0)
+        {
+            _log.Add($"ok    {name} ({clock.Elapsed.TotalSeconds:F1} s)");
+            return true;
+        }
+        Failures++;
+        _log.Add($"FAIL  {name}: " + string.Join(Environment.NewLine + "      ", _problems));
+        return false;
+    }
+
+    /// <summary>A step that cannot run here, and why (not a failure).</summary>
+    public void Skip(string name, string why) => _log.Add($"skip  {name}: {why}");
+
+    /// <summary>A remark in the log (never a failure).</summary>
+    public void Note(string text) => _log.Add($"note  {text}");
+
+    /// <summary>A detail of the step being run, indented under it in the log.</summary>
+    internal void Detail(string text) => _log.Add("      " + text);
+
+    /// <summary>Renders <paramref name="c"/> to &lt;id&gt;.png (&lt;id&gt;-dark.png in the dark run) and lists it in the manifest.</summary>
+    public void Shoot(Control c, string id, string caption)
+    {
+        Pump();
+        using var bmp = new Bitmap(Math.Max(1, c.Width), Math.Max(1, c.Height), PixelFormat.Format24bppRgb);
+        c.DrawToBitmap(bmp, new Rectangle(Point.Empty, bmp.Size));
+        string file = id + (Dark ? "-dark" : "") + ".png";
+        bmp.Save(Path.Combine(_outDir, file), ImageFormat.Png);
+        _shots.Add(new SelfTest.Shot(file, bmp.Width, bmp.Height, Theme, caption));
+    }
+
+    /// <summary>Shows <paramref name="form"/> inside the stage with the given client size (null: it sizes itself).</summary>
+    public void Host(Form form, Size? clientSize) => _stage.Host(form, clientSize);
+
+    /// <summary>Hosts the main window again at <paramref name="clientSize"/>, without its minimum size, to see the
+    /// pages at a smaller size. <see cref="RestoreMain"/> undoes it.</summary>
+    public void HostMain(Size clientSize)
+    {
+        var main = Main;
+        _mainMinimum ??= main.MinimumSize;
+        main.MinimumSize = Size.Empty;
+        _stage.Host(main, clientSize);
+    }
+
+    /// <summary>The main window back at 1040 × 760, with its minimum size, on the Compress page.</summary>
+    public void RestoreMain()
+    {
+        var main = Main;
+        _stage.Host(main, SelfTest.MainClient);
+        if (_mainMinimum is { } minimum)
+        {
+            main.MinimumSize = minimum;
+            _mainMinimum = null;
+        }
+        main.Navigate("Compress");
+        Pump();
+    }
+
+    /// <summary>Processes window messages until <paramref name="t"/> completes, then throws what it threw.</summary>
+    public void Await(Task t, TimeSpan timeout, string what) => SelfTest.Await(t, timeout, what);
+
+    /// <summary>Processes window messages (including await continuations) until <paramref name="done"/>.</summary>
+    public void WaitFor(Func<bool> done, TimeSpan timeout, string what) => SelfTest.WaitFor(done, timeout, what);
+
+    /// <summary>Lets the window messages that are waiting run (layout, painting, continuations).</summary>
+    public void Pump() => SelfTest.Pump();
 }

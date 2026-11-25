@@ -39,6 +39,13 @@ internal sealed class ArchivesPage : UserControl, IPage
         if (d.ShowDialog(this) == DialogResult.OK) OpenArchive(d.FileName);
     }
 
+    /// <summary>Opens an archive on the page; the task completes when the page shows it (or the error about it).</summary>
+    internal Task OpenArchiveAsync(string path)
+    {
+        OpenArchive(path);
+        return Task.CompletedTask;
+    }
+
     public void OpenArchive(string path)
     {
         try
