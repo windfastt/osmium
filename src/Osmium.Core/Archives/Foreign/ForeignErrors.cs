@@ -9,8 +9,24 @@ namespace Osmium.Core.Archives.Foreign;
 /// </summary>
 internal static class ForeignErrors
 {
+    private static readonly AsyncLocal<Action<Exception>?> FaultSeam = new();
+
+    /// <summary>For tests (this async flow only): sees every exception of a kind that also means a programming error
+    /// (a null reference, an index out of range…) as it is taken for damage, so that a fuzz test can tell a fault in
+    /// Osmium's own parsers from a decoder library's way of reporting bad data.</summary>
+    internal static Action<Exception>? FaultObserver { get => FaultSeam.Value; set => FaultSeam.Value = value; }
+
     /// <summary>An exception a parser or decoder throws on bad input (not a limit, a cancellation or a password).</summary>
-    public static bool IsDecoderFailure(Exception e) => e switch
+    public static bool IsDecoderFailure(Exception e)
+    {
+        bool failure = IsFailure(e);
+        if (failure && FaultObserver is { } observe && e is IndexOutOfRangeException or ArgumentException or OverflowException
+                or InvalidOperationException or NullReferenceException or DivideByZeroException or InvalidCastException or ArrayTypeMismatchException)
+            observe(e);
+        return failure;
+    }
+
+    private static bool IsFailure(Exception e) => e switch
     {
         ExpansionLimitException or FreeSpaceException or EntryLimitException or OperationCanceledException => false,
         IOException => true, // CorruptDataException, EndOfStreamException, "Not a BZIP2 marked stream"…

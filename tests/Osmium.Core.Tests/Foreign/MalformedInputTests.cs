@@ -8,7 +8,9 @@ namespace Osmium.Core.Tests.Foreign;
 /// <summary>
 /// Every format, truncated at 64 points and with 200 seeded byte flips: opening, testing and extracting may only end
 /// in a result or in one of the expected exceptions (damage, password, not supported, a limit), never in a crash, and
-/// each case must finish within 10 seconds.
+/// each case must finish within 10 seconds. A null reference, an index out of range or another exception that means a
+/// programming error fails the case when Osmium's own code threw it, even though it is reported as damage: only the
+/// decoder libraries may report bad data that way.
 /// </summary>
 public class MalformedInputTests
 {
@@ -45,8 +47,40 @@ public class MalformedInputTests
     private static bool Expected(Exception e) => e is CorruptDataException or WrongPasswordException or PasswordRequiredException
         or NotSupportedException or ExpansionLimitException or FreeSpaceException or EntryLimitException;
 
+    /// <summary>Where in Osmium's own code a programming-error exception was thrown ("Type.Method"), or null when a
+    /// decoder library threw it (the first frame outside the runtime decides).</summary>
+    internal static string? OwnFault(Exception e)
+    {
+        foreach (var frame in new System.Diagnostics.StackTrace(e).GetFrames())
+        {
+            var type = frame.GetMethod()?.DeclaringType;
+            string? assembly = type?.Assembly.GetName().Name;
+            if (assembly is null || assembly == "mscorlib" || assembly.StartsWith("System", StringComparison.Ordinal)
+                || assembly.StartsWith("Microsoft", StringComparison.Ordinal)) continue;
+            return assembly == typeof(ArchiveSources).Assembly.GetName().Name ? $"{type!.FullName}.{frame.GetMethod()!.Name}" : null;
+        }
+        return null;
+    }
+
     /// <summary>Open, list, test and (sometimes) extract; returns the unexpected exception, if any.</summary>
     private static Exception? Exercise(string path, string dest, bool extract)
+    {
+        Exception? fault = null;
+        Archives.Foreign.ForeignErrors.FaultObserver = e => { if (fault is null && OwnFault(e) is not null) fault = e; };
+        try
+        {
+            return Run();
+        }
+        finally { Archives.Foreign.ForeignErrors.FaultObserver = null; }
+
+        Exception? Run()
+        {
+            var unexpected = Attempt(path, dest, extract);
+            return unexpected ?? (fault is null ? null : new InvalidOperationException($"a fault in {OwnFault(fault)} was taken for damage", fault));
+        }
+    }
+
+    private static Exception? Attempt(string path, string dest, bool extract)
     {
         try
         {
@@ -76,7 +110,7 @@ public class MalformedInputTests
             string dest = t.Sub("out" + i);
             var task = Task.Run(() => Exercise(archive, dest, extract: i % 4 == 0));
             if (!task.Wait(CaseBudget)) { failures.Add($"case {i}: did not finish within {CaseBudget.TotalSeconds:F0} s"); break; }
-            if (task.Result is { } e) failures.Add($"case {i}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
+            if (task.Result is { } e) failures.Add($"case {i}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}{(e.InnerException is { } inner ? $"\n{inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}" : "")}");
             if (Directory.Exists(dest))
                 foreach (var f in Directory.GetFiles(dest, "*", SearchOption.AllDirectories))
                     Assert.DoesNotContain(".osmium-part-", f);
