@@ -19,6 +19,8 @@ internal sealed class SevenZipSource : ForeignSource
     /// archive of many folders, each with its own salt, could keep the processor busy for days.</summary>
     public const long MaxKeyRounds = 1L << 27;
 
+    internal const string Unprovable = "encrypted without a stored checksum, so Osmium cannot check the password";
+
     internal const string KeyBudgetRefusal = "this archive asks for more password key derivation than Osmium allows for one archive";
 
     private static readonly AsyncLocal<Func<int, bool>?> DropChecksums = new();
@@ -81,7 +83,7 @@ internal sealed class SevenZipSource : ForeignSource
         }
         catch (Exception e) when (ForeignErrors.IsDecoderFailure(e)) { throw ForeignErrors.Damaged(Name, e); }
         catch (OutOfMemoryException) { throw SevenZipHeader.TooLarge(); } // a last resort: the limits above come first
-        // The file list decoded and matched its CRC: that proves the password, when every AES coder decrypted on the way.
+        // The file list decoded and matched its CRC: that proves the password when decrypted bytes reached it.
         if (_encryptedHeaders && headerProof) PasswordProven = true;
         if (DropChecksumsForTests is { } drop)
         {
@@ -99,7 +101,7 @@ internal sealed class SevenZipSource : ForeignSource
             using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null, aes), guard);
             var bytes = new byte[size];
             s.ReadExactly(bytes);
-            if (folder.IsEncrypted) headerProof &= folder.UnpackCrc is not null && size > 0 && aes.Count > 0 && aes.All(a => a.Delivered > 0);
+            if (folder.IsEncrypted) headerProof &= folder.UnpackCrc is not null && size > 0 && aes.Any(a => a.Proves);
             return bytes;
         }
     }
@@ -197,9 +199,10 @@ internal sealed class SevenZipSource : ForeignSource
     /// <summary>
     /// Rule 1 for 7z, which has no password verifier: the first selected encrypted folder that has a stored CRC is
     /// decoded from its start into a discarding sink until the end of its first file with a CRC and data (the whole
-    /// folder when only the folder has one), and compared. It proves the password only when every AES coder of the
-    /// folder decrypted data on the way (a coder whose output nothing reads proves nothing; the folder's structure
-    /// already puts every coder on the way to its result). A data error or a mismatch is a wrong password or damage, which
+    /// folder when only the folder has one), and compared. It proves the password only when bytes an AES coder
+    /// decrypted reached that output (a coder whose output nothing reads, or that feeds only BCJ2's range coder, proves
+    /// nothing). When nothing proves the password, no file without a stored CRC is written under it. A data error or a
+    /// mismatch is a wrong password or damage, which
     /// 7z cannot tell apart: the next such folder is tried, and when one proves the password the failed one is
     /// reported as damaged when it is read; when every one fails, the password is wrong. When no selected encrypted
     /// folder has any CRC, nothing can prove the password; those entries are then refused.
@@ -240,7 +243,7 @@ internal sealed class SevenZipSource : ForeignSource
                         if (i == stopAfter) break;
                     }
                 }
-                if (aes.Count > 0 && aes.All(a => a.Delivered > 0)) return true;
+                if (aes.Any(a => a.Proves)) return true;
             }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failed = true; }
             finally { _ct = default; }
@@ -280,7 +283,7 @@ internal sealed class SevenZipSource : ForeignSource
             if (unprovable && !PasswordProven)
             {
                 foreach (int i in wanted)
-                    op.Sink.Accept(Entries[i].Refused("encrypted without a stored checksum, so Osmium cannot check the password"), op.Selected(Entries[i])!, null);
+                    op.Sink.Accept(Entries[i].Refused(Unprovable), op.Selected(Entries[i])!, null);
                 continue;
             }
             if (f.IsEncrypted && !KeysWithinBudget(f))
@@ -302,7 +305,13 @@ internal sealed class SevenZipSource : ForeignSource
                     string? rel = op.Selected(e);
                     using (var part = new ExactStream(new NonClosing(folderStream), file.Size, "a file"))
                     {
-                        if (rel is not null)
+                        if (rel is not null && f.IsEncrypted && !PasswordProven && file.Crc is null && file.Size > 0)
+                        {
+                            // Nothing proved the password, and nothing checks this file: it is not written under it.
+                            accepted.Add(i);
+                            op.Sink.Accept(e.Refused(Unprovable), rel, null);
+                        }
+                        else if (rel is not null)
                         {
                             accepted.Add(i);
                             bool verified = file.Crc is not null;

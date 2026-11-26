@@ -84,10 +84,12 @@ internal static class SevenZipDecoder
             packed[j] = new FileSlice(handle, offset, size) { OnRead = onRead };
         }
         var building = new HashSet<int>();
-        try { return Output(f.MainOut()); }
+        try { return Output(f.MainOut(), data: true); }
         catch (OutOfMemoryException) { throw LimitGuard.MemoryRefusal(name, Memory(f)); }
 
-        Stream Output(int outIndex)
+        // data: every byte this output gives the coder above it reaches the result (BCJ2's range-coder input is the
+        // one exception: it is read at the start and used only at branch instructions).
+        Stream Output(int outIndex, bool data)
         {
             if (!building.Add(outIndex)) throw SevenZipHeader.Corrupt("a folder whose coders form a loop");
             int coderIndex = 0, firstOut = 0, firstIn = 0;
@@ -106,7 +108,7 @@ internal static class SevenZipDecoder
             {
                 int inIndex = firstIn + k;
                 int bound = f.BindPairs.FindIndex(b => b.In == inIndex);
-                if (bound >= 0) inputs[k] = Output(f.BindPairs[bound].Out);
+                if (bound >= 0) inputs[k] = Output(f.BindPairs[bound].Out, data && !(c.Id == Bcj2Id && k == 3));
                 else
                 {
                     int p = f.PackedStreams.IndexOf(inIndex);
@@ -114,12 +116,14 @@ internal static class SevenZipDecoder
                     inputs[k] = packed[p];
                 }
             }
-            return Coder(c, inputs, f.UnpackSizes[outIndex], limits, name, key, aes);
+            return Coder(c, inputs, f.UnpackSizes[outIndex], limits, name, key, aes, data);
         }
     }
 
+    private const ulong Bcj2Id = 0x0303011B;
+
     private static Stream Coder(SzCoder c, Stream[] inputs, long outSize, ImportLimits limits, string name, Func<byte[], byte[]>? key,
-        List<SevenZipAesStream>? aes)
+        List<SevenZipAesStream>? aes, bool data)
     {
         if (c.Id != 0x0303011B && inputs.Length != 1) throw new NotSupportedException($"{name} uses a coder layout Osmium cannot read.");
         // Decoders get their input through a guard that stops them reading on and on past its end.
@@ -168,7 +172,7 @@ internal static class SevenZipDecoder
             case SevenZipHeader.AesId:
             {
                 if (key is null) throw new PasswordRequiredException();
-                var decrypting = new SevenZipAesStream(input, key(c.Props), SevenZipAes.Iv(c.Props));
+                var decrypting = new SevenZipAesStream(input, key(c.Props), SevenZipAes.Iv(c.Props)) { OnDataPath = data };
                 aes?.Add(decrypting);
                 return Exact(decrypting);
             }
@@ -256,6 +260,14 @@ internal sealed class SevenZipAesStream : ReadOnlyStream
 
     /// <summary>The decrypted bytes read from this stream so far.</summary>
     public long Delivered { get; private set; }
+
+    /// <summary>Every byte read from this stream reaches the folder's result: its output does not feed BCJ2's
+    /// range-coder input, whose first bytes are read whatever follows.</summary>
+    public bool OnDataPath { get; init; }
+
+    /// <summary>Whether this stream's decrypted bytes reached the folder's result, so that a CRC over the result
+    /// checks the key.</summary>
+    public bool Proves => OnDataPath && Delivered > 0;
 
     public SevenZipAesStream(Stream inner, byte[] key, byte[] iv)
     {

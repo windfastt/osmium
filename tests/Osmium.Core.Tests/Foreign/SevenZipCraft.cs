@@ -49,12 +49,57 @@ internal static class SevenZipCraft
     }
 
     /// <summary>The archive: the packed streams after the start header, then the header; files are named f0.bin, f1.bin…
-    /// in folder order.</summary>
-    public static byte[] Build(IReadOnlyList<Folder> folders)
+    /// in folder order. With <paramref name="packHeader"/>, the header is stored packed: the folder it returns for the
+    /// header's bytes (its packed streams follow the files' ones) and an encoded header that names it.</summary>
+    public static byte[] Build(IReadOnlyList<Folder> folders, Func<byte[], Folder>? packHeader = null)
     {
         var packs = folders.SelectMany(f => f.Packed).ToList();
-        var h = new List<byte> { 0x01, 0x04, 0x06 };
-        Num(h, 0);
+        long dataLength = packs.Sum(p => (long)p.Length);
+        var h = new List<byte> { 0x01, 0x04 };
+        PackAndUnpackInfo(h, folders, 0);
+        h.AddRange([0x08, 0x0D]);
+        foreach (var f in folders) Num(h, f.Files.Length);
+        h.Add(0x09);
+        foreach (var f in folders) foreach (var (size, _) in f.Files.SkipLast(1)) Num(h, size);
+        // A folder of one file with a folder CRC needs no file CRC here.
+        h.Add(0x0A);
+        Digests(h, [.. folders.Where(f => !(f.Files.Length == 1 && f.UnpackCrc is not null)).SelectMany(f => f.Files).Select(f => f.Crc)]);
+        h.AddRange([0x00, 0x00]);
+        int files = folders.Sum(f => f.Files.Length);
+        h.Add(0x05);
+        Num(h, files);
+        var names = new List<byte> { 0x00 };
+        for (int i = 0; i < files; i++) names.AddRange(Encoding.Unicode.GetBytes($"f{i}.bin\0"));
+        h.Add(0x11);
+        Num(h, names.Count);
+        h.AddRange(names);
+        h.AddRange([0x00, 0x00]);
+        byte[] header = [.. h];
+
+        if (packHeader is not null)
+        {
+            var folder = packHeader(header);
+            packs.AddRange(folder.Packed);
+            var encoded = new List<byte> { 0x17 };
+            PackAndUnpackInfo(encoded, [folder], dataLength);
+            encoded.Add(0x00);
+            header = [.. encoded];
+        }
+        var sig = new byte[32];
+        new byte[] { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04 }.CopyTo(sig, 0);
+        BinaryPrimitives.WriteInt64LittleEndian(sig.AsSpan(12), packs.Sum(p => (long)p.Length));
+        BinaryPrimitives.WriteInt64LittleEndian(sig.AsSpan(20), header.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(sig.AsSpan(28), Crc32.HashToUInt32(header));
+        BinaryPrimitives.WriteUInt32LittleEndian(sig.AsSpan(8), Crc32.HashToUInt32(sig.AsSpan(12, 20)));
+        return [.. sig, .. packs.SelectMany(p => p), .. header];
+    }
+
+    /// <summary>PackInfo and UnpackInfo (coders, bind pairs, sizes, folder CRCs) of <paramref name="folders"/>.</summary>
+    private static void PackAndUnpackInfo(List<byte> h, IReadOnlyList<Folder> folders, long packPos)
+    {
+        var packs = folders.SelectMany(f => f.Packed).ToList();
+        h.Add(0x06);
+        Num(h, packPos);
         Num(h, packs.Count);
         h.Add(0x09);
         foreach (var p in packs) Num(h, p.Length);
@@ -84,32 +129,6 @@ internal static class SevenZipCraft
             Digests(h, [.. folders.Select(f => f.UnpackCrc)]);
         }
         h.Add(0x00);
-        h.AddRange([0x08, 0x0D]);
-        foreach (var f in folders) Num(h, f.Files.Length);
-        h.Add(0x09);
-        foreach (var f in folders) foreach (var (size, _) in f.Files.SkipLast(1)) Num(h, size);
-        // A folder of one file with a folder CRC needs no file CRC here.
-        h.Add(0x0A);
-        Digests(h, [.. folders.Where(f => !(f.Files.Length == 1 && f.UnpackCrc is not null)).SelectMany(f => f.Files).Select(f => f.Crc)]);
-        h.AddRange([0x00, 0x00]);
-        int files = folders.Sum(f => f.Files.Length);
-        h.Add(0x05);
-        Num(h, files);
-        var names = new List<byte> { 0x00 };
-        for (int i = 0; i < files; i++) names.AddRange(Encoding.Unicode.GetBytes($"f{i}.bin\0"));
-        h.Add(0x11);
-        Num(h, names.Count);
-        h.AddRange(names);
-        h.AddRange([0x00, 0x00]);
-
-        byte[] header = [.. h];
-        var sig = new byte[32];
-        new byte[] { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04 }.CopyTo(sig, 0);
-        BinaryPrimitives.WriteInt64LittleEndian(sig.AsSpan(12), packs.Sum(p => (long)p.Length));
-        BinaryPrimitives.WriteInt64LittleEndian(sig.AsSpan(20), header.Length);
-        BinaryPrimitives.WriteUInt32LittleEndian(sig.AsSpan(28), Crc32.HashToUInt32(header));
-        BinaryPrimitives.WriteUInt32LittleEndian(sig.AsSpan(8), Crc32.HashToUInt32(sig.AsSpan(12, 20)));
-        return [.. sig, .. packs.SelectMany(p => p), .. header];
     }
 
     private static byte[] Concat(byte[][] parts) => [.. parts.SelectMany(p => p)];

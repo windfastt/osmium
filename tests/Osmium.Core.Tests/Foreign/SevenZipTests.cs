@@ -310,6 +310,74 @@ public class SevenZipTests
         }
     }
 
+    private static readonly byte[] Bcj2Id = [0x03, 0x03, 0x01, 0x1B];
+
+    /// <summary>A BCJ2 folder that passes <paramref name="main"/> through (no branch instructions in it) and reads its
+    /// range coder from an AES coder, whose output of <paramref name="aesOut"/> bytes thus never reaches the result.</summary>
+    private static SevenZipCraft.Folder RangeCoderDecoy(byte[] main, int aesOut, uint? fileCrc, uint? folderCrc = null) =>
+        new([new(Bcj2Id, null, NumIn: 4), new(SevenZipCraft.AesId, SevenZipCraft.AesProps(10, [], SomeIv))],
+            [main, [], [], new byte[16]], [main.Length, aesOut], [(main.Length, fileCrc)], Binds: [(3, 1)], PackedIn: [0, 1, 2, 4],
+            UnpackCrc: folderCrc);
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(5)] // exactly what BCJ2 reads at its start: all of it is read, none of it used
+    public void AnAesCoderOnBcj2sRangeCoderProvesNoPassword(int aesOut)
+    {
+        using var t = new TempDir();
+        var text = "plain text without branch opcodes"u8.ToArray();
+        var secret = "data that only the right password decrypts"u8.ToArray();
+        var real = SevenZipCraft.Encrypted("right", SevenZipCraft.AesProps(10, [], SomeIv), secret) with { Files = [(secret.Length, null)] };
+        string path = ForeignData.Write(t, "decoy-rc.7z", SevenZipCraft.Build([RangeCoderDecoy(text, aesOut, System.IO.Hashing.Crc32.HashToUInt32(text)), real]));
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((1, 1, 0), (r.FilesOk, r.SkippedUnsupported, r.Unverified));
+        Assert.Contains(r.Errors, e => e.EndsWith(SevenZipSource.Unprovable, StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f1.bin")));
+    }
+
+    [Fact]
+    public void WhenNothingProvesThePasswordAFileWithoutAChecksumIsNotWrittenUnderIt()
+    {
+        // One encrypted folder: its first file has a CRC and passes, but nothing it holds was decrypted, so the second,
+        // which has no CRC, is refused rather than written under a password nothing checked.
+        using var t = new TempDir();
+        var first = "plain text without branch opcodes"u8.ToArray();
+        var second = "a second file with no checksum"u8.ToArray();
+        byte[] main = [.. first, .. second];
+        var folder = RangeCoderDecoy(main, 16, null) with { Files = [SevenZipCraft.Checked(first), (second.Length, null)] };
+        string path = ForeignData.Write(t, "decoy-two.7z", SevenZipCraft.Build([folder]));
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((1, 1, 0), (r.FilesOk, r.SkippedUnsupported, r.Unverified));
+        Assert.Contains(r.Errors, e => e.StartsWith("f1.bin: not extracted: " + SevenZipSource.Unprovable, StringComparison.Ordinal));
+        Assert.Equal(["f0.bin"], FilesUnder(t.Sub("out")));
+    }
+
+    [Fact]
+    public void AnEncryptedFileListProvesThePasswordOnlyThroughDecryptedBytes()
+    {
+        // The file list comes out of a BCJ2 folder whose only AES coder feeds the range coder: it matches its CRC under
+        // any password, so it must not vouch for the data folder, which has no checksum.
+        using var t = new TempDir();
+        var secret = "data that only the right password decrypts"u8.ToArray();
+        var real = SevenZipCraft.Encrypted("right", SevenZipCraft.AesProps(10, [], SomeIv), secret) with { Files = [(secret.Length, null)] };
+        var bytes = SevenZipCraft.Build([real], header =>
+        {
+            for (int i = 1; i < header.Length; i++)
+                Assert.False((header[i] & 0xFE) == 0xE8 || (header[i - 1] == 0x0F && (header[i] & 0xF0) == 0x80), "a branch instruction in the header");
+            return RangeCoderDecoy(header, 16, null, System.IO.Hashing.Crc32.HashToUInt32(header));
+        });
+        string path = ForeignData.Write(t, "decoy-header.7z", bytes);
+        int asked = 0;
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "wrong"; } });
+        Assert.Equal(1, asked);
+        Assert.Equal("yes (AES-256, file names too)", s.Details.Single(d => d.Label == "Encrypted").Value);
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((0, 1, 0), (r.FilesOk, r.SkippedUnsupported, r.Unverified));
+        Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f0.bin")));
+    }
+
     [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {
