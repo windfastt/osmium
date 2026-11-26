@@ -13,6 +13,9 @@ public sealed class OsaReader : IDisposable
     private readonly SafeFileHandle _handle;
     private readonly ArchiveKey? _key;
     private readonly MethodRegistry _registry;
+    private readonly ArchiveFooter _footer;
+    private readonly Spares? _spares;
+    private readonly List<string> _warnings;
 
     public string Path { get; }
     public ArchiveHeader Header { get; }
@@ -20,12 +23,23 @@ public sealed class OsaReader : IDisposable
     public long FileLength { get; }
     public IReadOnlyList<ArchiveEntry> Entries => Index.Entries;
     public IReadOnlyList<BlockInfo> Blocks => Index.Blocks;
-    /// <summary>Problems found while opening that did not stop it (none yet).</summary>
-    public IReadOnlyList<string> Warnings { get; } = [];
+    /// <summary>Problems found while opening that did not stop it, e.g. a damaged spare copy (one line each).</summary>
+    public IReadOnlyList<string> Warnings => _warnings;
+    /// <summary>The archive has spare copies of its index frame and header (container 1.1, FORMAT §4.1) and the trailer
+    /// of the header copy checks out. <see cref="VerifySpareCopies"/> compares them byte for byte.</summary>
+    public bool HasSpareCopies => _spares is not null;
 
-    private OsaReader(string path, SafeFileHandle handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length, MethodRegistry reg)
+    internal const string SpareDamaged = "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk.";
+    internal const string SpareHeaderDamaged = "The spare copy of the header is damaged; the archive is complete. Copy it to a healthy disk.";
+
+    /// <summary>Where the spare copies are: B (the copy of the index frame), followed by H, whose trailer this is.</summary>
+    private sealed record Spares(long IndexCopyOffset, long HeaderCopyOffset, SpareTrailer Trailer);
+
+    private OsaReader(string path, SafeFileHandle handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length,
+        MethodRegistry reg, ArchiveFooter footer, Spares? spares, List<string> warnings)
     {
         Path = path; _handle = handle; Header = header; _key = key; Index = index; FileLength = length; _registry = reg;
+        _footer = footer; _spares = spares; _warnings = warnings;
     }
 
     /// <param name="password">Called only when the archive is encrypted; return null to cancel.</param>
@@ -57,19 +71,124 @@ public sealed class OsaReader : IDisposable
                 key = ArchiveKey.Derive(pw, header.Encryption!.Salt, header.Encryption.Iterations);
                 if (!key.Matches(header.Encryption.Verifier)) throw new WrongPasswordException();
             }
-            var body = ReadFrame(handle, footer.IndexOffset, footer.IndexLength, Osa.IndexFrameNumber, header, key, registry, isIndex: true);
-            var raw = PipelineExecutor.Decode(body.Descriptor, body.Payload, CodecContext.None);
-            if (BlockBody.Hash128(raw) != body.RawHash) throw new CorruptDataException("Archive index is corrupt (hash mismatch).");
-            var index = ArchiveIndex.Deserialize(raw, header.Length, registry);
-            foreach (var b in index.Blocks)
-                if (b.Offset + b.FrameLength > footer.IndexOffset) throw new CorruptDataException("Block table points past the index.");
-            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry);
+            var index = ReadIndex(handle, footer.IndexOffset, footer.IndexLength, footer.IndexOffset, header, key, registry);
+            var warnings = new List<string>();
+            var spares = FindSpares(handle, index, footer, header, out bool damaged);
+            if (damaged) warnings.Add(SpareDamaged);
+            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, footer, spares, warnings);
         }
         catch
         {
             handle.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Reads, decrypts, decodes and checks an index frame at <paramref name="offset"/>; its blocks must end by
+    /// <paramref name="blocksEnd"/>.</summary>
+    private static ArchiveIndex ReadIndex(SafeFileHandle handle, long offset, long frameLength, long blocksEnd, ArchiveHeader header,
+        ArchiveKey? key, MethodRegistry registry)
+    {
+        var body = ReadFrame(handle, offset, frameLength, Osa.IndexFrameNumber, header, key, registry, isIndex: true);
+        var raw = PipelineExecutor.Decode(body.Descriptor, body.Payload, CodecContext.None);
+        if (BlockBody.Hash128(raw) != body.RawHash) throw new CorruptDataException("Archive index is corrupt (hash mismatch).");
+        var index = ArchiveIndex.Deserialize(raw, header.Length, registry);
+        foreach (var b in index.Blocks)
+            if (b.Offset + b.FrameLength > blocksEnd) throw new CorruptDataException("Block table points past the index.");
+        return index;
+    }
+
+    /// <summary>
+    /// The spare copies the index names (<see cref="ArchiveIndex.SparesKey"/>), when H's trailer just before the index
+    /// frame checks out and the offsets add up: B, then H, then the index frame. <paramref name="damaged"/> is set when
+    /// the index names spare copies that are not there as it says. A trailer of a newer writer is not used and is no
+    /// damage.
+    /// </summary>
+    private static Spares? FindSpares(SafeFileHandle handle, ArchiveIndex index, ArchiveFooter footer, ArchiveHeader header, out bool damaged)
+    {
+        damaged = false;
+        if (!index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var value)) return null;
+        var trailer = ReadTrailer(handle, footer.IndexOffset);
+        if (trailer is { Newer: true }) return null;
+        damaged = true;
+        if (value.Length != 8 || trailer is not { } t) return null;
+        // Unsigned: a crafted offset must not wrap around to pass the check.
+        ulong b = BinaryPrimitives.ReadUInt64LittleEndian(value), end = (ulong)footer.IndexOffset;
+        ulong between = (ulong)footer.IndexLength + (ulong)t.CopyLength;
+        if (b > end || end - b != between || b < (ulong)header.Length) return null;
+        if (index.Blocks.Count > 0 && index.Blocks.Max(k => k.Offset + k.FrameLength) > (long)b) return null;
+        damaged = false;
+        return new Spares((long)b, (long)b + footer.IndexLength, t);
+    }
+
+    /// <summary>H's trailer: the 32 bytes before the index frame, if they are one.</summary>
+    private static SpareTrailer? ReadTrailer(SafeFileHandle handle, long indexOffset)
+    {
+        if (indexOffset < SpareCopies.TrailerSize) return null;
+        var t = new byte[SpareCopies.TrailerSize];
+        return TryRead(handle, indexOffset - SpareCopies.TrailerSize, t) ? SpareTrailer.Read(t) : null;
+    }
+
+    private static bool TryRead(SafeFileHandle handle, long offset, Span<byte> buffer)
+    {
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int n = RandomAccess.Read(handle, buffer[read..], offset + read);
+            if (n <= 0) return false;
+            read += n;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Compares the spare copies with what they copy: B with the index frame byte for byte, H's header bytes with the
+    /// header at offset 0, and H's padding with zeros. Returns one warning line per problem (none when the archive has
+    /// no spare copies). Reads the index twice, so it runs in Test, not on every open.
+    /// </summary>
+    public IReadOnlyList<string> VerifySpareCopies()
+    {
+        if (!Index.Metadata.ContainsKey(ArchiveIndex.SparesKey)) return [];
+        if (_spares is not { } s) return _warnings.Contains(SpareDamaged) ? [SpareDamaged] : [];
+        var problems = new List<string>();
+        try
+        {
+            if (!SameBytes(s.IndexCopyOffset, _footer.IndexOffset, _footer.IndexLength)) problems.Add(SpareDamaged);
+            if (s.Trailer.HeaderLength != Header.Length || !SameBytes(s.HeaderCopyOffset, 0, Header.Length)
+                || !Zeros(s.HeaderCopyOffset + s.Trailer.HeaderLength, s.Trailer.PaddingLength))
+                problems.Add(SpareHeaderDamaged);
+        }
+        catch (IOException)
+        {
+            problems.Add(SpareDamaged);
+        }
+        return problems;
+    }
+
+    private bool SameBytes(long a, long b, long count)
+    {
+        var x = new byte[(int)Math.Min(count, 1 << 20)];
+        var y = new byte[x.Length];
+        for (long done = 0; done < count;)
+        {
+            int n = (int)Math.Min(x.Length, count - done);
+            if (!TryRead(_handle, a + done, x.AsSpan(0, n)) || !TryRead(_handle, b + done, y.AsSpan(0, n))) return false;
+            if (!x.AsSpan(0, n).SequenceEqual(y.AsSpan(0, n))) return false;
+            done += n;
+        }
+        return true;
+    }
+
+    private bool Zeros(long offset, long count)
+    {
+        var x = new byte[(int)Math.Min(Math.Max(count, 1), 1 << 16)];
+        for (long done = 0; done < count;)
+        {
+            int n = (int)Math.Min(x.Length, count - done);
+            if (!TryRead(_handle, offset + done, x.AsSpan(0, n)) || x.AsSpan(0, n).ContainsAnyExcept((byte)0)) return false;
+            done += n;
+        }
+        return true;
     }
 
     private static BlockBody ReadFrame(SafeFileHandle h, long offset, long frameLength, ulong expectedFrame,

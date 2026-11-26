@@ -78,6 +78,12 @@ public sealed record ExtractOptions
     internal Func<string, string, string?>? ZoneWriter { get; init; }
 }
 
+/// <summary>
+/// Progress of an extraction or test. When every selected file's size is known, BytesTotal is their total and BytesDone
+/// counts the output bytes written or checked; .osa archives always know their sizes, so for them BytesTotal is the
+/// selection's total and the last report has BytesDone equal to it. When a source does not know the total, BytesTotal
+/// and FilesTotal are 0 and BytesDone counts archive bytes read so far. An empty selection reports (0, 0) once.
+/// </summary>
 public sealed record ExtractProgress(long BytesDone, long BytesTotal, int FilesDone, int FilesTotal, string? Current);
 
 public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkipped, IReadOnlyList<string> Errors)
@@ -136,7 +142,8 @@ public static class Extractor
         ExtractOptions? options, IProgress<ExtractProgress>? progress, CancellationToken ct) =>
         Run(reader, destination, selection, options ?? new(), progress, ct, test: false);
 
-    /// <summary>Fully decodes everything and verifies every block and file hash without writing files.</summary>
+    /// <summary>Fully decodes everything and verifies every block and file hash without writing files. Damaged spare
+    /// copies of the file list or header (<see cref="OsaReader.VerifySpareCopies"/>) are reported in Warnings.</summary>
     public static ExtractResult Test(OsaReader reader, IProgress<ExtractProgress>? progress, CancellationToken ct) =>
         Run(reader, null, null, new ExtractOptions(), progress, ct, test: true);
 
@@ -284,7 +291,7 @@ public static class Extractor
         return new ExtractResult(ok, failed, skipped, errors.ToList())
         {
             FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
-            Warnings = [.. warnings],
+            Warnings = [.. warnings, .. test ? reader.VerifySpareCopies() : []],
             SkippedUnsafe = unsafePaths,
             Written = [.. files.Where(f => f.Written).Select(f => new WrittenFile(f.Entry, f.Target!))],
         };

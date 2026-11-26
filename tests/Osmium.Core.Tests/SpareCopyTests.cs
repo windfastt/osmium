@@ -67,6 +67,62 @@ internal static class SpareArchives
         return new Tail(r.Header.Length, indexOffset, indexLength, blocksEnd, trailer);
     }
 
+    /// <summary>
+    /// An unencrypted archive written byte by byte, so that its index can say anything about spare copies:
+    /// <paramref name="sparesValue"/> gets B's offset and returns the value of the spares key (null: no key), and
+    /// <paramref name="tail"/> says whether B and H are written at all.
+    /// </summary>
+    public static string Craft(string path, IReadOnlyDictionary<string, byte[]> files, Func<long, byte[]?> sparesValue, bool tail = true,
+        bool newerIndex = false)
+    {
+        var header = new ArchiveHeader { Creator = "test" };
+        var headerBytes = header.Serialize();
+        using var fs = new FileStream(path, FileMode.Create);
+        fs.Write(headerBytes);
+        var index = new ArchiveIndex();
+        foreach (var (name, data) in files.OrderBy(f => f.Key, StringComparer.Ordinal))
+        {
+            var (desc, payload) = PipelineExecutor.Encode(PipelineSpec.Parse("store", Reg), data, CodecContext.None);
+            long offset = fs.Position;
+            var frame = Frame((ulong)index.Blocks.Count, 0, [.. new BlockBody(desc, BlockBody.Hash128(data), payload).SerializePrefix(), .. payload]);
+            fs.Write(frame);
+            index.Entries.Add(new ArchiveEntry { Path = name, Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(index.Blocks.Count, 0, data.Length)], Hash = XxHash128.HashToUInt128(data) });
+            index.Blocks.Add(new BlockInfo(index.Blocks.Count, offset, frame.Length, data.Length, data.Length, desc));
+        }
+        long spareOffset = fs.Position;
+        if (sparesValue(spareOffset) is { } v) index.Metadata[ArchiveIndex.SparesKey] = v;
+        var raw = index.Serialize();
+        var (idesc, ipayload) = PipelineExecutor.Encode(PipelineSpec.Parse("zstd(level=3)", Reg), raw, CodecContext.None);
+        if (newerIndex)
+        {
+            // The index stored with method id 63, which no version knows yet: as if a newer Osmium had written it.
+            var blob = new BlobWriter().U(1).U(63).U((ulong)raw.Length).Bytes([0]).ToArray();
+            (idesc, ipayload) = (BlockDescriptor.DeserializeOrStandIn(blob, Reg, "the index"), raw);
+        }
+        var indexFrame = Frame(Osa.IndexFrameNumber, Osa.FrameFlagIndex, [.. new BlockBody(idesc, BlockBody.Hash128(raw), ipayload).SerializePrefix(), .. ipayload]);
+        if (tail)
+        {
+            fs.Write(indexFrame);
+            fs.Write(SpareCopies.HeaderCopy(headerBytes));
+        }
+        long indexOffset = fs.Position;
+        fs.Write(indexFrame);
+        fs.Write(new ArchiveFooter(indexOffset, indexFrame.Length, BinaryPrimitives.ReadUInt64LittleEndian(header.ArchiveId)).Serialize());
+        return path;
+
+        static byte[] Frame(ulong number, uint flags, byte[] body)
+        {
+            var f = new byte[Osa.FrameHeaderSize + body.Length];
+            Osa.FrameMagic.CopyTo(f);
+            BinaryPrimitives.WriteUInt32LittleEndian(f.AsSpan(4), flags);
+            BinaryPrimitives.WriteUInt64LittleEndian(f.AsSpan(8), number);
+            BinaryPrimitives.WriteInt64LittleEndian(f.AsSpan(16), body.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(f.AsSpan(24), Osa.Crc(f.AsSpan(0, 24)));
+            body.CopyTo(f, Osa.FrameHeaderSize);
+            return f;
+        }
+    }
+
     public static string Damage(string archive, string output, Action<byte[]> damage)
     {
         var b = File.ReadAllBytes(archive);
@@ -252,6 +308,156 @@ public class SpareCopyTests
         var read = SpareArchives.ReadAs10(path, pw);
         Assert.Equal(files.Keys.Order(StringComparer.Ordinal), read.Keys.Order(StringComparer.Ordinal));
         foreach (var (name, data) in files) Assert.Equal(data, read[name]);
+    }
+
+    // ------------------------------------------------------------------ the reader: trailer, warnings, Test
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    /// <summary>Opens, tests and extracts; every file must verify. Returns the reader's and Test's warnings.</summary>
+    private static (IReadOnlyList<string> Open, IReadOnlyList<string> Test, bool Spares) Check(string path, IReadOnlyDictionary<string, byte[]> files,
+        string? password = null)
+    {
+        using var r = OsaReader.Open(path, () => password);
+        var test = Extractor.Test(r, null, Ct);
+        Assert.Equal((files.Count, 0), (test.FilesOk, test.FilesFailed));
+        Assert.Empty(test.Errors);
+        string dest = path + ".out";
+        var x = Extractor.Extract(r, dest, null, null, null, Ct);
+        Assert.Equal(files.Count, x.FilesOk);
+        foreach (var (name, data) in files) Assert.Equal(data, File.ReadAllBytes(Path.Combine([dest, .. name.Split('/')])));
+        Directory.Delete(dest, recursive: true);
+        return (r.Warnings, test.Warnings, r.HasSpareCopies);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnIntactArchiveWithSpareCopiesOpensAndTestsWithoutWarnings(bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 3000);
+        var (open, test, spares) = Check(SpareArchives.Write(t.Sub("a.osa"), files, Low(pw)), files, pw);
+        Assert.True(spares);
+        Assert.Empty(open);
+        Assert.Empty(test);
+
+        var small = Check(SpareArchives.Write(t.Sub("small.osa"), files, new OsaWriterOptions { Password = pw, SpareThreshold = long.MaxValue }), files, pw);
+        Assert.Equal((false, 0, 0), (small.Spares, small.Open.Count, small.Test.Count));
+    }
+
+    [Fact]
+    public void ADamagedTrailerIsReportedAndTheArchiveStillOpens()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        for (int i = 0; i < SpareCopies.TrailerSize; i++)
+        {
+            string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => b[tail.TrailerOffset + i] ^= 0x10);
+            var (open, test, spares) = Check(bad, files);
+            Assert.False(spares);
+            Assert.Equal([OsaReader.SpareDamaged], open);
+            Assert.Equal([OsaReader.SpareDamaged], test);
+        }
+    }
+
+    [Fact]
+    public void ATrailerOfANewerWriterIsIgnoredWithoutAWarning()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        foreach (var newer in new[] { tail.Trailer!.Value with { Flags = 1 }, tail.Trailer!.Value with { Reserved = 7 }, tail.Trailer!.Value with { Flags = 4, PaddingLength = 1 << 40 } })
+        {
+            string later = SpareArchives.Damage(path, t.Sub("newer.osa"), b => newer.Write(b.AsSpan((int)tail.TrailerOffset)));
+            var (open, test, spares) = Check(later, files);
+            Assert.False(spares);
+            Assert.Empty(open);
+            Assert.Empty(test);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing tail")]
+    [InlineData("three bytes")]
+    [InlineData("nine bytes")]
+    [InlineData("zero")]
+    [InlineData("one off")]
+    [InlineData("largest")]
+    [InlineData("past the end")]
+    public void ASparesKeyThatDoesNotMatchTheFileGivesAWarningNeverAnError(string how)
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 1500);
+        string path = SpareArchives.Craft(t.Sub("crafted.osa"), files, at => how switch
+        {
+            "missing tail" => SpareCopies.OffsetValue(at),
+            "three bytes" => [1, 2, 3],
+            "nine bytes" => [.. SpareCopies.OffsetValue(at), 0],
+            "zero" => SpareCopies.OffsetValue(0),
+            "one off" => SpareCopies.OffsetValue(at + 1),
+            "largest" => [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            _ => SpareCopies.OffsetValue(long.MaxValue - 5),
+        }, tail: how != "missing tail");
+        var (open, test, spares) = Check(path, files);
+        Assert.False(spares);
+        Assert.Equal([OsaReader.SpareDamaged], open);
+        Assert.Equal([OsaReader.SpareDamaged], test);
+
+        var good = Check(SpareArchives.Craft(t.Sub("good.osa"), files, SpareCopies.OffsetValue), files);
+        Assert.Equal((true, 0, 0), (good.Spares, good.Open.Count, good.Test.Count));
+    }
+
+    [Fact]
+    public void TestFindsDamageInTheSpareCopiesThatOpeningDoesNotLookAt()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        var cases = new (long At, string Warning)[]
+        {
+            (tail.SpareOffset, OsaReader.SpareDamaged),                                  // B's frame header
+            (tail.SpareOffset + tail.IndexLength / 2, OsaReader.SpareDamaged),           // B's body
+            (tail.HeaderCopyOffset + 3, OsaReader.SpareHeaderDamaged),                   // H's header bytes
+            (tail.HeaderCopyOffset + tail.HeaderLength + 100, OsaReader.SpareHeaderDamaged), // H's padding
+        };
+        foreach (var (at, warning) in cases)
+        {
+            string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => b[at] ^= 0x01);
+            var (open, test, spares) = Check(bad, files);
+            Assert.True(spares);
+            Assert.Empty(open);
+            Assert.Equal([warning], test);
+        }
+    }
+
+    [Fact]
+    public void EverySingleByteChangeIsFoundByOpeningTestingOrAWarning()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(1, 300);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var original = File.ReadAllBytes(path);
+        var unnoticed = new List<int>();
+        for (int i = 0; i < original.Length; i++)
+        {
+            var bad = (byte[])original.Clone();
+            bad[i] ^= 0x41;
+            File.WriteAllBytes(t.Sub("bad.osa"), bad);
+            try
+            {
+                using var r = OsaReader.Open(t.Sub("bad.osa"));
+                var res = Extractor.Test(r, null, Ct);
+                if (res.FilesFailed == 0 && res.Errors.Count == 0 && r.Warnings.Count == 0 && res.Warnings.Count == 0) unnoticed.Add(i);
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException) { }
+        }
+        Assert.Empty(unnoticed);
     }
 
     [Fact]
