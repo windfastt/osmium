@@ -41,6 +41,26 @@ public sealed record ZipResult
 public static class ZipCreator
 {
     /// <summary>Writes the scanned files and folders to <see cref="ZipOptions.OutputPath"/>.</summary>
+    /// <remarks>
+    /// <para>The ZIP is written to <c>&lt;OutputPath&gt;.partial-&lt;random&gt;</c> in the output folder, read back
+    /// and checked entry by entry (<see cref="ZipOptions.Verify"/>), and only then moved into place; a cancellation or
+    /// any failure deletes the partial file and touches nothing else. Every folder of the scan is an entry ("dir/"), so
+    /// empty folders survive. ZIP files are never encrypted.</para>
+    /// <para>A file that cannot be read is left out (<see cref="ZipResult.LeftOutUnreadable"/>). A file whose size or
+    /// last-write time changes while it is read is left out too (<see cref="ZipResult.LeftOutChanged"/>): the ZIP is
+    /// written again without it, never with a torn copy. The third time files change, the operation fails with
+    /// <see cref="Osmium.Core.Planning.SourceChangedException"/>.</para>
+    /// <para>Progress: while files are added, <see cref="ZipProgress.Current"/> names the file being added and
+    /// BytesDone counts the source bytes read; while the finished ZIP is checked, Current is null, FilesDone equals
+    /// FilesTotal and BytesDone counts the checked bytes from 0 again. Reports come at most every 100 ms, and once at
+    /// the end. Writing starts again from 0 after a changed file.</para>
+    /// </remarks>
+    /// <exception cref="IOException">The output is inside a folder being compressed, or exists and
+    /// <see cref="ZipOptions.Overwrite"/> is false (nothing is written then).</exception>
+    /// <exception cref="InvalidDataException">The written ZIP did not verify (nothing is left behind).</exception>
     public static Task<ZipResult> CreateAsync(Osmium.Core.Planning.ScanResult scan, ZipOptions options, CancellationToken ct)
-        => throw new NotSupportedException("Writing ZIP files is not available yet.");
+        => CreateAsync(scan, options, null, ct);
+
+    internal static Task<ZipResult> CreateAsync(Osmium.Core.Planning.ScanResult scan, ZipOptions options, Zip.ZipTestHooks? hooks, CancellationToken ct)
+        => Task.Run(() => Zip.ZipWriter.Write(scan, options, hooks, ct), ct);
 }
