@@ -312,6 +312,8 @@ internal sealed class GuardedExtractor : IEntrySink
             _failed++;
             _errors.Add($"{Esc(e.Path)}: {(e.Encrypted ? "wrong password or damaged file" : "damaged data")} ({Esc(ForeignErrors.Reason(ex.InnerException!))})");
             keep = _request.KeepBroken;
+            // A broken file that is kept holds bytes the archive chose, as a finished one does: it gets the mark too.
+            if (keep && _zone is not null && _writeZone(part, _zone) is { } why) _warnings.Add(Extractor.ZoneWarning(Esc(e.Path), why));
             throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not (ExpansionLimitException or FreeSpaceException or EntryLimitException))

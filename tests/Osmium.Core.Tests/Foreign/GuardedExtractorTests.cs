@@ -445,6 +445,27 @@ public class GuardedExtractorTests
     }
 
     [Fact]
+    public void ABrokenFileThatIsKeptGetsTheMarkToo()
+    {
+        using var s = new Setup();
+        var calls = new List<string>();
+        GuardedExtractor.ZoneOverride = "[ZoneTransfer]\r\nZoneId=3\r\n";
+        GuardedExtractor.ZoneWriterOverride = (path, zone) => { calls.Add(path); return null; };
+        try
+        {
+            var r = s.Extract([new MemoryEntry("payload.exe", Encoding.UTF8.GetBytes("MZ chosen bytes")) { Damaged = true }], new ArchiveExtractRequest { KeepBroken = true });
+            Assert.Equal(1, r.FilesFailed);
+            string kept = Assert.Single(Directory.GetFiles(s.Out, "payload.exe.osmium-part-*"));
+            Assert.Equal([kept], calls);
+        }
+        finally
+        {
+            GuardedExtractor.ZoneOverride = null;
+            GuardedExtractor.ZoneWriterOverride = null;
+        }
+    }
+
+    [Fact]
     public void AMarkThatCannotBeWrittenIsAWarning()
     {
         using var s = new Setup();
