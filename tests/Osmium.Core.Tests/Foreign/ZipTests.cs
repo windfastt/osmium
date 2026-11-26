@@ -241,6 +241,34 @@ public class ZipTests
         Assert.Equal((1, 1), (test.FilesOk, test.FilesFailed));
     }
 
+    [Theory]
+    [InlineData(false, 40)] // stored inside AES: the data decrypts to other bytes, and only the code can tell
+    [InlineData(true, -1)]  // deflated: the last byte of the stored code, which inflating never reads
+    public void TheAuthenticationCodeChecksEveryAesFile(bool deflate, int flip)
+    {
+        // AE-2 stores no CRC: the code over the encrypted bytes is the only check of the second file, whose password
+        // the first one already proved.
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.AddAes("first.txt", ForeignData.Text(4000), "pw");
+        var data = ForeignData.Text(4000, 2);
+        var second = new ZipCraft.Item
+        {
+            Name = "second.txt"u8.ToArray(), Method = 99, Flags = 0x801, Size = data.Length,
+            Stored = ZipCraft.AesEncrypt("pw", deflate ? ZipCraft.Deflate(data) : data, seed: 2), Extra = ZipCraft.AesExtra(deflate ? (ushort)8 : (ushort)0),
+        };
+        z.Items.Add(second);
+        second.Stored[flip >= 0 ? flip : second.Stored.Length - 1] ^= 1;
+        using var s = Open(ForeignData.Write(t, "code.zip", z.Build()), new ArchiveOpenOptions { Password = () => "pw" });
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1, 0), (r.FilesOk, r.FilesFailed, r.Unverified));
+        Assert.Contains(r.Errors, e => e.StartsWith("second.txt: wrong password or damaged file", StringComparison.Ordinal));
+        Assert.Equal(["first.txt"], FilesUnder(t.Sub("out")));
+        Assert.Empty(Directory.GetFiles(t.Sub("out"), "*.osmium-part-*"));
+        var test = s.Test(null, null, Ct);
+        Assert.Equal((1, 1), (test.FilesOk, test.FilesFailed));
+    }
+
     [Fact]
     public void AnAesPasswordThatPassesTheVerifierIsStillCheckedAgainstTheAuthenticationCode()
     {
