@@ -199,6 +199,53 @@ public class GuardedExtractorTests
         s.AssertNothingOutside();
     }
 
+    public static TheoryData<OverwriteMode, bool> ModesAndLinks()
+    {
+        var data = new TheoryData<OverwriteMode, bool>();
+        foreach (var mode in new[] { OverwriteMode.Skip, OverwriteMode.Rename, OverwriteMode.Overwrite, OverwriteMode.Fail })
+            foreach (bool dangling in new[] { false, true }) data.Add(mode, dangling);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(ModesAndLinks))]
+    public void AFileLinkInTheDestinationIsNeverWrittenThrough(OverwriteMode mode, bool dangling)
+    {
+        using var s = new Setup();
+        Directory.CreateDirectory(s.Out);
+        string target = dangling ? Path.Combine(s.T.Path, "outside", "missing.txt") : s.Sentinel;
+        try { File.CreateSymbolicLink(s.At("a.txt"), target); }
+        catch (Exception e) when (e is UnauthorizedAccessException or IOException)
+        {
+            Assert.Skip("creating a symbolic link needs Developer Mode or elevation on Windows");
+        }
+        var r = s.Extract([MemoryEntry.File("a.txt", "the entry")], new ArchiveExtractRequest { Overwrite = mode });
+        s.AssertNothingOutside(); // the sentinel is unchanged, and the dangling link's target was not created
+        var link = new FileInfo(s.At("a.txt"));
+        switch (mode)
+        {
+            case OverwriteMode.Skip:
+                Assert.Equal((0, 1), (r.FilesOk, r.SkippedExisting));
+                Assert.NotNull(link.LinkTarget);
+                break;
+            case OverwriteMode.Rename:
+                Assert.Equal((1, 1), (r.FilesOk, r.Renamed));
+                Assert.NotNull(link.LinkTarget);
+                Assert.Equal("the entry", File.ReadAllText(s.At("a (2).txt")));
+                break;
+            case OverwriteMode.Fail:
+                Assert.Equal((0, 1), (r.FilesOk, r.FilesFailed));
+                Assert.NotNull(link.LinkTarget);
+                break;
+            case OverwriteMode.Overwrite:
+                // The link itself is replaced by the file; nothing goes through it.
+                Assert.Equal(1, r.FilesOk);
+                Assert.Null(link.LinkTarget);
+                Assert.Equal("the entry", File.ReadAllText(s.At("a.txt")));
+                break;
+        }
+    }
+
     [Fact]
     public void AJunctionInTheDestinationIsNeverWrittenThrough()
     {
