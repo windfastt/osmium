@@ -62,6 +62,8 @@ public sealed class OsaArchiveSource : IArchiveSource
 
     public ArchiveExtractResult Extract(string destination, ArchiveExtractRequest request, IProgress<ExtractProgress>? progress, CancellationToken ct)
     {
+        if (request.WrittenEarlier is { Count: > 0 })
+            throw new NotSupportedException("Extracting .osa archives in a second pass over earlier output is not available yet.");
         var limits = request.Limits ?? _limits;
         var selection = Selection(request.Indices, request.Select);
         var map = PrefixMap(request.StripPrefix);
