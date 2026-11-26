@@ -132,18 +132,26 @@ jobs:
               return next((g for g in m.groups() if g), "") if m else ""
 
           failures = []
+
+          # What a tool printed; a tool that fails (a damaged footer, bytes after the end) is a failure even when it
+          # printed everything first.
+          def output(rel, *args):
+              r = run(*args)
+              if r.returncode: failures.append(f"{rel}: {' '.join(args[:2])} failed: {r.stderr.decode(errors='replace').strip()}")
+              return r.stdout
+
           for f, name, cmd, _ in rows:
               rel = f"{f}/{name}"
               a, b = root / rel, work / rel
               pw = password(cmd)
               if name.endswith(".tar.xz"):
-                  if run("tar", "-tvJf", str(a)).stdout != run("tar", "-tvJf", str(b)).stdout: failures.append(f"{rel}: listing differs")
-                  if run("xz", "-dc", str(a)).stdout != run("xz", "-dc", str(b)).stdout: failures.append(f"{rel}: content differs")
+                  if output(rel, "tar", "-tvJf", str(a)) != output(rel, "tar", "-tvJf", str(b)): failures.append(f"{rel}: listing differs")
+                  if output(rel, "xz", "-dc", str(a)) != output(rel, "xz", "-dc", str(b)): failures.append(f"{rel}: content differs")
                   continue
               if name.endswith(".xz"):
-                  if run("xz", "-dc", str(a)).stdout != run("xz", "-dc", str(b)).stdout: failures.append(f"{rel}: content differs")
+                  if output(rel, "xz", "-dc", str(a)) != output(rel, "xz", "-dc", str(b)): failures.append(f"{rel}: content differs")
                   def totals(p):
-                      out = run("xz", "--robot", "-l", str(p)).stdout.decode()
+                      out = output(rel, "xz", "--robot", "-l", str(p)).decode()
                       return [l.split("\t")[i] for l in out.splitlines() if l.startswith("totals") for i in (1, 2, 4, 6)]
                   if totals(a) != totals(b): failures.append(f"{rel}: streams, blocks, size or check differ")
                   continue
@@ -152,8 +160,8 @@ jobs:
                   # Made by Info-ZIP: read by Info-ZIP (its password bytes are UTF-8 here). Info-ZIP adds a folder's entries
                   # in the order the file system lists them, which differs between file systems, so the listings are compared
                   # as sorted lines: the same names, sizes and times, in any order.
-                  la = sorted(run("unzip", "-l", str(a)).stdout.decode().splitlines()[1:])
-                  lb = sorted(run("unzip", "-l", str(b)).stdout.decode().splitlines()[1:])
+                  la = sorted(output(rel, "unzip", "-l", str(a)).decode().splitlines()[1:])
+                  lb = sorted(output(rel, "unzip", "-l", str(b)).decode().splitlines()[1:])
                   if la != lb: failures.append(f"{rel}: listing differs\ncommitted:\n" + "\n".join(la) + "\nmade again:\n" + "\n".join(lb))
                   for archive, into in ((a, ea), (b, eb)):
                       r = run("unzip", "-q", *(["-P", pw] if pw else []), str(archive), "-d", str(into))
@@ -161,7 +169,7 @@ jobs:
               else:
                   keep = (b"Path = ", b"Size = ", b"CRC = ", b"Encrypted = ", b"Method = ", b"Folder = ")
                   def listing(p):
-                      out = run("7z", "l", "-slt", *([f"-p{pw}"] if pw else []), str(p)).stdout.split(b"----------", 1)[-1]
+                      out = output(rel, "7z", "l", "-slt", *([f"-p{pw}"] if pw else []), str(p)).split(b"----------", 1)[-1]
                       return [l for l in out.splitlines() if l.startswith(keep)]
                   if listing(a) != listing(b):
                       failures.append(f"{rel}: listing differs\ncommitted:\n" + b"\n".join(listing(a)).decode() + "\nmade again:\n" + b"\n".join(listing(b)).decode())
