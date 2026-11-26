@@ -98,7 +98,8 @@ internal static partial class Cli
         progress.Done();
         foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
         PrintWarnings(res.Warnings);
-        bool good = res.FilesFailed == 0 && res.LeftOut == 0;
+        // Any error printed above (also one about no file in particular) means the test did not pass.
+        bool good = res.FilesFailed == 0 && res.LeftOut == 0 && res.Errors.Count == 0;
         string notChecked = res.Unverified > 0 ? $"; {res.Unverified} of them have no stored checksum and were read but not checked" : "";
         Console.WriteLine(good
             ? $"OK — {res.FilesOk} file(s) read{notChecked}."
@@ -134,7 +135,9 @@ internal static partial class Cli
         if (res.SkippedUnsupported > 0) parts.Add($"{res.SkippedUnsupported} not supported");
         Console.WriteLine($"Extracted {res.FilesOk} file(s) to {dest} in {sw.Elapsed.TotalSeconds:F1}s{(parts.Count > 0 ? ", " + string.Join(", ", parts) : "")}");
         if (res.LeftOut > 0) Console.WriteLine($"{res.LeftOut} item(s) were not extracted; the errors above say why.");
-        return res.FilesFailed == 0 && res.LeftOut == 0 ? 0 : 2;
+        else if (res.Errors.Count > 0) Console.WriteLine($"{res.Errors.Count} error(s) above: not everything was extracted as it should be.");
+        // Any error printed above (a folder that could not be made, too) makes the run fail.
+        return res.FilesFailed == 0 && res.LeftOut == 0 && res.Errors.Count == 0 ? 0 : 2;
     }
 
     // ------------------------------------------------------------ a name.zip, and names Osmium does not write

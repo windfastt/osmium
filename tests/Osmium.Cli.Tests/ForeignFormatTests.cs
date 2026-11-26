@@ -172,6 +172,21 @@ public sealed class ForeignFormatTests : IDisposable
     }
 
     [Fact]
+    public async Task AFolderThatCannotBeMadeEndsTheRunWithTwo()
+    {
+        // A file in the destination stands where the archive has a folder: the folder cannot be made, and although
+        // no file of the archive fails, the error makes the run fail.
+        string path = Zip("folder.zip", [("ok.txt", "fine"), ("x/sub/", "")]);
+        Directory.CreateDirectory(P("out"));
+        File.WriteAllText(P("out", "x"), "a file where the archive has a folder");
+        var r = await CliRunner.RunAsync(["x", path, P("out")]);
+        Assert.Contains("error: x/sub", r.Error);
+        Assert.Equal(2, r.ExitCode);
+        Assert.Contains("1 error(s) above", r.Output);
+        Assert.Equal("fine", File.ReadAllText(P("out", "ok.txt")));
+    }
+
+    [Fact]
     public async Task AnArchiveThatWouldExpandTooMuchNeedsForce()
     {
         string path = Zip("bomb.zip", [("big.bin", "small really")]);
