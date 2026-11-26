@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The page shell: styles (Theme/Osmium.axaml), tokens (Osmium.Desktop.Theming.ColorTokens), fonts, the Compress
+       page and the Archives page (TreeView + 100,000-row DataGrid or virtualized list). Platform-neutral: the same
+       assembly runs on Win32 (Proto.Desktop) and headless Skia on Linux (Proto.Render). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="[$(AvaloniaVersion)]" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="[$(AvaloniaVersion)]" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="[$(AvaloniaDataGridVersion)]" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\Fonts\*.ttf" />
+    <AvaloniaResource Include="Assets\osmium.ico" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Loaded into both apps by the harness through DOTNET_STARTUP_HOOKS, so the WinForms app and the preview get the
+       same forced GC and the same memory readout without changing either app. Framework types only. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>UiEval.StartupHook</AssemblyName>
+  </PropertyGroup>
+</Project>

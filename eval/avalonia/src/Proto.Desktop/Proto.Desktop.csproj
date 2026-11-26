@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Windows preview exe: Win32 backend, Skia drawing, HarfBuzz shaping (no Linux or macOS backends shipped).
+       Links the engine and desktop logic the WinForms app ships (src/Osmium.Desktop, read-only), so sizes, startup
+       and memory compare like for like. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>OsmiumUiPreview</AssemblyName>
+    <RootNamespace>Proto.Desktop</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Proto.Views\Assets\osmium.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <Product>Osmium UI preview</Product>
+    <AssemblyTitle>Osmium UI preview (unsigned mock, no real compression)</AssemblyTitle>
+    <!-- The event log serializes anonymous objects; keep that working in the trimmed build. -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Proto.Views\Proto.Views.csproj" />
+    <ProjectReference Include="..\..\..\..\src\Osmium.Desktop\Osmium.Desktop.csproj" />
+    <PackageReference Include="Avalonia.Win32" Version="[$(AvaloniaVersion)]" />
+    <PackageReference Include="Avalonia.Skia" Version="[$(AvaloniaVersion)]" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="[$(AvaloniaVersion)]" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The notification icon's file, for the tray host (it loads no Avalonia resources). -->
+    <None Include="..\Proto.Views\Assets\osmium.ico" Link="osmium.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- SkiaSharp and HarfBuzzSharp put their native debug symbols (libSkiaSharp.pdb, 80 MiB; libHarfBuzzSharp.pdb,
+       20 MiB) beside the DLLs; they are not shipped. -->
+  <Target Name="DropPackageDebugSymbols" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb' and '%(ResolvedFileToPublish.NuGetPackageId)' != ''" />
+    </ItemGroup>
+  </Target>
+</Project>

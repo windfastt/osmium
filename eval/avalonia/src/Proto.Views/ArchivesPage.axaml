@@ -1,0 +1,84 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Proto.Views"
+             x:Class="Proto.Views.ArchivesPage"
+             x:DataType="local:ArchivesPage"
+             Background="{DynamicResource Page}">
+  <!-- Archive browser at the scale A1.23 asks for: a folder TreeView plus 100,000 entries, shown either in the MIT
+       DataGrid or in a virtualized ListBox (both MIT; TreeDataGrid is not used, its newer releases are paid). -->
+  <UserControl.Styles>
+    <!-- Screen readers announce a folder by its name and file count (the container's own name is empty otherwise). -->
+    <Style Selector="TreeView#FolderTree TreeViewItem" x:DataType="local:FolderNode">
+      <Setter Property="AutomationProperties.Name" Value="{Binding}" />
+    </Style>
+  </UserControl.Styles>
+  <DockPanel Margin="32,22,32,14">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="spec" Text="{Binding SpecLine}" />
+      <TextBlock Classes="title" Text="Look inside before you extract" />
+    </StackPanel>
+
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,16,0,8">
+      <Button Name="GridView" Classes="btn ghost" Content="Grid view" AutomationProperties.Name="Grid view" />
+      <Button Name="ListView" Classes="btn ghost" Content="List view" AutomationProperties.Name="List view" />
+    </StackPanel>
+    <TextBlock DockPanel.Dock="Top" Name="Timing" Classes="muted" TextWrapping="Wrap" Margin="0,0,0,10" Text="" />
+
+    <Grid ColumnDefinitions="220,16,*">
+      <Border Classes="card" Padding="6">
+        <TreeView Name="FolderTree" ItemsSource="{Binding Folders}" AutomationProperties.Name="Folders">
+          <TreeView.ItemTemplate>
+            <TreeDataTemplate x:DataType="local:FolderNode" ItemsSource="{Binding Children}">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="{Binding Name}" />
+                <TextBlock Classes="muted" Text="{Binding Files}" />
+              </StackPanel>
+            </TreeDataTemplate>
+          </TreeView.ItemTemplate>
+        </TreeView>
+      </Border>
+
+      <Border Grid.Column="2" Classes="card" ClipToBounds="True">
+        <Panel>
+          <DataGrid Name="EntryGrid" ItemsSource="{Binding Entries}" AutomationProperties.Name="Entries"
+                    IsReadOnly="True" CanUserSortColumns="True" CanUserResizeColumns="True"
+                    GridLinesVisibility="None" HeadersVisibility="Column" SelectionMode="Extended"
+                    RowHeight="32" Background="Transparent">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Name" Binding="{Binding Name}" SortMemberPath="Name" Width="3*" />
+              <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" SortMemberPath="Kind" Width="2*" />
+              <DataGridTextColumn Header="Size" Binding="{Binding Size}" SortMemberPath="SizeBytes" Width="84" />
+              <DataGridTextColumn Header="Packed" Binding="{Binding Packed}" SortMemberPath="PackedBytes" Width="84" />
+              <DataGridTextColumn Header="Modified" Binding="{Binding ModifiedText}" SortMemberPath="Modified" Width="126" />
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <DockPanel Name="ListPanel" IsVisible="False">
+            <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" Padding="14,0" Height="34">
+              <Grid ColumnDefinitions="3*,2*,84,84,126" VerticalAlignment="Center">
+                <Button Grid.Column="0" Name="SortName" Classes="th" Content="Name" />
+                <Button Grid.Column="1" Name="SortKind" Classes="th" Content="Kind" />
+                <Button Grid.Column="2" Name="SortSize" Classes="th" Content="Size" AutomationProperties.Name="Sort by size" />
+                <Button Grid.Column="3" Name="SortPacked" Classes="th" Content="Packed" />
+                <Button Grid.Column="4" Name="SortModified" Classes="th" Content="Modified" />
+              </Grid>
+            </Border>
+            <ListBox Name="EntryList" Classes="entries" AutomationProperties.Name="Entries list" SelectionMode="Multiple">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="local:ArchiveEntry">
+                  <Grid ColumnDefinitions="3*,2*,84,84,126" Height="32">
+                    <TextBlock Grid.Column="0" Text="{Binding Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="1" Classes="ink2" Text="{Binding Kind}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="2" Classes="ink2 num" Text="{Binding Size}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="3" Classes="ink2 num" Text="{Binding Packed}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="4" Classes="muted" Text="{Binding ModifiedText}" VerticalAlignment="Center" />
+                  </Grid>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </DockPanel>
+        </Panel>
+      </Border>
+    </Grid>
+  </DockPanel>
+</UserControl>

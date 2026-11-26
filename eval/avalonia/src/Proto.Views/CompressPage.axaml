@@ -1,0 +1,109 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Proto.Views"
+             x:Class="Proto.Views.CompressPage"
+             x:DataType="local:CompressPage"
+             Background="{DynamicResource Page}">
+  <DockPanel Margin="32,22,32,14">
+    <!-- .sec-head: spec line, title, lede -->
+    <StackPanel Name="Header" DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="spec" Text="COMPRESS · 5 ITEMS · 166.9 MB · PROFILE ULTRA" />
+      <TextBlock Classes="title" Text="Pack it as small as you have time for" />
+      <TextBlock Classes="lede"
+                 Text="Drop files or folders here. Osmium works out what each one is, races codecs on samples and shows the plan before it packs anything." />
+    </StackPanel>
+
+    <!-- Actions -->
+    <Grid DockPanel.Dock="Bottom" ColumnDefinitions="Auto,*,Auto,Auto,Auto" Margin="0,14,0,0">
+      <TextBlock Grid.Column="0" Text="Archive" Classes="ink2" VerticalAlignment="Center" Margin="0,0,12,0" />
+      <TextBox Grid.Column="1" Classes="field" Text="D:\Backups\project-2026-11.osa"
+               AutomationProperties.Name="Archive path" />
+      <Button Name="Ghost" Grid.Column="2" Classes="btn ghost" Content="Browse…" Margin="8,0,0,0" />
+      <Button Grid.Column="3" Classes="btn ghost" Content="Tune…" Margin="20,0,0,0" />
+      <Button Name="Primary" Grid.Column="4" Classes="btn primary" Content="Compress" Margin="8,0,0,0" IsDefault="True" />
+    </Grid>
+
+    <StackPanel Spacing="16" Margin="0,18,0,0">
+      <!-- .tiles / .st -->
+      <Border Name="Tiles" Classes="tiles">
+        <ItemsControl ItemsSource="{Binding Stats}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <UniformGrid Columns="4" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="local:Stat">
+              <Border Classes="st" Margin="0,0,1,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="v" Text="{Binding Value}" />
+                  <TextBlock Classes="l" Text="{Binding Label}" />
+                  <TextBlock Classes="c" Text="{Binding Caption}" />
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Border>
+
+      <!-- .card with the file list -->
+      <Panel>
+        <Border Name="Card" Classes="card">
+          <StackPanel>
+            <Grid ColumnDefinitions="*,Auto" Margin="20,14,16,12">
+              <StackPanel Spacing="2" VerticalAlignment="Center">
+                <TextBlock Classes="h3" Text="Files to pack" />
+                <TextBlock Classes="muted" Text="5 items · 418 files · drop more here or paste with Ctrl+V" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Classes="btn ghost" Content="Add files…" />
+                <Button Classes="btn ghost" Content="Add folder…" />
+              </StackPanel>
+            </Grid>
+            <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,1" Padding="20,0" Height="32">
+              <Grid ColumnDefinitions="*,150,78,180,80" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Classes="th" Text="Name" />
+                <TextBlock Grid.Column="1" Classes="th" Text="Detected" />
+                <TextBlock Grid.Column="2" Classes="th" Text="Size" HorizontalAlignment="Right" Margin="0,0,14,0" />
+                <TextBlock Grid.Column="3" Classes="th" Text="Plan" />
+                <TextBlock Grid.Column="4" Classes="th" Text="Estimate" HorizontalAlignment="Right" />
+              </Grid>
+            </Border>
+            <ListBox Name="FileList" Classes="files" ItemsSource="{Binding Files}" SelectedIndex="1"
+                     AutomationProperties.Name="Files to pack">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="local:FileRow">
+                  <Grid ColumnDefinitions="*,150,78,180,80">
+                    <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" />
+                    <TextBlock Grid.Column="1" Classes="ink2" FontSize="13.5" Text="{Binding Kind}" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="2" Classes="ink2 num" FontSize="13.5" Text="{Binding Size}"
+                               HorizontalAlignment="Right" Margin="0,0,14,0" />
+                    <TextBlock Grid.Column="3" Classes="mono" Text="{Binding Plan}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="4" Classes="num" FontSize="13.5" Text="{Binding Estimate}" HorizontalAlignment="Right" />
+                  </Grid>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <Grid ColumnDefinitions="Auto,*,Auto" Margin="20,12,20,14">
+              <StackPanel Spacing="7">
+                <TextBlock Classes="ink2" FontSize="13.5" Text="Racing codecs on samples · group 3 of 5" />
+                <ProgressBar Name="Meter" Classes="meter" Width="240" HorizontalAlignment="Left" Minimum="0" Maximum="100" Value="60"
+                             AutomationProperties.Name="Analysis progress" />
+              </StackPanel>
+              <TextBlock Grid.Column="2" Classes="muted" Text="about 1 min left" VerticalAlignment="Bottom" />
+            </Grid>
+          </StackPanel>
+        </Border>
+        <!-- .tip with the site's two-layer shadow (a hover detail for the selected row) -->
+        <Border Name="Tip" Classes="tip" IsVisible="False" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,150,22,0" Width="252">
+          <StackPanel Spacing="2">
+            <TextBlock Text="include/ · 412 files" FontWeight="SemiBold" FontSize="14.5" />
+            <TextBlock Classes="ink2" FontSize="13" TextWrapping="Wrap"
+                       Text="Whole-file dedup, then the text filter and cm2. cm2 won the sample race against lzma2 by 11 %." />
+            <TextBlock Classes="muted" FontSize="12.5" Text="decode ≈ 1.9 s" />
+          </StackPanel>
+        </Border>
+      </Panel>
+    </StackPanel>
+  </DockPanel>
+</UserControl>

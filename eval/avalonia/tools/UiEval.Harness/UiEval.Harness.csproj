@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- UI evaluation harness (Windows only): drives the WinForms Osmium.App and the Avalonia preview from outside, the way a
+       user and a screen reader would. UI Automation (System.Windows.Automation), screen captures, SendInput, display
+       and theme switches. Not shipped. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>UiEval</RootNamespace>
+    <!-- Per-monitor V2 comes from app.manifest (the harness is a console process, not a WinForms app). -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+</Project>

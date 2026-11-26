@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Proto.Desktop/Proto.Desktop.csproj" />
+    <Project Path="src/Proto.Render/Proto.Render.csproj" />
+    <Project Path="src/Proto.Views/Proto.Views.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/UiEval.Harness/UiEval.Harness.csproj" />
+    <Project Path="tools/UiEval.StartupHook/UiEval.StartupHook.csproj" />
+  </Folder>
+</Solution>

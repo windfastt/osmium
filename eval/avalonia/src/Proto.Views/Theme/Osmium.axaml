@@ -1,0 +1,302 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- The product page's CSS (docs/index.html), rule by rule. Colours are DynamicResources from Tokens.cs (light/dark). -->
+  <Styles.Resources>
+    <ResourceDictionary>
+      <!-- Static instances with wght/wdth baked in (Instrument Sans body: scripts/make_body_fonts.py; the others come from the WinForms restyle): one face per role. -->
+      <FontFamily x:Key="FontTitle">avares://Proto.Views/Assets/Fonts#Anybody Title, Segoe UI Variable Display, Segoe UI</FontFamily>
+      <FontFamily x:Key="FontHeading">avares://Proto.Views/Assets/Fonts#Anybody Heading, Segoe UI Variable Display, Segoe UI</FontFamily>
+      <FontFamily x:Key="FontSpec">avares://Proto.Views/Assets/Fonts#Martian Mono Spec, Cascadia Mono, Consolas</FontFamily>
+      <FontFamily x:Key="FontNumber">avares://Proto.Views/Assets/Fonts#Instrument Sans Number, Segoe UI Variable Display, Segoe UI</FontFamily>
+      <FontFamily x:Key="FontBody">avares://Proto.Views/Assets/Fonts#Instrument Sans Body, Segoe UI Variable Text, Segoe UI</FontFamily>
+      <x:Double x:Key="SpecTracking">0.46</x:Double>
+    </ResourceDictionary>
+  </Styles.Resources>
+
+  <!-- body { background: var(page); color: var(ink); font: 400 … var(font-body) } -->
+  <Style Selector="Window.osmium">
+    <Setter Property="Background" Value="{DynamicResource Page}" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+    <Setter Property="FontFamily" Value="{StaticResource FontBody}" />
+    <Setter Property="FontSize" Value="14" />
+  </Style>
+
+  <!-- .spec { font: 500 11.5px var(font-mono); font-stretch: 87.5%; letter-spacing: .04em; uppercase; color: var(muted) } -->
+  <Style Selector="TextBlock.spec">
+    <Setter Property="FontFamily" Value="{StaticResource FontSpec}" />
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="LetterSpacing" Value="{StaticResource SpecTracking}" />
+    <Setter Property="Foreground" Value="{DynamicResource Muted}" />
+  </Style>
+  <!-- h2 (app size): Anybody 740, 75 % -->
+  <Style Selector="TextBlock.title">
+    <Setter Property="FontFamily" Value="{StaticResource FontTitle}" />
+    <Setter Property="FontSize" Value="40" />
+    <Setter Property="LineHeight" Value="40" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+  </Style>
+  <!-- .lede { color: var(ink-2); max-width: 38em } -->
+  <Style Selector="TextBlock.lede">
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="LineHeight" Value="25.6" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="MaxWidth" Value="640" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+  </Style>
+  <!-- h3 { font: 680 … Anybody; font-stretch: 86% } -->
+  <Style Selector="TextBlock.h3">
+    <Setter Property="FontFamily" Value="{StaticResource FontHeading}" />
+    <Setter Property="FontSize" Value="19" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+  </Style>
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource Muted}" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="TextBlock.ink2">
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+  </Style>
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{StaticResource FontSpec}" />
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+  </Style>
+  <Style Selector="TextBlock.num">
+    <Setter Property="FontFeatures" Value="+tnum" />
+  </Style>
+
+  <!-- .card { background: var(surface); border: 1px solid var(line); border-radius: 14px } -->
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource Card}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+  </Style>
+  <!-- .tiles { gap: 1px; background: var(line); border: 1px solid var(line); border-radius: 14px; overflow: hidden } -->
+  <Style Selector="Border.tiles">
+    <Setter Property="Background" Value="{DynamicResource Line}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+  <!-- .st { background: var(surface); padding: 22px 22px 24px; gap: 6px } -->
+  <Style Selector="Border.st">
+    <Setter Property="Background" Value="{DynamicResource Card}" />
+    <Setter Property="Padding" Value="18,16,18,18" />
+  </Style>
+  <!-- .st .v { font: 650 … var(font-body); letter-spacing: -.01em } -->
+  <Style Selector="TextBlock.v">
+    <Setter Property="FontFamily" Value="{StaticResource FontNumber}" />
+    <Setter Property="FontSize" Value="32" />
+    <Setter Property="LineHeight" Value="34" />
+    <Setter Property="LetterSpacing" Value="-0.32" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+  </Style>
+  <Style Selector="TextBlock.l">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="LineHeight" Value="20" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+  </Style>
+  <Style Selector="TextBlock.c">
+    <Setter Property="FontSize" Value="12.5" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Foreground" Value="{DynamicResource Muted}" />
+  </Style>
+  <!-- .tip { background: var(surface); border: 1px solid var(line); box-shadow: var(shadow); border-radius: 9px } -->
+  <Style Selector="Border.tip">
+    <Setter Property="Background" Value="{DynamicResource Card}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="9" />
+    <Setter Property="Padding" Value="12,10" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Shadow}" />
+  </Style>
+
+  <!-- .btn / .btn-sm / .btn-primary / .btn-ghost, plus :focus-visible { outline: 2px solid var(accent); outline-offset: 2px } -->
+  <Style Selector="Button.btn">
+    <Setter Property="MinHeight" Value="38" />
+    <Setter Property="Padding" Value="15,0" />
+    <Setter Property="CornerRadius" Value="9" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="14.5" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Panel>
+          <Border Name="ring" Margin="-4" BorderThickness="2" CornerRadius="12" IsVisible="False"
+                  BorderBrush="{DynamicResource Focus}" />
+          <Border Name="face" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                  Padding="{TemplateBinding Padding}">
+            <ContentPresenter Name="content" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                              HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+        </Panel>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="Button.btn:focus-visible /template/ Border#ring">
+    <Setter Property="IsVisible" Value="True" />
+  </Style>
+  <Style Selector="Button.lg">
+    <Setter Property="MinHeight" Value="46" />
+    <Setter Property="Padding" Value="20,0" />
+    <Setter Property="FontSize" Value="15.5" />
+  </Style>
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{DynamicResource Accent}" />
+    <Setter Property="Foreground" Value="{DynamicResource AccentText}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.primary:pointerover">
+    <Setter Property="Background" Value="{DynamicResource AccentHover}" />
+  </Style>
+  <Style Selector="Button.primary:pressed">
+    <Setter Property="Background" Value="{DynamicResource AccentPressed}" />
+  </Style>
+  <Style Selector="Button.ghost">
+    <Setter Property="Background" Value="{DynamicResource Card}" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+  </Style>
+  <Style Selector="Button.ghost:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource LineStrong}" />
+  </Style>
+  <Style Selector="Button.ghost:pressed">
+    <Setter Property="Background" Value="{DynamicResource Sunk}" />
+  </Style>
+
+  <!-- .meter { height: 8px; border-radius: 4px; background: var(sunk) } .meter i { background: var(mark) } -->
+  <Style Selector="ProgressBar.meter">
+    <Setter Property="Height" Value="8" />
+    <Setter Property="MinHeight" Value="8" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="{DynamicResource Sunk}" CornerRadius="4" ClipToBounds="True">
+          <Border Name="PART_Indicator" Background="{DynamicResource Mark}" CornerRadius="4" HorizontalAlignment="Left" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
+  <Style Selector="TextBox.field">
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="MinHeight" Value="38" />
+    <Setter Property="Padding" Value="11,9" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+
+  <!-- Navigation rail: selected item = subtle fill + mark-coloured pill -->
+  <Style Selector="ListBox.rail">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="ListBox.rail ListBoxItem">
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Margin" Value="0,1" />
+    <Setter Property="FontSize" Value="14.5" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="8" Background="Transparent" Height="38" Padding="12,0">
+          <Panel>
+            <Border Name="pill" Width="3" Height="16" CornerRadius="2" Margin="-12,0,0,0" HorizontalAlignment="Left"
+                    Background="{DynamicResource Mark}" IsVisible="False" />
+            <ContentPresenter Name="content" Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
+          </Panel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="ListBox.rail ListBoxItem:pointerover /template/ Border#bg">
+    <Setter Property="Background" Value="{DynamicResource Subtle}" />
+  </Style>
+  <Style Selector="ListBox.rail ListBoxItem:selected /template/ Border#bg">
+    <Setter Property="Background" Value="{DynamicResource Subtle}" />
+  </Style>
+  <Style Selector="ListBox.rail ListBoxItem:selected /template/ Border#pill">
+    <Setter Property="IsVisible" Value="True" />
+  </Style>
+  <Style Selector="ListBox.rail ListBoxItem:selected">
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- File list rows: table.data row rules, .br:hover { background: var(sunk) } -->
+  <Style Selector="ListBox.files">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="ListBox.files ListBoxItem">
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="row" Background="Transparent" BorderBrush="{DynamicResource LineSoft}" BorderThickness="0,0,0,1"
+                MinHeight="40" Padding="20,0">
+          <ContentPresenter Name="content" Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="ListBox.files ListBoxItem:pointerover /template/ Border#row">
+    <Setter Property="Background" Value="{DynamicResource Subtle}" />
+  </Style>
+  <Style Selector="ListBox.files ListBoxItem:selected /template/ Border#row">
+    <Setter Property="Background" Value="{DynamicResource Subtle}" />
+  </Style>
+  <Style Selector="TextBlock.th">
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+  </Style>
+
+  <Style Selector="PathIcon.glyph, Path.glyph">
+    <Setter Property="Width" Value="16" />
+    <Setter Property="Height" Value="16" />
+  </Style>
+  <!-- Archive browser: list header buttons, list rows, DataGrid rows and headers on the tokens (no column rules). -->
+  <Style Selector="Button.th">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+  </Style>
+  <Style Selector="ListBox.entries">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="ListBox.entries ListBoxItem">
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="MinHeight" Value="32" />
+  </Style>
+  <Style Selector="DataGrid">
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+    <Setter Property="RowBackground" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="DataGridColumnHeader">
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="TreeView">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+</Styles>

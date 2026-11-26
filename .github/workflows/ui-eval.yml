@@ -1,0 +1,267 @@
+name: UI evaluation
+
+# The Avalonia 12 user-interface prototype (eval/avalonia, its own solution, never part of Osmium.sln)
+# measured on real Windows runners, x64 and native ARM64, against the current WinForms Osmium.App built in the same job.
+# Runs only for the branch ui-avalonia-eval.
+on:
+  push:
+    branches: [ui-avalonia-eval]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  AVALONIA_TELEMETRY_OPTOUT: 1
+
+jobs:
+  # The Linux reference the Windows runs are compared with (headless Skia render, element boxes, the 22 UIA peers),
+  # the side-by-side with the product page, and the licence gate over everything the preview ships.
+  linux-reference:
+    name: Linux reference and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Restore (locked, versions and content hashes must match packages.lock.json)
+        run: bash eval/avalonia/scripts/restore-all.sh --locked-mode
+      - name: Headless render (light, dark, 150 %, 200 %, Archives, tray menu, UIA peers)
+        run: |
+          dotnet run --project eval/avalonia/src/Proto.Render -c Release -- "$PWD/out/ref" | tee out-render.log
+          mkdir -p out/ref && mv out-render.log out/ref/render.log
+          cat out/ref/automation-tree.txt
+          cat out/ref/light-boxes.json; echo
+          cat out/ref/archives-bench-headless.json
+      - name: Product page vs headless render (dominant colours per crop)
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 -I eval/avalonia/scripts/compare.py eval/avalonia/reference/site out/ref | tee out/ref/compare.log
+      - name: Licence gate (every shipped package, pinned by hash)
+        continue-on-error: true
+        run: |
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r win-x64 --self-contained -o out/pub-list
+          python3 -I eval/avalonia/scripts/licences.py eval/avalonia out/pub-list out/ref/licences.json out/ref/licences.md
+          python3 -I eval/avalonia/scripts/make_notices.py eval/avalonia out/ref/THIRD-PARTY-NOTICES-UI.txt
+          if diff <(tr -d '\r' < eval/avalonia/notices/THIRD-PARTY-NOTICES-UI.txt) <(tr -d '\r' < out/ref/THIRD-PARTY-NOTICES-UI.txt); then echo "committed notices are current"; else echo "::warning::eval/avalonia/notices/THIRD-PARTY-NOTICES-UI.txt differs from the restored packages"; fi
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ui-eval-linux-reference
+          path: out/ref/
+
+  # Launches, first frame, idle memory, tray, UI Automation, captures, fonts, theme, contrast, drag, Tab order, DPI and
+  # the archive browser, on each architecture.
+  measure:
+    name: Measurements (${{ matrix.arch }})
+    needs: linux-reference
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+      # PowerShell on the ARM64 image occasionally crashes at startup while setup-dotnet runs; one retry gets past it.
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@v7
+        with:
+          name: ui-eval-linux-reference
+          path: ref
+
+      - name: Restore (locked)
+        shell: bash
+        run: bash eval/avalonia/scripts/restore-all.sh --locked-mode
+
+      - name: Publish the WinForms baseline and the preview (self-contained ReadyToRun folders)
+        shell: pwsh
+        run: |
+          $rid = "win-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force out/eval | Out-Null
+          dotnet --info > out/eval/dotnet-info.txt
+          dotnet publish src/Osmium.App -c Release -r $rid --self-contained -p:PublishReadyToRun=true -o out/wf *> out/eval/publish-winforms.log
+          if ($LASTEXITCODE) { Get-Content out/eval/publish-winforms.log -Tail 60; throw 'WinForms publish failed' }
+          Set-Content out/wf/osmium.portable 'Baseline: data in .\data'
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r $rid --self-contained -p:PublishReadyToRun=true -o out/av *> out/eval/publish-avalonia.log
+          if ($LASTEXITCODE) { Get-Content out/eval/publish-avalonia.log -Tail 60; throw 'preview publish failed' }
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r $rid --self-contained -p:PublishReadyToRun=true -p:PublishTrimmed=true -o out/av-trimmed *> out/eval/publish-avalonia-trimmed.log
+          "trimmed publish exit code: $LASTEXITCODE"
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r $rid --self-contained -p:PublishReadyToRun=true -p:PublishReadyToRunComposite=true -o out/av-composite *> out/eval/publish-avalonia-composite.log
+          "composite publish exit code: $LASTEXITCODE"
+          Select-String -Path out/eval/publish-avalonia-trimmed.log -Pattern 'warning IL\d+' | ForEach-Object { $_.Matches[0].Value } | Group-Object | Sort-Object Count -Descending | Format-Table Count, Name
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r $rid --self-contained -p:PublishAot=true -o out/av-aot *> out/eval/publish-avalonia-aot.log
+          "native AOT publish exit code: $LASTEXITCODE"
+          Select-String -Path out/eval/publish-avalonia-aot.log -Pattern 'error|warning IL\d+' | Select-Object -First 20 | ForEach-Object { $_.Line }
+          dotnet publish eval/avalonia/tools/UiEval.Harness -c Release -r $rid --self-contained false -o out/harness *> out/eval/publish-harness.log
+          if ($LASTEXITCODE) { Get-Content out/eval/publish-harness.log -Tail 60; throw 'harness publish failed' }
+          dotnet build eval/avalonia/tools/UiEval.StartupHook -c Release -o out/hook *> out/eval/build-hook.log
+          if ($LASTEXITCODE) { Get-Content out/eval/build-hook.log -Tail 60; throw 'hook build failed' }
+          Get-ChildItem out/av/*.exe, out/wf/*.exe, out/harness/*.exe | Format-Table FullName, Length
+
+      - name: Sizes (like for like, self-contained ReadyToRun folders, trimmed and untrimmed)
+        shell: pwsh
+        run: |
+          $sizeArgs = @('sizes', '--out', 'out/eval/sizes.json', 'winforms-r2r=out/wf', 'avalonia-r2r=out/av')
+          if (Test-Path out/av-trimmed/OsmiumUiPreview.exe) { $sizeArgs += 'avalonia-r2r-trimmed=out/av-trimmed' }
+          if (Test-Path out/av-composite/OsmiumUiPreview.exe) { $sizeArgs += 'avalonia-r2r-composite=out/av-composite' }
+          if (Test-Path out/av-aot/OsmiumUiPreview.exe) { $sizeArgs += 'avalonia-native-aot=out/av-aot' }
+          ./out/harness/UiEval.Harness.exe @sizeArgs
+
+      # Some runner images start on Windows' first-sign-in privacy screen ("Choose privacy settings for your device"),
+      # which covers the desktop and the notification area. Close it, keep it from coming back, and log what is open.
+      - name: Desktop ready
+        shell: pwsh
+        run: |
+          Get-Process | Where-Object MainWindowTitle | Format-Table Id, ProcessName, MainWindowTitle -AutoSize | Out-String -Width 200
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience -Value 1 -Type DWord
+          $oobe = @(Get-Process -Name WWAHost, UserOOBEBroker -ErrorAction SilentlyContinue)
+          foreach ($p in $oobe) { "closing $($p.ProcessName) ($($p.Id)) '$($p.MainWindowTitle)'"; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          if ($oobe.Count -gt 0) {
+            # The shell may have held back the notification area behind that screen: restart it so it initialises.
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep 5
+            if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe; Start-Sleep 5 }
+          }
+          Get-Process | Where-Object MainWindowTitle | Format-Table Id, ProcessName, MainWindowTitle -AutoSize | Out-String -Width 200
+
+      - name: Harness (launches, first frame, memory, tray, UIA, capture, DPI, fonts, theme, contrast, drag)
+        shell: pwsh
+        timeout-minutes: 60
+        run: |
+          $start = Get-Date
+          $extra = @()
+          if (Test-Path out/av-trimmed/OsmiumUiPreview.exe) { $extra += @('--proto-trimmed', 'out/av-trimmed') }
+          if (Test-Path out/av-composite/OsmiumUiPreview.exe) { $extra += @('--proto-composite', 'out/av-composite') }
+          if (Test-Path out/av-aot/OsmiumUiPreview.exe) { $extra += @('--proto-aot', 'out/av-aot') }
+          ./out/harness/UiEval.Harness.exe all --proto out/av --wf out/wf --hook out/hook/UiEval.StartupHook.dll --ref ref --out out/eval @extra
+          $code = $LASTEXITCODE
+          # Crashes Windows itself recorded for either app during the run (Application Error, .NET Runtime, WER).
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $start } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'OsmiumUiPreview|Osmium\.App' } |
+            Format-List TimeCreated, ProviderName, Id, Message | Out-File out/eval/windows-eventlog.txt
+          "Windows event log entries naming either app: $((Get-Content out/eval/windows-eventlog.txt | Select-String 'ProviderName').Count)"
+          Get-Content out/eval/windows-eventlog.txt -TotalCount 80
+          exit $code
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $f = if (Test-Path out/eval/results.json) { 'out/eval/results.json' } else { 'out/eval/results.partial.json' }
+          if (-not (Test-Path $f)) { 'no results'; exit 0 }
+          $r = Get-Content $f -Raw | ConvertFrom-Json
+          "## UI evaluation ${{ matrix.arch }}" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          ($r.verdicts | ConvertTo-Json -Depth 3) >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          if (Test-Path out/eval/sizes.md) { Get-Content out/eval/sizes.md >> $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ui-eval-${{ matrix.arch }}
+          path: out/eval/
+          if-no-files-found: warn
+
+  # The folder a reviewer unzips and runs by hand: an unsigned mock with the licence notices.
+  preview:
+    name: Preview build (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Restore (locked)
+        shell: bash
+        run: bash eval/avalonia/scripts/restore-all.sh --locked-mode
+      - name: Publish the portable preview
+        shell: pwsh
+        run: |
+          $rid = "win-${{ matrix.arch }}"
+          $out = "osmium-ui-preview-$rid"
+          dotnet publish eval/avalonia/src/Proto.Desktop -c Release -r $rid --self-contained -p:PublishReadyToRun=true -o $out
+          if ($LASTEXITCODE) { throw 'publish failed' }
+          Remove-Item "$out/*.pdb"
+          Copy-Item eval/avalonia/preview/README.txt "$out/README.txt"
+          Copy-Item LICENSE "$out/LICENSE.txt"
+          $ui = Get-Content eval/avalonia/notices/THIRD-PARTY-NOTICES-UI.txt -Raw
+          $engine = Get-Content THIRD-PARTY-NOTICES.md -Raw
+          $sep = "`n`n" + ('=' * 100) + "`nOsmium engine components (THIRD-PARTY-NOTICES.md of the Osmium repository; its Windows Forms runtime section does not apply to this preview)`n" + ('=' * 100) + "`n`n"
+          Set-Content "$out/THIRD-PARTY-NOTICES.txt" ($ui + $sep + $engine) -Encoding utf8
+          $packages = ((dotnet nuget locals global-packages --list) -replace '^global-packages:\s*', '').Trim()
+          Copy-Item (Join-Path $packages 'skiasharp.nativeassets.win32/3.119.4/THIRD-PARTY-NOTICES.txt') "$out/SkiaSharp-THIRD-PARTY-NOTICES.txt"
+          $rc = Get-Content "$out/OsmiumUiPreview.runtimeconfig.json" -Raw | ConvertFrom-Json
+          $netcore = $rc.runtimeOptions.includedFrameworks | Where-Object name -eq 'Microsoft.NETCore.App' | Select-Object -First 1
+          $pack = Join-Path $packages "microsoft.netcore.app.runtime.$rid/$($netcore.version)"
+          Copy-Item (Join-Path $pack 'LICENSE.TXT') "$out/dotnet-LICENSE.txt"
+          Copy-Item (Join-Path $pack 'THIRD-PARTY-NOTICES.TXT') "$out/dotnet-THIRD-PARTY-NOTICES.txt"
+          @(
+            "Osmium UI preview, $rid, unsigned mock (no real compression)",
+            "Commit: $env:GITHUB_SHA",
+            "Built by: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "Avalonia 12.2.0, .NET $($netcore.version), self-contained ReadyToRun folder"
+          ) | Set-Content "$out/BUILD.txt"
+          Get-ChildItem $out | Measure-Object Length -Sum | ForEach-Object { "{0} files, {1:N1} MiB" -f $_.Count, ($_.Sum / 1MB) }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: osmium-ui-preview-win-${{ matrix.arch }}
+          path: osmium-ui-preview-win-${{ matrix.arch }}/
+          if-no-files-found: error
+
+  # One page with every item per architecture, the sizes and the licences; side by side of the Windows captures.
+  report:
+    name: Report
+    needs: [linux-reference, measure]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: ui-eval-*
+          path: art
+      - name: Report
+        run: |
+          python3 -m pip install --quiet pillow
+          ls -R art | head -100
+          for a in x64 arm64; do
+            if [ -d art/ui-eval-$a/shots ]; then
+              python3 -I eval/avalonia/scripts/compare.py eval/avalonia/reference/site art/ui-eval-linux-reference art/ui-eval-$a/shots "Windows $a capture" | tee art/ui-eval-$a/compare.log || true
+            fi
+          done
+          python3 -I eval/avalonia/scripts/report.py art UI-EVAL-REPORT.md
+          cat UI-EVAL-REPORT.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ui-eval-report
+          path: |
+            UI-EVAL-REPORT.md
+            art/ui-eval-*/compare-*.png
+            art/ui-eval-*/shots/compare-*.png
+            art/ui-eval-*/compare.log

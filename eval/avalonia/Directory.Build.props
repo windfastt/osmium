@@ -1,0 +1,23 @@
+<Project>
+  <!-- The Avalonia user-interface prototype, measured against the WinForms Osmium.App on Windows CI.
+       Its own build settings: nothing here reaches Osmium.sln, and the repository's Directory.Build.props is not
+       imported, so the product build is unaffected. -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <Version>0.2.0-preview</Version>
+    <Copyright>Copyright (c) 2026 Osmium contributors</Copyright>
+    <!-- One Avalonia version for every project and every measurement (never mixed with 11.x). -->
+    <AvaloniaVersion>12.2.0</AvaloniaVersion>
+    <!-- Avalonia.Controls.DataGrid is versioned on its own; 12.1.2 is the newest MIT release. -->
+    <AvaloniaDataGridVersion>12.1.2</AvaloniaDataGridVersion>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- Exact versions plus content hashes in packages.lock.json; CI restores with locked mode before it builds. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NoWarn>$(NoWarn);CA1416;NU1507</NoWarn>
+  </PropertyGroup>
+</Project>
