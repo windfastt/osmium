@@ -15,10 +15,18 @@ public sealed record OsaWriterOptions
     public string IndexPipeline { get; init; } = "zstd(level=19)";
     /// <summary>Block frames totalling at least this many bytes get spare copies of the index and header (tests lower it).</summary>
     internal long SpareThreshold { get; init; } = SpareCopies.Threshold;
-    /// <summary>A fixed archive id instead of a random one (tests: 16 bytes).</summary>
-    internal byte[]? ArchiveId { get; init; }
-    /// <summary>A fixed key-derivation salt instead of a random one (tests: 32 bytes).</summary>
-    internal byte[]? Salt { get; init; }
+    /// <summary>Tests only: a fixed archive id (16 bytes) instead of a random one, for tests that pin an archive's
+    /// layout. Real archives always get a random id.</summary>
+    internal byte[]? TestFixedArchiveId { get; init; }
+    /// <summary>
+    /// Tests only, never anywhere else: a fixed key-derivation salt (32 bytes) instead of a random one. The key comes
+    /// from the password and the salt, and a frame's nonce is its frame number, so two archives with the same password
+    /// and salt would use every nonce twice under one key, which breaks both the secrecy and the integrity of
+    /// AES-GCM. With a password it is refused unless <see cref="TestFixedSaltAcknowledged"/> is set too.
+    /// </summary>
+    internal byte[]? TestFixedSalt { get; init; }
+    /// <summary>Tests only: the caller knows that <see cref="TestFixedSalt"/> reuses nonces across archives.</summary>
+    internal bool TestFixedSaltAcknowledged { get; init; }
     /// <summary>The minor version written in the header (tests write 0 to make archives as Osmium 0.1.x did).</summary>
     internal ushort HeaderMinor { get; init; } = Osa.Minor;
 }
@@ -47,12 +55,14 @@ public sealed class OsaWriter : IDisposable
         _options = options ?? new OsaWriterOptions();
         FinalPath = Path.GetFullPath(finalPath);
         TempPath = FinalPath + ".partial-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant();
-        if (_options.ArchiveId is { Length: not 16 }) throw new ArgumentException("An archive id is 16 bytes.", nameof(options));
-        if (_options.Salt is { Length: not 32 }) throw new ArgumentException("A salt is 32 bytes.", nameof(options));
+        if (_options.TestFixedArchiveId is { Length: not 16 }) throw new ArgumentException("An archive id is 16 bytes.", nameof(options));
+        if (_options.TestFixedSalt is { Length: not 32 }) throw new ArgumentException("A salt is 32 bytes.", nameof(options));
+        if (_options.TestFixedSalt is not null && !string.IsNullOrEmpty(_options.Password) && !_options.TestFixedSaltAcknowledged)
+            throw new InvalidOperationException("A fixed salt makes archives with the same password reuse their nonces; it is for tests only.");
         EncryptionInfo? enc = null;
         if (!string.IsNullOrEmpty(_options.Password))
         {
-            var salt = _options.Salt?.ToArray() ?? RandomNumberGenerator.GetBytes(32);
+            var salt = _options.TestFixedSalt?.ToArray() ?? RandomNumberGenerator.GetBytes(32);
             _key = ArchiveKey.Derive(_options.Password, salt, _options.KdfIterations);
             enc = new EncryptionInfo(_options.KdfIterations, salt, _key.Verifier);
         }
@@ -60,7 +70,7 @@ public sealed class OsaWriter : IDisposable
         {
             Minor = _options.HeaderMinor,
             Flags = (enc is not null ? Osa.FlagEncrypted : 0) | (_options.Experimental ? Osa.FlagExperimental : 0),
-            ArchiveId = _options.ArchiveId?.ToArray() ?? RandomNumberGenerator.GetBytes(16),
+            ArchiveId = _options.TestFixedArchiveId?.ToArray() ?? RandomNumberGenerator.GetBytes(16),
             Encryption = enc,
             Creator = _options.Creator,
         };
