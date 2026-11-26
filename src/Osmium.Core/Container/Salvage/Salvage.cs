@@ -317,13 +317,19 @@ internal sealed class SalvageRun : IDisposable
             else candidates.Add(candidate);
         }
 
-        // Copies of one index count once; the best placed copy stands for them.
+        // Copies of one index count once; the best placed copy stands for them. The copy an index names as its spare
+        // (container 1.1) is no sign of damage.
         var kept = new List<IndexCandidate>();
         foreach (var c in candidates.OrderByDescending(c => c.AtEnd).ThenByDescending(c => c.Vouched)
                      .ThenBy(c => c.Frame.EnclosingOffset is not null).ThenByDescending(c => c.Frame.Offset))
         {
             if (kept.FirstOrDefault(k => c.Frame.SameContent(k.Frame)) is { } same)
-                c.Frame.Reject(SalvageFrameState.Duplicate, $"a copy of the index at offset {same.Frame.Offset:N0}");
+            {
+                c.Frame.IsSpareCopy = same.Index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var v) && v.Length == 8
+                    && BinaryPrimitives.ReadUInt64LittleEndian(v) == (ulong)c.Frame.Offset;
+                c.Frame.Reject(SalvageFrameState.Duplicate, c.Frame.IsSpareCopy
+                    ? $"the spare copy of the index at offset {same.Frame.Offset:N0}" : $"a copy of the index at offset {same.Frame.Offset:N0}");
+            }
             else kept.Add(c);
         }
 
@@ -860,6 +866,7 @@ internal sealed class SalvageRun : IDisposable
         var spans = new List<(long Start, long End)>();
         if (probe.Header is { } h) spans.Add((probe.Offset, probe.Offset + h.Length));
         spans.AddRange(frames.Where(f => f.Intact).Select(f => (f.Offset, f.Offset + f.FrameLength)));
+        spans.AddRange(HeaderCopies(frames));
         if (FooterAt(_src.Length - Osa.FooterSize)) spans.Add((_src.Length - Osa.FooterSize, _src.Length));
         if (indexFrame is not null && FooterAt(indexFrame.Offset + indexFrame.FrameLength))
             spans.Add((indexFrame.Offset + indexFrame.FrameLength, indexFrame.Offset + indexFrame.FrameLength + Osa.FooterSize));
@@ -873,5 +880,45 @@ internal sealed class SalvageRun : IDisposable
         }
         if (pos < _src.Length) gaps.Add((pos, _src.Length));
         return (gaps.Sum(g => g.End - g.Start), gaps);
+    }
+
+    /// <summary>
+    /// The intact header copies of container 1.1 (FORMAT §4.1): the header bytes, zero padding and a trailer whose
+    /// magic and CRC check out, with header bytes that check out as a header. A header copy sits between the spare
+    /// copy of the index frame and the index frame, so it is looked for on both sides of every intact index frame.
+    /// </summary>
+    private List<(long Start, long End)> HeaderCopies(List<SalvageFrame> frames)
+    {
+        var found = new List<(long Start, long End)>();
+        foreach (var f in frames.Where(f => f.IsIndex && f.Intact))
+        {
+            // Before it: the trailer ends where the index frame starts.
+            if (f.Offset >= SpareCopies.TrailerSize && SpareTrailer.Read(_src.Read(f.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+                && IsHeaderCopy(f.Offset - t.CopyLength, t))
+                found.Add((f.Offset - t.CopyLength, f.Offset));
+            // After it: a header, then the padding a writer puts after one of that length, then the trailer.
+            long start = f.Offset + f.FrameLength;
+            if (start + 40 > _src.Length) continue;
+            long headerLength = 40 + BinaryPrimitives.ReadUInt32LittleEndian(_src.Read(start + 32, 4));
+            long length = Math.Max(SpareCopies.MinHeaderCopyLength, headerLength + SpareCopies.TrailerSize);
+            if (headerLength > SpareCopies.MaxHeaderLength || start + length > _src.Length) continue;
+            if (SpareTrailer.Read(_src.Read(start + length - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } after
+                && after.HeaderLength == headerLength && after.CopyLength == length && IsHeaderCopy(start, after))
+                found.Add((start, start + length));
+        }
+        return found;
+    }
+
+    private bool IsHeaderCopy(long start, SpareTrailer t)
+    {
+        if (start < 0 || start + t.CopyLength > _src.Length) return false;
+        try
+        {
+            if (ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)t.HeaderLength), writable: false)).Length != t.HeaderLength) return false;
+        }
+        catch (NewerVersionException) { } // an intact header of a newer version is still a header
+        catch (Exception e) when (e is IOException or InvalidDataException) { return false; }
+        var padding = _src.Read(start + t.HeaderLength, (int)t.PaddingLength);
+        return !padding.AsSpan().ContainsAnyExcept((byte)0);
     }
 }
