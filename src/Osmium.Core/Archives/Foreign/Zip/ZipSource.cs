@@ -161,16 +161,33 @@ internal sealed class ZipSource : ForeignSource
                 s = zc;
             }
         }
-        s = Decoder(r, s, e.Path);
+        s = Decoder(r, s, e.Path, r.Encrypted ? null : raw);
         s = new VerifyingStream(new CountingStream(s, op.Guard), r.UncompressedSize, r.IsAes && r.AesVersion == 2 ? null : r.Crc, "the file");
         if (aes is not null) s = WinZipAesStream.CheckAtEnd(s, aes.Finish);
         return new EntryContent(s, Verified: true);
     }
 
     /// <summary>The decoder for the entry's method, after the memory pre-checks (decoders allocate what they declare).</summary>
-    private Stream Decoder(ZipRecord r, Stream s, string name)
+    /// <param name="plain">The entry's bytes in the file when they are not encrypted: seekable, so Zstandard frames can
+    /// be walked (and their windows checked) and xz read from its index before decoding. Null inside encryption.</param>
+    private Stream Decoder(ZipRecord r, Stream s, string name, FileSlice? plain)
     {
         var limits = Options.Limits;
+        switch (r.RealMethod)
+        {
+            case 93 when plain is not null:
+            {
+                var layout = ZstdFrames.Walk(plain, limits, name);
+                plain.Position = 0;
+                return ZstdFrames.Open(new EndGuardStream(plain), layout, limits);
+            }
+            case 93:
+                return ZstdFrames.Open(new EndGuardStream(s), new ZstdFrames.Layout(1, null, false, 0), limits, walked: false);
+            case 95 when plain is not null:
+                return new XzDecoder(plain, limits, name);
+            case 95:
+                throw new NotSupportedException($"{DisplayText.Escape(name)} is xz data inside encryption, which Osmium cannot read.");
+        }
         if (r.RealMethod != 0) s = new EndGuardStream(s, r.RealMethod == 14 ? 0 : 8);
         switch (r.RealMethod)
         {
@@ -204,11 +221,6 @@ internal sealed class ZipSource : ForeignSource
                 try { return new PpmdStream(new PpmdProperties(p), s, false); }
                 catch (OutOfMemoryException) { throw LimitGuard.MemoryRefusal(name, memory); }
             }
-            case 93:
-                if (s is FileSlice slice) return ZstdFrames.Open(slice, ZstdFrames.Walk(slice, limits, name), limits);
-                return ZstdFrames.Open(s, new ZstdFrames.Layout(1, null, false, Math.Min(limits.MemoryBudgetBytes, 1L << 31)), limits);
-            case 95:
-                return new XzDecoder(s, limits, name);
             default:
                 throw new NotSupportedException($"{DisplayText.Escape(name)} uses compression method {r.RealMethod}, which Osmium cannot read.");
         }
@@ -268,7 +280,7 @@ internal sealed class ZipSource : ForeignSource
             if (!zc.CheckByteMatches) continue;
             try
             {
-                using var check = new VerifyingStream(new CountingStream(Decoder(r, zc, entry.Path), op.Guard), r.UncompressedSize, r.Crc, "the file");
+                using var check = new VerifyingStream(new CountingStream(Decoder(r, zc, entry.Path, plain: null), op.Guard), r.UncompressedSize, r.Crc, "the file");
                 var sink = new DiscardSink();
                 int n;
                 while ((n = check.Read(buf, 0, buf.Length)) > 0)

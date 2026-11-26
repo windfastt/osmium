@@ -377,6 +377,49 @@ public class ZipTests
         }
     }
 
+    /// <summary>A Zstandard frame of ten 'A's in one RLE block, declaring a window of 2^<paramref name="windowLog"/>.</summary>
+    private static byte[] ZstdFrame(int windowLog) =>
+        [0x28, 0xB5, 0x2F, 0xFD, 0x00, (byte)((windowLog - 10) << 3), 0x53, 0x00, 0x00, (byte)'A'];
+
+    [Fact]
+    public void ZstandardEntriesHaveTheirWindowCheckedBeforeDecoding()
+    {
+        using var t = new TempDir();
+        var ten = Encoding.ASCII.GetBytes("AAAAAAAAAA");
+        var z = new ZipCraft();
+        foreach (var (name, frame) in new[] { ("huge-window.txt", ZstdFrame(30)), ("small-window.txt", ZstdFrame(20)), ("made.txt", ForeignData.Zstd(ten)) })
+        {
+            var item = z.Add(name, ten, deflate: false);
+            item.Method = 93;
+            item.Stored = frame;
+        }
+        using var s = Open(ForeignData.Write(t, "zstd.zip", z.Build()), new ArchiveOpenOptions { Limits = ImportLimits.Default with { MemoryBudgetBytes = 600 << 20 } });
+        Assert.All(s.Items, i => Assert.Equal("Zstandard", i.Method));
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var r = Extract(s, t.Sub("out"));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 << 20, "a declared 1 GiB window was allocated");
+        Assert.Equal((2, 1), (r.FilesOk, r.SkippedUnsupported));
+        Assert.Contains(r.Errors, e => e.StartsWith("huge-window.txt", StringComparison.Ordinal) && e.Contains("needs more memory than allowed", StringComparison.Ordinal));
+        Assert.Equal(ten, File.ReadAllBytes(Path.Combine(t.Sub("out"), "small-window.txt")));
+        Assert.Equal(ten, File.ReadAllBytes(Path.Combine(t.Sub("out"), "made.txt")));
+    }
+
+    [Fact]
+    public void XzEntriesAreReadFromTheirIndex()
+    {
+        using var t = new TempDir();
+        var hello = ForeignData.FixtureTree.Single(f => f.Path == "in/hello.txt").Data;
+        var z = new ZipCraft();
+        var item = z.Add("hello.txt", hello, deflate: false);
+        item.Method = 95;
+        item.Stored = File.ReadAllBytes(ForeignData.Fixture("xz", "crc64.xz"));
+        using var s = Open(ForeignData.Write(t, "xz.zip", z.Build()));
+        Assert.Equal("xz", s.Items.Single().Method);
+        Assert.Equal((1, 0), (s.Test(null, null, Ct).FilesOk, s.Test(null, null, Ct).LeftOut));
+        Assert.Equal(1, Extract(s, t.Sub("out")).FilesOk);
+        Assert.Equal(hello, File.ReadAllBytes(Path.Combine(t.Sub("out"), "hello.txt")));
+    }
+
     [Fact]
     public void LinksDevicesAndUnknownMethodsAreRefused()
     {

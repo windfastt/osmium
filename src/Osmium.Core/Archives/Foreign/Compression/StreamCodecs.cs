@@ -296,13 +296,22 @@ internal static class ZstdFrames
         Corrupt(frames == 0 ? "not a Zstandard stream" : "unexpected data after the end of the compressed stream");
 
     /// <summary>The decoder, allowed the window the frames need (the walk checked it against the budget).</summary>
-    public static Stream Open(Stream input, Layout layout, ImportLimits limits)
+    /// <param name="walked">The frames were walked, so <paramref name="layout"/> holds the largest window they declare,
+    /// already checked against the budget. Otherwise (data inside encryption cannot be walked) the decoder is allowed
+    /// only the largest power-of-two window within the budget, and refuses frames that need more.</param>
+    public static Stream Open(Stream input, Layout layout, ImportLimits limits, bool walked = true)
     {
         if (input.CanSeek) input.Position = 0;
         var d = new ZstdSharp.DecompressionStream(input, 1 << 17, checkEndOfStream: true, leaveOpen: false);
         int log = 10;
-        while (log < 31 && (1L << log) < layout.MaxWindow) log++;
-        d.SetParameter(ZstdSharp.Unsafe.ZSTD_dParameter.ZSTD_d_windowLogMax, Math.Max(log, 27));
+        if (walked)
+            while (log < 31 && (1L << log) < layout.MaxWindow) log++;
+        else
+        {
+            long cap = Math.Min(limits.MemoryBudgetBytes, 1L << 31);
+            while (log < 31 && (1L << (log + 1)) <= cap) log++;
+        }
+        d.SetParameter(ZstdSharp.Unsafe.ZSTD_dParameter.ZSTD_d_windowLogMax, log);
         return d;
     }
 }
