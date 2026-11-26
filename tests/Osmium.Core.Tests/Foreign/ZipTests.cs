@@ -183,6 +183,46 @@ public class ZipTests
         Assert.Equal(1, s.Test(null, null, Ct).FilesFailed);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ADamagedFirstEncryptedFileIsDamageNotAWrongPassword(bool aes)
+    {
+        // The first entry's check value matches and its data fails; the second proves the password, so only the
+        // first fails, as damaged, and the password stays usable.
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        var pw = Encoding.UTF8.GetBytes("pw");
+        var first = aes ? z.AddAes("first.txt", ForeignData.Text(4000), "pw") : z.AddZipCrypto("first.txt", ForeignData.Text(4000), pw);
+        _ = aes ? z.AddAes("second.txt", ForeignData.Text(4000, 2), "pw") : z.AddZipCrypto("second.txt", ForeignData.Text(4000, 2), pw);
+        first.Stored[40] ^= 1; // past the salt and verifier (AES) or the 12-byte header (ZipCrypto)
+        string path = ForeignData.Write(t, "damaged-first.zip", z.Build());
+        int asked = 0;
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "pw"; } });
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1), (r.FilesOk, r.FilesFailed));
+        Assert.Contains(r.Errors, e => e.StartsWith("first.txt: wrong password or damaged file", StringComparison.Ordinal));
+        Assert.Equal(["second.txt"], FilesUnder(t.Sub("out")));
+        var test = s.Test(null, null, Ct);
+        Assert.Equal((1, 1), (test.FilesOk, test.FilesFailed));
+        var second = s.Test(i => i.Path == "second.txt", null, Ct);
+        Assert.Equal((1, 0), (second.FilesOk, second.FilesFailed));
+        Assert.Equal(1, asked);
+    }
+
+    [Fact]
+    public void WhenEveryEncryptedFileFailsAfterItsCheckValueThePasswordIsWrong()
+    {
+        // One AES entry: its verifier matches (the right password) but its data is damaged. Nothing else can prove
+        // the password, and a wrong one passes the verifier once in 65,536 times, so nothing is written.
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.AddAes("only.txt", ForeignData.Text(4000), "pw").Stored[40] ^= 1;
+        using var s = Open(ForeignData.Write(t, "only.zip", z.Build()), new ArchiveOpenOptions { Password = () => "pw" });
+        Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out")));
+        Assert.False(Directory.Exists(t.Sub("out")));
+    }
+
     [Fact]
     public void AnAesPasswordThatPassesTheVerifierIsStillCheckedAgainstTheAuthenticationCode()
     {

@@ -200,6 +200,33 @@ public class SevenZipTests
     }
 
     [Fact]
+    public void ADamagedFirstEncryptedFolderIsDamageNotAWrongPassword()
+    {
+        using var t = new TempDir();
+        byte[] props = SevenZipCraft.AesProps(10, [], [.. Enumerable.Repeat((byte)7, 16)]);
+        var bytes = SevenZipCraft.Build([SevenZipCraft.Encrypted("pw", props, "the first file"u8.ToArray()), SevenZipCraft.Encrypted("pw", props, "the second file"u8.ToArray())]);
+        bytes[32 + 3] ^= 1; // the first folder's ciphertext: Copy passes the garbage on, and its CRC fails
+        string path = ForeignData.Write(t, "damaged-first.7z", bytes);
+        int asked = 0;
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "pw"; } }))
+        {
+            var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal((1, 1), (r.FilesOk, r.FilesFailed));
+            Assert.Contains(r.Errors, e => e.StartsWith("f0.bin: wrong password or damaged file", StringComparison.Ordinal));
+            Assert.Equal(["f1.bin"], FilesUnder(t.Sub("out")));
+            Assert.Equal((1, 1), (s.Test(null, null, Ct).FilesOk, s.Test(null, null, Ct).FilesFailed));
+            Assert.Equal(1, asked);
+        }
+        // With a wrong password every folder fails: nothing is written and the password stays spent.
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" }))
+        {
+            Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("wrong"), new ArchiveExtractRequest(), null, Ct));
+            Assert.False(Directory.Exists(t.Sub("wrong")));
+            Assert.Throws<WrongPasswordException>(() => s.Test(i => i.Path == "f1.bin", null, Ct));
+        }
+    }
+
+    [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {
         // Six folders, each with its own salt: within a budget of four keys, four are read and two are refused before

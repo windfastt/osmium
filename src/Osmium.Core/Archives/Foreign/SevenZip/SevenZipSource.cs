@@ -183,12 +183,15 @@ internal sealed class SevenZipSource : ForeignSource
     /// <summary>
     /// Rule 1 for 7z, which has no password verifier: the first selected encrypted folder that has a stored CRC is
     /// decoded from its start into a discarding sink until the end of its first file with a CRC (the whole folder
-    /// when only the folder has one), and compared. A data error or a mismatch means a wrong password (or damage).
-    /// When no selected encrypted folder has any CRC, nothing can prove the password; those entries are then refused.
+    /// when only the folder has one), and compared. A data error or a mismatch is a wrong password or damage, which
+    /// 7z cannot tell apart: the next such folder is tried, and when one proves the password the failed one is
+    /// reported as damaged when it is read; when every one fails, the password is wrong. When no selected encrypted
+    /// folder has any CRC, nothing can prove the password; those entries are then refused.
     /// </summary>
     protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
     {
         var byFolder = FilesByFolder();
+        bool failed = false;
         foreach (int folder in encrypted.Select(e => _db.Files[e.Index].Folder).Distinct())
         {
             if (!Checkable(folder, byFolder)) continue;
@@ -207,8 +210,9 @@ internal sealed class SevenZipSource : ForeignSource
                     long done = 0;
                     int n;
                     while ((n = s.Read(buf, 0, buf.Length)) > 0) { crc.Append(buf.AsSpan(0, n)); done += n; op.Progress.Checking(done, total); }
-                    if (crc.GetCurrentHashAsUInt32() != f.UnpackCrc) throw new WrongPasswordException();
-                    return true;
+                    if (crc.GetCurrentHashAsUInt32() == f.UnpackCrc) return true;
+                    failed = true;
+                    continue;
                 }
                 long skipped = 0;
                 foreach (int i in byFolder[folder])
@@ -220,9 +224,10 @@ internal sealed class SevenZipSource : ForeignSource
                     if (i == stopAfter) return true;
                 }
             }
-            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { throw new WrongPasswordException(); }
+            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failed = true; }
             finally { _ct = default; }
         }
+        if (failed) throw new WrongPasswordException();
         return false;
     }
 

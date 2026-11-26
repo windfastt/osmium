@@ -231,36 +231,56 @@ internal sealed class ZipSource : ForeignSource
     /// (read once, nothing decrypted or decoded). ZipCrypto: the check byte, then the whole entry decoded into a
     /// discarding sink and its CRC-32 compared, trying the password as UTF-8 and then in the OEM code page.
     /// </summary>
+    /// <summary>What one entry shows about the password.</summary>
+    private enum PasswordCheck
+    {
+        Right,
+        /// <summary>Its check value does not match: the password is wrong.</summary>
+        Wrong,
+        /// <summary>Its check value matched, then its data failed: damage, or a wrong password that matched by chance.</summary>
+        Inconclusive,
+    }
+
     protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
     {
-        // The first selected encrypted entry that can be read decides; damaged ones are passed over (they fail on
-        // their own when extracted) and, when every one is damaged, nothing proves the password.
+        // The first selected encrypted entry that shows the password right or wrong decides. One whose check value
+        // matched but whose data then failed does not: the next one is tried, and when one proves the password the
+        // failed one is reported as damaged when it is extracted. Only when every entry that could be checked failed
+        // that way is the password taken as wrong. Entries with damaged headers are passed over; when every one is
+        // damaged, nothing proves the password.
+        bool inconclusive = false;
         foreach (var entry in encrypted)
         {
             var r = _records[entry.Index];
             if (r.Damaged is not null || r.DataStart < 0) continue;
-            bool? right;
-            try { right = r.IsAes ? CheckAes(r, password, op) : CheckZipCrypto(r, entry, password, op); }
+            PasswordCheck? check;
+            try { check = r.IsAes ? CheckAes(r, password, op) : CheckZipCrypto(r, entry, password, op); }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { continue; }
-            if (right == true) return true;
-            if (right == false) throw new WrongPasswordException();
+            switch (check)
+            {
+                case PasswordCheck.Right: return true;
+                case PasswordCheck.Wrong: throw new WrongPasswordException();
+                case PasswordCheck.Inconclusive: inconclusive = true; break;
+            }
         }
+        if (inconclusive) throw new WrongPasswordException();
         return false;
     }
 
     /// <summary>The verifier, then the authentication code over the encrypted bytes (read once, nothing decoded).</summary>
-    private bool? CheckAes(ZipRecord r, string password, Operation op)
+    private PasswordCheck? CheckAes(ZipRecord r, string password, Operation op)
     {
         using var raw = new FileSlice(_handle, r.DataStart, r.CompressedSize) { OnRead = op.Read };
         long cipher = r.CompressedSize - WinZipAes.Overhead(r.AesStrength);
         if (cipher < 0) return null;
         var keys = WinZipAes.Keys(raw, password, r.AesStrength);
-        return keys is not null && WinZipAes.Authentic(raw, keys.Value.MacKey, cipher, op.Token);
+        if (keys is null) return PasswordCheck.Wrong;
+        return WinZipAes.Authentic(raw, keys.Value.MacKey, cipher, op.Token) ? PasswordCheck.Right : PasswordCheck.Inconclusive;
     }
 
     /// <summary>The check byte, then the whole entry decoded into a discarding sink and its CRC-32 compared, with the
     /// password as UTF-8 and then in the OEM code pages.</summary>
-    private bool? CheckZipCrypto(ZipRecord r, ForeignEntry entry, string password, Operation op)
+    private PasswordCheck? CheckZipCrypto(ZipRecord r, ForeignEntry entry, string password, Operation op)
     {
         if (r.CompressedSize < 12) return null;
         var candidates = new List<byte[]> { Encoding.UTF8.GetBytes(password) };
@@ -273,11 +293,13 @@ internal sealed class ZipSource : ForeignSource
             if (!candidates.Any(c => c.AsSpan().SequenceEqual(b))) candidates.Add(b);
         }
         var buf = new byte[1 << 16];
+        bool matched = false;
         foreach (var candidate in candidates)
         {
             using var raw = new FileSlice(_handle, r.DataStart, r.CompressedSize) { OnRead = op.Read };
             var zc = new ZipCryptoStream(raw, candidate, CheckByte(r));
             if (!zc.CheckByteMatches) continue;
+            matched = true;
             try
             {
                 using var check = new VerifyingStream(new CountingStream(Decoder(r, zc, entry.Path, plain: null), op.Guard), r.UncompressedSize, r.Crc, "the file");
@@ -289,11 +311,11 @@ internal sealed class ZipSource : ForeignSource
                     op.Progress.Checking(sink.Written, r.UncompressedSize);
                 }
                 _zipCryptoPassword = candidate;
-                return true;
+                return PasswordCheck.Right;
             }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { } // not this one
         }
-        return false;
+        return matched ? PasswordCheck.Inconclusive : PasswordCheck.Wrong;
     }
 
     protected override IReadOnlyList<ArchiveDetail> Describe()
