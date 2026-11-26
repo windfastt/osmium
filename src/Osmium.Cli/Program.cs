@@ -125,6 +125,8 @@ namespace Osmium.Cli
                   --password-stdin | --password <pw>   --encrypt (ask for the password)   --kdf-iterations N
                   --workers host:port,…  --cluster-key OSM1-…   (distribute work)
                   --no-verify   --overwrite   --explain   --no-plan-log
+                  --spare-copies auto|always|never   a spare copy of the file list and header at the end (default auto:
+                                 for archives of 1 MiB and more whose file list is small next to their data)
               a <archive.zip> <files/dirs…>   Write a ZIP file (not encrypted)   --exclude "…"   --no-verify   --overwrite
               x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob, --force)
               l <archive> [-v]       List contents        t <archive>    Test (full decode + checksums)
@@ -146,6 +148,9 @@ namespace Osmium.Cli
             by their content. Passwords:
             --password-stdin | --password <pw>. --force extracts an archive that expands to more than 1,000 times
             its size; names that would leave the destination, links and devices are never extracted.
+
+            Exit codes: 0 done; 1 error; 2 files damaged, failed or left out; 3 (t) every file verified, with
+            warnings (such as a damaged spare copy of the file list); 130 cancelled.
 
             Osmium is free software under the MIT License and comes with no warranty.
             Keep backups, and test archives (osmium t) before deleting originals.
@@ -252,6 +257,13 @@ namespace Osmium.Cli
                 case "refused": return Fail(refusal!);
             }
             if (!output.EndsWith(Osa.Extension, StringComparison.OrdinalIgnoreCase)) output += Osa.Extension;
+            var spareCopies = a.Get("spare-copies")?.ToLowerInvariant() switch
+            {
+                null or "auto" => SpareCopyPolicy.Auto,
+                "always" => SpareCopyPolicy.Always,
+                "never" => SpareCopyPolicy.Never,
+                var v => throw new ArgumentException($"--spare-copies must be auto, always or never (got {v})."),
+            };
             // The password first: a refused one must stop the run before anything is planned or written.
             string? password = Password(a);
             if (password is null && a.Has("encrypt"))
@@ -296,6 +308,7 @@ namespace Osmium.Cli
                 Threads = po.Threads + (cluster?.ExtraSlots ?? 0),
                 MemoryBudget = po.MemoryBudget,
                 StorePlanLog = !a.Has("no-plan-log"),
+                SpareCopies = spareCopies,
                 Compressor = cluster?.Compressor ?? LocalBlockCompressor.Instance,
                 Progress = p => progress.Update($"{p.Phase} {Fmt.Pct(p.BytesIn, p.BytesInTotal)}  {Fmt.Bytes(p.BytesIn)} → {Fmt.Bytes(p.BytesOut)}  [{p.BlocksDone}/{p.BlocksTotal}] {p.Detail}"),
             }, ct);
@@ -401,10 +414,21 @@ namespace Osmium.Cli
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
             foreach (var w in res.Warnings) Console.Error.WriteLine("warning: " + w);
-            Console.WriteLine(res.FilesFailed == 0 && res.Errors.Count == 0
-                ? $"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified."
-                : $"FAILED — {FailureSummary(res)}.");
-            return res.FilesFailed == 0 && res.Errors.Count == 0 ? 0 : 2;
+            bool ok = res.FilesFailed == 0 && res.Errors.Count == 0;
+            if (!ok)
+            {
+                Console.WriteLine($"FAILED — {FailureSummary(res)}.");
+                return 2;
+            }
+            if (res.Warnings.Count > 0)
+            {
+                // Every file verified, but something else is not as it should be (a damaged spare copy of the file
+                // list, a header that had to be read from its copy): not a plain OK.
+                Console.WriteLine($"OK with {res.Warnings.Count} warning(s) — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified; see the warnings above.");
+                return 3;
+            }
+            Console.WriteLine($"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified.");
+            return 0;
         }
 
         private static int SalvageCmd(Args a, CancellationToken ct)
@@ -444,7 +468,8 @@ namespace Osmium.Cli
             if (a.Positional.Count < 1) return Fail("usage: osmium info <archive>");
             using var r = Open(a, a.Positional[0]);
             Console.WriteLine($"Archive:      {r.Path}");
-            Console.WriteLine($"Format:       .osa {Osa.Major}.{Osa.Minor}   created by {r.Header.Creator}");
+            Console.WriteLine($"Format:       .osa {Osa.Major}.{r.Header.Minor}   created by {r.Header.Creator}");
+            Console.WriteLine($"Spare copy:   {SpareCopyText(r.SpareCopyStatus)}");
             Console.WriteLine($"Encrypted:    {(r.Header.Encrypted ? $"yes (AES-256-GCM, PBKDF2-SHA512 ×{r.Header.Encryption!.Iterations:N0})" : "no")}");
             Console.WriteLine($"Experimental: {(r.Header.Experimental ? "yes" : "no")}");
             Console.WriteLine($"Profile:      {r.Index.MetaString("profile") ?? "?"}");
@@ -459,6 +484,14 @@ namespace Osmium.Cli
                 Console.WriteLine($"Note: {newer.Message} Blocks marked \"needs a newer Osmium\" cannot be extracted by this version; the others can.");
             return 0;
         }
+
+        private static string SpareCopyText(SpareCopyStatus status) => status switch
+        {
+            SpareCopyStatus.Present => "yes, of the file list and header",
+            SpareCopyStatus.Damaged => "damaged (run osmium t for details)",
+            SpareCopyStatus.Newer => "in a form of a newer version of Osmium, not used",
+            _ => "none",
+        };
 
         private static int Explain(Args a)
         {

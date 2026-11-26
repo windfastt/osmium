@@ -168,6 +168,7 @@ internal static partial class Cli
             return Fail("ZIP files made by Osmium are not encrypted; use an .osa archive with --password.");
         if (a.Has("profile")) return Fail("--profile does not apply to ZIP files, which Osmium writes with Deflate; use an .osa archive for profiles.");
         if (a.Has("pipeline")) return Fail("--pipeline does not apply to ZIP files; use an .osa archive to choose a pipeline.");
+        if (a.Has("spare-copies")) return Fail("--spare-copies applies to .osa archives; a ZIP file has no spare copy of its file list.");
         bool quiet = a.Has("quiet") || a.Has("q");
         var progress = new ProgressLine(quiet);
         var sw = Stopwatch.StartNew();

@@ -5,7 +5,8 @@ using Osmium.Core.Pipeline;
 
 namespace Osmium.Cli.Tests;
 
-/// <summary>The output of l and info for an .osa archive stays what it was before other formats were added.</summary>
+/// <summary>The output of l and info for an .osa archive stays what it was before other formats were added; info also
+/// shows the archive's own container version and whether it has a spare copy of its file list.</summary>
 [Collection(ConsoleCollection.Name)]
 public sealed class OsaOutputTests : IDisposable
 {
@@ -72,7 +73,7 @@ public sealed class OsaOutputTests : IDisposable
     }
 
     [Fact]
-    public async Task InfoIsUnchanged()
+    public async Task InfoShowsTheArchivesOwnVersion()
     {
         var culture = CultureInfo.CurrentCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -84,7 +85,8 @@ public sealed class OsaOutputTests : IDisposable
             Assert.Equal(0, r.ExitCode);
             Assert.Equal(
                 $"Archive:      {archive}\n" +
-                $"Format:       .osa 1.0   created by {creator}\n" +
+                $"Format:       .osa 1.1   created by {creator}\n" +
+                "Spare copy:   none\n" +
                 "Encrypted:    no\n" +
                 "Experimental: no\n" +
                 "Profile:      ?\n" +
