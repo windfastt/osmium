@@ -504,25 +504,14 @@ public class ZipCreatorTests
             return;
         }
 
-        // The unzip on Windows runners is the MSYS build of Info-ZIP: it ignores the UTF-8 flag (bit 11, checked in
-        // NamesThatAreNotAsciiAreStoredAsUtf8AndMarkedSo) and writes the raw bytes through the ANSI API. Its ASCII
-        // names are compared exactly; the others go through Windows' own tar, which reads the flag.
-        TestContext.Current.TestOutputHelper?.WriteLine("unzip here ignores the UTF-8 name flag: names that are not ASCII are compared through Windows' tar.exe.");
+        // The unzip on Windows runners is the MSYS build of Info-ZIP: it ignores the UTF-8 flag and writes the raw
+        // name bytes through the ANSI API (Windows' tar converts to the ANSI code page too). Its ASCII names are
+        // compared exactly; the others are covered by the 7-Zip test and by the test of the flag itself.
+        TestContext.Current.TestOutputHelper?.WriteLine("unzip here ignores the UTF-8 name flag: the names that are not ASCII are checked by "
+            + nameof(SevenZipTestsAndExtractsTheZipExactly) + " and " + nameof(NamesThatAreNotAsciiAreStoredAsUtf8AndMarkedSo) + ".");
         var unzipped = FilesOf(P(t, "x", "in")).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
         Assert.Equal(FilesOf(input).Count, unzipped.Count); // every file came out, under some name
         foreach (var (name, data) in FilesOf(input, IsAscii)) Assert.Equal(data, unzipped[name]);
-        string tar = Path.Combine(Environment.SystemDirectory, "tar.exe");
-        if (!File.Exists(tar))
-        {
-            TestContext.Current.TestOutputHelper?.WriteLine("Windows' tar.exe (Windows 10 1803 and later) is missing: the names that are not ASCII were not compared here.");
-            return;
-        }
-        Directory.CreateDirectory(P(t, "tar"));
-        var tx = Run(tar, "-xf", output, "-C", P(t, "tar"))!.Value;
-        Assert.True(tx.Code == 0, tx.Output);
-        var unicode = FilesOf(input, n => !IsAscii(n));
-        Assert.Equal(2, unicode.Count);
-        Assert.Equal(unicode, FilesOf(P(t, "tar", "in"), n => !IsAscii(n)));
     }
 
     [Fact]
@@ -540,9 +529,13 @@ public class ZipCreatorTests
         Assert.True(test.Code == 0, test.Output);
         var x = Run("7z", "x", "-y", "-o" + P(t, "x"), output)!.Value;
         Assert.True(x.Code == 0, x.Output);
-        Assert.Equal(Expected(input).Where(kv => kv.Value is not null).OrderBy(kv => kv.Key, StringComparer.Ordinal),
-            Expected(P(t, "x", "in")).Where(kv => kv.Value is not null).OrderBy(kv => kv.Key, StringComparer.Ordinal));
+        Assert.Equal(FilesOf(input), FilesOf(P(t, "x", "in")));
         Assert.True(Directory.Exists(P(t, "x", "in", "empty-dir")));
+        // The names that are not ASCII, one by one: this is where they are checked on Windows (see the unzip test).
+        var unicode = FilesOf(input, n => !IsAscii(n));
+        Assert.Equal(["in/ünïcödé — файл.txt", "in/日本語 😀.txt"], unicode.Select(kv => kv.Key));
+        foreach (var (name, data) in unicode)
+            Assert.Equal(data, File.ReadAllBytes(Path.Combine([P(t, "x"), .. name.Split('/')])));
     }
 
     /// <summary>Passes a stream through, with the byte at one position flipped.</summary>
