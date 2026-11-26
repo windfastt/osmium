@@ -14,7 +14,15 @@ namespace Osmium.Core.Archives.Foreign.SevenZip;
 /// </summary>
 internal sealed class SevenZipSource : ForeignSource
 {
+    /// <summary>The SHA-256 rounds of key derivation one archive may cost in all: 256 keys at the 2^19 rounds 7z
+    /// writers use, 8 at the most Osmium accepts for one key. Each salt needs its own key, so without this a small
+    /// archive of many folders, each with its own salt, could keep the processor busy for days.</summary>
+    public const long MaxKeyRounds = 1L << 27;
+
+    internal const string KeyBudgetRefusal = "this archive asks for more password key derivation than Osmium allows for one archive";
+
     private static readonly AsyncLocal<Func<int, bool>?> DropChecksums = new();
+    private static readonly AsyncLocal<long?> KeyRoundsSeam = new();
     private readonly SafeFileHandle _handle;
     private SzDatabase _db = new();
     private bool _encryptedHeaders;
@@ -24,6 +32,11 @@ internal sealed class SevenZipSource : ForeignSource
     /// <summary>For tests (this async flow only): forget the stored CRCs of the folders this accepts when the archive is
     /// read, as an archive written without checksums would be.</summary>
     internal static Func<int, bool>? DropChecksumsForTests { get => DropChecksums.Value; set => DropChecksums.Value = value; }
+
+    /// <summary>For tests: the key derivation budget instead of <see cref="MaxKeyRounds"/>.</summary>
+    internal static long? MaxKeyRoundsOverride { get => KeyRoundsSeam.Value; set => KeyRoundsSeam.Value = value; }
+
+    private static long KeyBudget => MaxKeyRoundsOverride ?? MaxKeyRounds;
 
     private SevenZipSource(string path, ArchiveOpenOptions options) : base(path, options) =>
         _handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
@@ -99,9 +112,27 @@ internal sealed class SevenZipSource : ForeignSource
         lock (_keys)
         {
             if (_keys.TryGetValue(identity, out var known)) return known;
+            long rounds = SevenZipAes.Rounds(props);
+            if (KeyRoundsSpent + rounds > KeyBudget) throw new NotSupportedException(KeyBudgetRefusal);
             var key = SevenZipAes.Key(props, password, _ct);
-            KeyRoundsSpent += SevenZipAes.Rounds(props);
+            KeyRoundsSpent += rounds;
             return _keys[identity] = key;
+        }
+    }
+
+    /// <summary>Whether the keys of the folder's AES coders are known or fit in what is left of the budget (damaged
+    /// properties are reported when the folder is opened).</summary>
+    private bool KeysWithinBudget(SzFolder f)
+    {
+        lock (_keys)
+        {
+            try
+            {
+                long needed = f.Coders.Where(c => c.Id == SevenZipHeader.AesId).DistinctBy(c => SevenZipAes.KeyIdentity(c.Props))
+                    .Where(c => !_keys.ContainsKey(SevenZipAes.KeyIdentity(c.Props))).Sum(c => SevenZipAes.Rounds(c.Props));
+                return KeyRoundsSpent + needed <= KeyBudget;
+            }
+            catch (CorruptDataException) { return true; }
         }
     }
 
@@ -162,6 +193,7 @@ internal sealed class SevenZipSource : ForeignSource
         {
             if (!Checkable(folder, byFolder)) continue;
             var f = _db.Folders[folder];
+            if (!KeysWithinBudget(f)) continue;
             int stopAfter = byFolder[folder].FirstOrDefault(i => _db.Files[i].Crc is not null, -1);
             long total = stopAfter < 0 ? f.UnpackSize : byFolder[folder].TakeWhile(i => i != stopAfter).Sum(i => _db.Files[i].Size) + _db.Files[stopAfter].Size;
             try
@@ -226,6 +258,11 @@ internal sealed class SevenZipSource : ForeignSource
             {
                 foreach (int i in wanted)
                     op.Sink.Accept(Entries[i].Refused("encrypted without a stored checksum, so Osmium cannot check the password"), op.Selected(Entries[i])!, null);
+                continue;
+            }
+            if (f.IsEncrypted && !KeysWithinBudget(f))
+            {
+                foreach (int i in wanted) op.Sink.Accept(Entries[i].Refused(KeyBudgetRefusal), op.Selected(Entries[i])!, null);
                 continue;
             }
             int last = wanted[^1];

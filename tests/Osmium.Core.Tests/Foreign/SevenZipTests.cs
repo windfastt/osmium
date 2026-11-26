@@ -200,6 +200,31 @@ public class SevenZipTests
     }
 
     [Fact]
+    public void KeyDerivationForOneArchiveIsBounded()
+    {
+        // Six folders, each with its own salt: within a budget of four keys, four are read and two are refused before
+        // their keys are derived.
+        using var t = new TempDir();
+        var folders = Enumerable.Range(0, 6).Select(i => SevenZipCraft.Encrypted("pw",
+            SevenZipCraft.AesProps(10, [(byte)i], [.. Enumerable.Repeat((byte)i, 16)]), System.Text.Encoding.ASCII.GetBytes($"file {i}"))).ToList();
+        string path = ForeignData.Write(t, "salts.7z", SevenZipCraft.Build(folders));
+        SevenZipSource.MaxKeyRoundsOverride = 4 << 10;
+        try
+        {
+            using var s = (SevenZipSource)Open(path, new ArchiveOpenOptions { Password = () => "pw" });
+            var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal((4, 2, 2), (r.FilesOk, r.SkippedUnsupported, r.LeftOut));
+            Assert.Equal(2, r.Errors.Count(e => e.EndsWith(SevenZipSource.KeyBudgetRefusal, StringComparison.Ordinal)));
+            Assert.Equal(4L << 10, s.KeyRoundsSpent);
+            var test = s.Test(null, null, Ct);
+            Assert.Equal((4, 2), (test.FilesOk, test.SkippedUnsupported));
+            Assert.Equal(4L << 10, s.KeyRoundsSpent);
+        }
+        finally { SevenZipSource.MaxKeyRoundsOverride = null; }
+        Assert.Equal(SevenZipAes.MaxCyclesPower + 3, (int)Math.Log2(SevenZipSource.MaxKeyRounds));
+    }
+
+    [Fact]
     public void DamageFailsTheFileAndTheRestOfItsSolidBlockOnly()
     {
         using var t = new TempDir();
