@@ -261,12 +261,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Works both for a pushed tag and for a release published in GitHub's UI ("create new tag on publish"):
         # an existing release gets the files attached and its notes replaced by the CHANGELOG section.
+        # A run started by hand with release_tag may find the tag made in advance on an earlier commit: the tag is
+        # moved to the commit this run built, so the release's source and its files always match, and a draft
+        # release is published.
         run: |
           pre=""; [[ "$TAG" == *-* ]] && pre="--prerelease"
           title="Osmium ${TAG#v}"
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            tagged=$(git ls-remote origin "refs/tags/$TAG^{}" "refs/tags/$TAG" | awk 'NR==1 {print $1}')
+            if [ -n "$tagged" ] && [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "Moving $TAG from $tagged to $GITHUB_SHA"
+              git push --force origin "$GITHUB_SHA:refs/tags/$TAG"
+            fi
+          fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
             if [ -s notes.md ]; then gh release edit "$TAG" --title "$title" --notes-file notes.md $pre; fi
+            gh release edit "$TAG" --draft=false
           else
             if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
             gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$title" "${notes[@]}" $pre
