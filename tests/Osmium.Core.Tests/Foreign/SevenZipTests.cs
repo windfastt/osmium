@@ -281,6 +281,35 @@ public class SevenZipTests
         Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f1.bin")));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheCrcCatchesAWrongPasswordWhereCopyPassesTheBytesOn(bool folderCrc)
+    {
+        // AES over Copy: a wrong password decrypts to bytes that no decoder refuses. The file's CRC, or the folder's
+        // when only the folder has one, is what refuses the password before anything is written.
+        using var t = new TempDir();
+        var data = "a file that only the right password decrypts"u8.ToArray();
+        var props = SevenZipCraft.AesProps(10, [], SomeIv);
+        var folder = SevenZipCraft.Encrypted("right", props, data);
+        if (folderCrc) folder = folder with { Files = [(data.Length, null)], UnpackCrc = System.IO.Hashing.Crc32.HashToUInt32(data) };
+        string path = ForeignData.Write(t, "aes-copy.7z", SevenZipCraft.Build([folder]));
+        int asked = 0;
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "wrong"; } }))
+        {
+            Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct));
+            Assert.False(Directory.Exists(t.Sub("out")));
+            Assert.Throws<WrongPasswordException>(() => s.Test(null, null, Ct));
+            Assert.Equal(1, asked);
+        }
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => "right" }))
+        {
+            var r = s.Extract(t.Sub("right"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal((1, 0), (r.FilesOk, r.Unverified));
+            Assert.Equal(data, File.ReadAllBytes(Path.Combine(t.Sub("right"), "f0.bin")));
+        }
+    }
+
     [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {

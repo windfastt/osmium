@@ -15,10 +15,10 @@ internal static class SevenZipCraft
     public sealed record Coder(byte[] Id, byte[]? Props = null, int NumIn = 1, int NumOut = 1);
 
     /// <summary>One folder: its coders, the packed streams, the size of every coder output, the files it holds (size
-    /// and stored CRC), its bind pairs (coder input, coder output) and, when there is more than one packed stream,
-    /// the coder inputs they feed.</summary>
+    /// and stored CRC), its bind pairs (coder input, coder output), when there is more than one packed stream the
+    /// coder inputs they feed, and the CRC of the folder's whole result (which stands for its file's when it holds one).</summary>
     public sealed record Folder(Coder[] Coders, byte[][] Packed, long[] UnpackSizes, (long Size, uint? Crc)[] Files,
-        (int In, int Out)[]? Binds = null, int[]? PackedIn = null);
+        (int In, int Out)[]? Binds = null, int[]? PackedIn = null, uint? UnpackCrc = null);
 
     public static (long, uint?) Checked(byte[] data) => (data.Length, Crc32.HashToUInt32(data));
 
@@ -78,24 +78,21 @@ internal static class SevenZipCraft
         }
         h.Add(0x0C);
         foreach (var f in folders) foreach (long s in f.UnpackSizes) Num(h, s);
+        if (folders.Any(f => f.UnpackCrc is not null))
+        {
+            h.Add(0x0A);
+            Digests(h, [.. folders.Select(f => f.UnpackCrc)]);
+        }
         h.Add(0x00);
         h.AddRange([0x08, 0x0D]);
         foreach (var f in folders) Num(h, f.Files.Length);
         h.Add(0x09);
         foreach (var f in folders) foreach (var (size, _) in f.Files.SkipLast(1)) Num(h, size);
-        var crcs = folders.SelectMany(f => f.Files).Select(f => f.Crc).ToList();
+        // A folder of one file with a folder CRC needs no file CRC here.
         h.Add(0x0A);
-        if (crcs.All(c => c is not null)) h.Add(1);
-        else
-        {
-            h.Add(0);
-            var bits = new byte[(crcs.Count + 7) / 8];
-            for (int i = 0; i < crcs.Count; i++) if (crcs[i] is not null) bits[i / 8] |= (byte)(0x80 >> (i % 8));
-            h.AddRange(bits);
-        }
-        foreach (var c in crcs) if (c is { } v) h.AddRange(BitConverter.GetBytes(v));
+        Digests(h, [.. folders.Where(f => !(f.Files.Length == 1 && f.UnpackCrc is not null)).SelectMany(f => f.Files).Select(f => f.Crc)]);
         h.AddRange([0x00, 0x00]);
-        int files = crcs.Count;
+        int files = folders.Sum(f => f.Files.Length);
         h.Add(0x05);
         Num(h, files);
         var names = new List<byte> { 0x00 };
@@ -116,6 +113,20 @@ internal static class SevenZipCraft
     }
 
     private static byte[] Concat(byte[][] parts) => [.. parts.SelectMany(p => p)];
+
+    /// <summary>7z digests: "all defined", or a bit vector of the defined ones; then their CRCs.</summary>
+    private static void Digests(List<byte> h, List<uint?> crcs)
+    {
+        if (crcs.All(c => c is not null)) h.Add(1);
+        else
+        {
+            h.Add(0);
+            var bits = new byte[(crcs.Count + 7) / 8];
+            for (int i = 0; i < crcs.Count; i++) if (crcs[i] is not null) bits[i / 8] |= (byte)(0x80 >> (i % 8));
+            h.AddRange(bits);
+        }
+        foreach (var c in crcs) if (c is { } v) h.AddRange(BitConverter.GetBytes(v));
+    }
 
     /// <summary>7z's variable-length number.</summary>
     private static void Num(List<byte> h, long v)
