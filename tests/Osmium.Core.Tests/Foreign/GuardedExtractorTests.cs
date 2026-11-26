@@ -166,6 +166,16 @@ public class GuardedExtractorTests
     }
 
     [Fact]
+    public void DeletionMarkersAreSkippedWithAWarningAndNotLeftOut()
+    {
+        using var s = new Setup();
+        var r = s.Extract([new MemoryEntry("deleted.txt") { Type = EntryType.Anti }, MemoryEntry.File("kept.txt", "kept")]);
+        Assert.Equal((1, 0), (r.FilesOk, r.LeftOut));
+        Assert.Contains(r.Warnings, w => w.StartsWith("deleted.txt: a deletion marker", StringComparison.Ordinal));
+        Assert.Equal(["kept.txt"], s.FilesUnder());
+    }
+
+    [Fact]
     public void DevicesAndOtherSpecialEntriesAreRefused()
     {
         using var s = new Setup();
