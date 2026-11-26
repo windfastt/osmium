@@ -40,6 +40,7 @@ internal sealed class SalvageRun : IDisposable
     private readonly SalvageSource _src;
     private readonly FrameScanner _scanner;
     private readonly List<string> _notes = [];
+    private HeaderProbe? _probe; // what was found where the header should be: a header copy must be a copy of it
     private readonly ConcurrentQueue<SalvageLoss> _lost = new(), _newer = new();
     private readonly ConcurrentQueue<SalvageRename> _renamed = new();
     private readonly ConcurrentQueue<string> _warnings = new();
@@ -64,7 +65,7 @@ internal sealed class SalvageRun : IDisposable
     {
         // 1. Header: an unencrypted archive does not need it; an encrypted one needs its salt and archive id.
         bool anyFrame = _scanner.NextFrameHeader(0, out var first);
-        var probe = HeaderProbe.Find(_src, anyFrame ? first.Offset : _src.Length);
+        var probe = _probe = HeaderProbe.Find(_src, anyFrame ? first.Offset : _src.Length);
         if (probe.Header is null && !anyFrame)
             throw new CorruptDataException($"No Osmium archive data was found in '{_archive}': it has no intact header and no frame.");
         bool encrypted = probe.Header?.Encrypted ?? EndIndexEncrypted(probe) ?? DamagedHeaderEncrypted() ?? (anyFrame && FramesLookEncrypted());
@@ -1016,15 +1017,21 @@ internal sealed class SalvageRun : IDisposable
         return found;
     }
 
+    /// <summary>Whether the bytes at <paramref name="start"/> are a header copy of this archive: header bytes that check
+    /// out as a header, with this archive's id (from the header, else the footer at the end of the file) and, when the
+    /// header is intact, the header's very bytes; then zero padding.</summary>
     private bool IsHeaderCopy(long start, SpareTrailer t)
     {
         if (start < 0 || start + t.CopyLength > _src.Length) return false;
+        var raw = _src.Read(start, (int)t.HeaderLength);
         try
         {
-            if (ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)t.HeaderLength), writable: false)).Length != t.HeaderLength) return false;
+            if (ArchiveHeader.Read(new MemoryStream(raw, writable: false)).Length != t.HeaderLength) return false;
         }
         catch (NewerVersionException) { } // an intact header of a newer version is still a header
         catch (Exception e) when (e is IOException or InvalidDataException) { return false; }
+        if (_probe?.IdPrefix is { } id && BinaryPrimitives.ReadUInt64LittleEndian(raw.AsSpan(16)) != id) return false;
+        if (_probe?.Header is { } header && !raw.AsSpan().SequenceEqual(header.Raw)) return false;
         var padding = _src.Read(start + t.HeaderLength, (int)t.PaddingLength);
         return !padding.AsSpan().ContainsAnyExcept((byte)0);
     }

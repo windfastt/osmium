@@ -182,9 +182,12 @@ Readers:
    be read, the archive opens with the warning "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk." A
    trailer whose CRC checks out but which has a flag or reserved bit set was written by a newer version: the reader
    does not use H and gives no warning.
-2. **Test** and **salvage** compare B with A byte for byte and H's header bytes with the header at offset 0, and check
-   that the padding is zero; a difference is a warning, the archive is complete. This is not done on every open: it
-   reads the index twice.
+2. **Test** compares B with A byte for byte and H's header bytes with the header at offset 0, and checks that the
+   padding is zero; a difference is a warning, the archive is complete. This is not done on every open: it reads the
+   index twice. **Salvage** counts B as the spare copy when it verifies and has A's content, and H as the header's copy
+   when its header bytes are those of the header at offset 0 (with that header damaged: when they carry the archive id
+   that the footer at the end of the file names) and its padding is zero; anything else is reported as damage, though
+   no data is lost.
 3. **A fails** (frame CRC, GCM tag, payload hash, decompression, raw hash or index structure, or its bytes cannot be read
    at all, as with a bad sector): the reader reads B, found through H's trailer or, when that is damaged too, as the
    frame header with the index flag, the index frame number and the footer's index length that is nearest before A
@@ -285,7 +288,8 @@ index's offsets:
    authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
    (`--force` lifts both in the CLI).
-8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, so it is not reported
+8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, which must be this
+   archive's (§4.1, readers, item 2), so it is not reported
    as unrecognised data, and the spare index frame B, which the index names in `spares`, is a copy of the index frame,
    not damage: an intact archive with spare copies salvages as complete. When A is destroyed, B is the index salvage
    uses, and every file comes back with its name.

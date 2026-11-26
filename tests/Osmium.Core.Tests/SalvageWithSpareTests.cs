@@ -127,6 +127,63 @@ public class SalvageWithSpareTests
         Assert.Equal(0, wrong.FilesRecovered);
     }
 
+    [Theory]
+    [InlineData("the spare file list")]
+    [InlineData("the padding of the header copy")]
+    [InlineData("the archive id in the header copy")]
+    [InlineData("the header copy, beyond the id's first bytes")]
+    public void ADamagedSpareCopyIsDamageThoughNoDataIsLost(string what)
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(4, 3000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, WithSpares());
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            long h = tail.HeaderCopyOffset;
+            switch (what)
+            {
+                case "the spare file list": b[tail.SpareOffset + tail.IndexLength / 2] ^= 0x01; break;
+                case "the padding of the header copy": b[h + tail.HeaderLength + 100] ^= 0x01; break;
+                default: RewriteHeaderCopy(b, h, tail.HeaderLength, what == "the archive id in the header copy" ? 17 : 27); break;
+            }
+        });
+
+        var res = Salvage.Run(bad, t.Sub("out"), null, null, Ct);
+        AssertRecovered(files, t.Sub("out"), res);
+        Assert.Equal("Everything was recovered: the archive is damaged, but no data was lost.", res.Summary().Last());
+    }
+
+    /// <summary>Changes one byte of the header copy at <paramref name="h"/> and recomputes its CRC, so that it still
+    /// checks out as a header.</summary>
+    private static void RewriteHeaderCopy(byte[] b, long h, long headerLength, int at)
+    {
+        b[h + at] ^= 0x01;
+        int crcAt = (int)(h + headerLength - 4);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(crcAt), Osa.Crc(b.AsSpan((int)h, (int)headerLength - 4)));
+    }
+
+    [Fact]
+    public void WithTheHeaderDamagedAHeaderCopyOfAnotherArchiveIsNotRecognised()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(4, 3000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, WithSpares());
+        var tail = SpareArchives.TailOf(path);
+        long copy = tail.Trailer!.Value.CopyLength;
+        SalvageResult Salvaged(string name, bool otherId) => Salvage.Run(SpareArchives.Damage(path, t.Sub(name + ".osa"), b =>
+        {
+            b[2] ^= 0x01; // the header's marker
+            if (otherId) RewriteHeaderCopy(b, tail.HeaderCopyOffset, tail.HeaderLength, 17);
+        }), t.Sub(name), null, null, Ct);
+
+        // The footer names the archive: a header copy with that id is recognised, one with another id is not.
+        Assert.Equal(tail.HeaderLength, Salvaged("own", otherId: false).UnrecognizedBytes);
+        var other = Salvaged("other", otherId: true);
+        Assert.Equal(tail.HeaderLength + copy, other.UnrecognizedBytes);
+        AssertRecovered(files, t.Sub("other"), other);
+    }
+
     [Fact]
     public void TheSpareFileListOfAnotherArchiveIsNeverTakenForThisArchives()
     {
