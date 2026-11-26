@@ -136,6 +136,24 @@ public class DetectionTests
         Assert.Null(ArchiveSources.Detect(path));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnOsaWithADamagedHeaderAndASpareCopyIsAnOsaAndOpens(bool encrypted)
+    {
+        // Under any name: the footer says what it is, and the spare copy of the header stands in for the damaged one.
+        using var t = new TempDir();
+        string? password = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, new OsaWriterOptions { Password = password, SpareCopies = SpareCopyPolicy.Always });
+        string bad = SpareArchives.Damage(path, t.Sub("damaged.bin"), b => Array.Clear(b, 0, 8));
+        Assert.Equal(ArchiveKind.Osa, ArchiveSources.Detect(bad));
+        using var s = ArchiveSources.Open(bad, new ArchiveOpenOptions { Password = () => password }, TestContext.Current.CancellationToken);
+        Assert.Equal(files.Count, s.Items.Count(i => !i.IsDirectory));
+        var r = s.Test(null, null, TestContext.Current.CancellationToken);
+        Assert.Equal((files.Count, 0), (r.FilesOk, r.FilesFailed));
+    }
+
     [Fact]
     public void DetectionDoesNotAllocateADeclaredDictionary()
     {
