@@ -324,6 +324,24 @@ public class SevenZipTests
         }
     }
 
+    [Fact]
+    public void TheCrcFailsAFileThatACopyFolderPassesOnDamaged()
+    {
+        // Copy never fails on damage: the file's CRC is the only thing that can.
+        using var t = new TempDir();
+        var bytes = File.ReadAllBytes(ForeignData.Fixture("7z", "copy.7z"));
+        bytes[37] ^= 0x55; // inside the first packed stream: a plain byte of the first file
+        string path = ForeignData.Write(t, "damaged-copy.7z", bytes);
+        using var s = Open(path);
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((2, 1, 0), (r.FilesOk, r.FilesFailed, r.Unverified));
+        Assert.Contains(r.Errors, e => e.Contains("CRC mismatch", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(t.Sub("out"), "*.osmium-part-*", SearchOption.AllDirectories));
+        Assert.Equal(r.FilesOk, FilesUnder(t.Sub("out")).Count); // the damaged file is not kept
+        var test = s.Test(null, null, Ct);
+        Assert.Equal((2, 1), (test.FilesOk, test.FilesFailed));
+    }
+
     /// <summary>Changes a coder's properties in a fixture whose header is not compressed, fixing up the CRCs.</summary>
     private static byte[] PatchCoder(string fixture, byte[] coder, Action<byte[], int> patch)
     {
