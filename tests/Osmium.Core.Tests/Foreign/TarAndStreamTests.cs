@@ -487,6 +487,8 @@ public class TarAndStreamTests
     [InlineData("x.tgz", "x.tar")]
     [InlineData("data.BZ2", "data")]
     [InlineData("file.bin", "file")]
+    [InlineData("data", "data (decompressed)")]
+    [InlineData("DATA", "DATA (decompressed)")]
     public void ASingleFileIsNamedAfterTheArchive(string name, string item) =>
         Assert.Equal(item, Archives.Foreign.SingleStreamSource.ItemName(Path.Combine("dir", name)));
 

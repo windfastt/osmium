@@ -253,6 +253,22 @@ public class GuardedExtractorTests
         Assert.Equal(1, r.Renamed);
     }
 
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheArchiveBeingReadIsNeverReplaced(OverwriteMode mode)
+    {
+        using var s = new Setup();
+        var before = File.ReadAllBytes(s.Archive);
+        var replaced = new List<string>();
+        using var source = new MemorySource(s.Archive, [MemoryEntry.File("archive.bin", "an entry named like the archive"), MemoryEntry.File("ARCHIVE.BIN/inside.txt", "below")]);
+        var r = source.Extract(s.T.Path, new ArchiveExtractRequest { Overwrite = mode, BeforeReplace = replaced.Add }, null, Ct);
+        Assert.Equal(before, File.ReadAllBytes(s.Archive));
+        Assert.Equal((2, 0, 0), (r.FilesOk, r.SkippedExisting, r.FilesFailed));
+        Assert.Empty(replaced);
+        Assert.Equal("an entry named like the archive", File.ReadAllText(s.T.Sub("archive (2).bin")));
+        Assert.Equal("below", File.ReadAllText(Path.Combine(s.T.Path, "ARCHIVE.BIN (2)", "inside.txt")));
+    }
+
     [Fact]
     public void ManyCopiesOfOneNameTakeNoLongerThanAsManyDifferentNames()
     {

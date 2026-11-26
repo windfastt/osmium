@@ -50,13 +50,16 @@ internal sealed class SingleStreamSource : ForeignSource
 
     private string Name => System.IO.Path.GetFileName(Path);
 
-    /// <summary>"notes.txt.gz" → "notes.txt", "x.tgz" → "x.tar"; a name without such an extension keeps its stem.</summary>
+    /// <summary>"notes.txt.gz" → "notes.txt", "x.tgz" → "x.tar"; a name without such an extension keeps its stem, and
+    /// a name without any extension gets " (decompressed)": never the archive's own name, which the file would
+    /// otherwise take next to it.</summary>
     internal static string ItemName(string path)
     {
         string name = System.IO.Path.GetFileName(path);
         foreach (var (ext, replacement) in new[] { (".tgz", ".tar"), (".tbz2", ".tar"), (".tbz", ".tar"), (".txz", ".tar"), (".tzst", ".tar"), (".gz", ""), (".bz2", ""), (".xz", ""), (".zst", "") })
             if (name.Length > ext.Length && name.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return name[..^ext.Length] + replacement;
-        return ArchiveSources.StemOf(path);
+        string stem = ArchiveSources.StemOf(path);
+        return string.Equals(stem, name, StringComparison.OrdinalIgnoreCase) ? stem + " (decompressed)" : stem;
     }
 
     public override ArchiveKind Kind => _compression switch

@@ -95,6 +95,27 @@ public sealed class ForeignFormatTests : IDisposable
     }
 
     [Fact]
+    public async Task ACompressedFileWithoutAnExtensionNeverReplacesItself()
+    {
+        string path = P("data");
+        using (var fs = File.Create(path))
+        using (var gz = new GZipStream(fs, CompressionLevel.Optimal))
+            gz.Write(Encoding.UTF8.GetBytes("the original text\n"));
+        var before = File.ReadAllBytes(path);
+        var r = await CliRunner.RunAsync(["x", path, "--overwrite", "-q"]);
+        Assert.Equal(0, r.ExitCode);
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Equal("the original text\n", File.ReadAllText(P("data (decompressed)")));
+        // Into the archive's folder under its own name, as an archive that holds a file of its name would put it.
+        var into = await CliRunner.RunAsync(["x", Zip("backup.zip", [("backup.zip", "an entry named like the archive")]), _dir, "--overwrite", "-q"]);
+        Assert.Equal(0, into.ExitCode);
+        Assert.Equal("an entry named like the archive", File.ReadAllText(P("backup (2).zip")));
+        using var zip = ZipFile.OpenRead(P("backup.zip"));
+        using var entry = new StreamReader(zip.Entries[0].Open());
+        Assert.Equal("an entry named like the archive", entry.ReadToEnd());
+    }
+
+    [Fact]
     public async Task ExtractsIntoAGivenFolderWithAnIncludeFilter()
     {
         string path = Zip("a.zip", Tree);
