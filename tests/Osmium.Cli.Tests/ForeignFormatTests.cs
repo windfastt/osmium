@@ -199,7 +199,12 @@ public sealed class ForeignFormatTests : IDisposable
             if (sig == 0x02014b50) BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i + 24), 0x7FFFFFFF);
         }
         File.WriteAllBytes(path, bytes);
-        var r = await CliRunner.RunAsync(["x", path, P("out")]);
+        // The message formats its number for the user's culture; this test reads it in a fixed one.
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        CliResult r;
+        try { r = await CliRunner.RunAsync(["x", path, P("out")]); }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
         Assert.Equal(1, r.ExitCode);
         Assert.Contains("This archive expands to more than 1,000 times its size. Use --force to extract it anyway.", r.Error);
         Assert.False(Directory.Exists(P("out")));
