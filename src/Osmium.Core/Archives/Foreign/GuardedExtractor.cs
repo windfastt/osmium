@@ -255,6 +255,12 @@ internal sealed class GuardedExtractor : IEntrySink
             Refuse(ref _unsafe, e, link);
             return;
         }
+        if (TooLongName(_root, target) is { } tooLong)
+        {
+            _failed++;
+            _errors.Add($"{Esc(e.Path)}: not extracted: the name '{Esc(tooLong)}' is longer than {EntryNames.MaxComponent} characters, which file systems refuse");
+            return;
+        }
         string part = PartName(target);
         _currentPart = part;
         _progress.Current(e.Path);
@@ -332,6 +338,11 @@ internal sealed class GuardedExtractor : IEntrySink
             }
         }
     }
+
+    /// <summary>The first name below <paramref name="root"/> on the way to <paramref name="target"/> that is longer
+    /// than 255 UTF-16 units (no file system takes it), or null.</summary>
+    internal static string? TooLongName(string root, string target) =>
+        Path.GetRelativePath(root, target).Split(Path.DirectorySeparatorChar).FirstOrDefault(n => n.Length > EntryNames.MaxComponent);
 
     /// <summary>The part file of <paramref name="target"/>: its name and ".osmium-part-" with six random hex digits,
     /// the name cut short where the part's name would pass 255 characters, so that a name of 237 to 255 characters,

@@ -524,15 +524,28 @@ public class GuardedExtractorTests
     }
 
     [Fact]
-    public void AMoveToANameThatIsTooLongFailsAtOnce()
+    public void AMoveThatCannotSucceedFailsAtOnce()
     {
+        // A name too long (Windows: "the syntax is incorrect", Linux: too long), or a folder that is not there: only
+        // a passing lock is worth a retry, so each fails in well under a second on every system.
         using var s = new Setup();
         string source = s.T.Sub("source.txt");
         File.WriteAllText(source, "x");
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        Assert.Throws<PathTooLongException>(() => Osmium.Core.IO.FileRetry.Move(source, s.T.Sub(new string('n', 300)), overwrite: false));
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"took {sw.Elapsed.TotalSeconds:F1} s");
-        Assert.True(File.Exists(source));
+        foreach (var destination in new[] { s.T.Sub(new string('n', 300)), Path.Combine(s.T.Path, "missing", "x.txt") })
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Assert.ThrowsAny<IOException>(() => Osmium.Core.IO.FileRetry.Move(source, destination, overwrite: false));
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"{destination.Length} characters: took {sw.Elapsed.TotalSeconds:F1} s");
+            Assert.True(File.Exists(source));
+        }
+    }
+
+    [Fact]
+    public void ATargetWithANameOver255CharactersIsNamed()
+    {
+        string root = Path.GetFullPath("dest");
+        Assert.Null(GuardedExtractor.TooLongName(root, Path.Combine(root, "sub", new string('n', 255))));
+        Assert.Equal(new string('m', 256), GuardedExtractor.TooLongName(root, Path.Combine(root, new string('m', 256), "x.txt")));
     }
 
     [Fact]
