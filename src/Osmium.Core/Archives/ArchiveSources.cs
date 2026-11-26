@@ -1,3 +1,5 @@
+using System.Text;
+using Osmium.Core.Archives.Foreign;
 using Osmium.Core.Container;
 
 namespace Osmium.Core.Archives;
@@ -5,18 +7,31 @@ namespace Osmium.Core.Archives;
 /// <summary>Finds out what kind of archive a file is and opens it as an <see cref="IArchiveSource"/>.</summary>
 public static class ArchiveSources
 {
-    /// <summary>The file name extensions of the archives Osmium reads, lower case with the dot.</summary>
-    public static IReadOnlyList<string> Extensions { get; } = [".osa"];
+    // ZIP names without the UTF-8 flag are in an OEM code page (437, 850, 932…), which .NET has only with this provider.
+    static ArchiveSources() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-    /// <summary>The kind of archive the file holds, judged by its content; null when it is none Osmium reads.</summary>
+    /// <summary>Makes the OEM code pages available (ZIP names); safe to call more than once.</summary>
+    internal static void EnsureCodePages() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
+    /// <summary>The file name extensions of the archives Osmium reads, lower case with the dot.</summary>
+    public static IReadOnlyList<string> Extensions { get; } =
+    [
+        ".osa", ".zip", ".7z", ".tar",
+        ".tgz", ".tar.gz", ".gz",
+        ".tbz", ".tbz2", ".tar.bz2", ".bz2",
+        ".txz", ".tar.xz", ".xz",
+        ".tzst", ".tar.zst", ".zst",
+    ];
+
+    /// <summary>Double extensions whose whole length is the archive type ("photos.tar.gz" → "photos").</summary>
+    private static readonly string[] DoubleExtensions = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"];
+
+    /// <summary>The kind of archive the file holds, judged by its content; null when it is none Osmium reads. A TAR
+    /// inside gzip, bzip2, xz or Zstandard is <see cref="ArchiveKind.Tar"/>; an .osa with a damaged header is still an
+    /// .osa when its footer is valid; the name only breaks one tie (an old-style TAR without the "ustar" mark).</summary>
     /// <exception cref="IOException">The file cannot be read (also <see cref="UnauthorizedAccessException"/>).</exception>
-    public static ArchiveKind? Detect(string path)
-    {
-        Span<byte> head = stackalloc byte[Osa.Magic.Length];
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1);
-        int n = fs.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
-        return n == head.Length && head.SequenceEqual(Osa.Magic) ? ArchiveKind.Osa : null;
-    }
+    /// <exception cref="NotSupportedException">A RAR or multi-volume ZIP archive, which this version cannot read.</exception>
+    public static ArchiveKind? Detect(string path) => FormatSniffer.Sniff(path, ImportLimits.Default)?.Kind;
 
     /// <summary>Opens an archive for listing, testing and extracting.</summary>
     /// <exception cref="NotSupportedException">The file is not an archive Osmium can read.</exception>
@@ -26,23 +41,29 @@ public static class ArchiveSources
     public static IArchiveSource Open(string path, ArchiveOpenOptions? options = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        return Detect(path) switch
+        options ??= new ArchiveOpenOptions();
+        var sniff = FormatSniffer.Sniff(path, options.Limits);
+        return sniff?.Kind switch
         {
-            ArchiveKind.Osa => OsaArchiveSource.Open(path, options ?? new ArchiveOpenOptions(), ct),
+            ArchiveKind.Osa => OsaArchiveSource.Open(path, options, ct),
             _ => throw new NotSupportedException("This file is not an archive Osmium can read."),
         };
     }
 
     /// <summary>
     /// The name of the folder an archive extracts to by default: its file name without the extension ("photos.osa" →
-    /// "photos"). When that is not a safe folder name (empty, "." or "..", a device name such as CON, ending in a dot or
-    /// space, characters Windows does not allow), it is "&lt;file name&gt; files" ("CON.osa" → "_CON.osa files"), made
-    /// safe in the same way. The result always passes <see cref="PathSafety.Validate"/>.
+    /// "photos", "photos.tar.gz" → "photos", "x.tgz" → "x"). When that is not a safe folder name (empty, "." or "..", a
+    /// device name such as CON, ending in a dot or space, characters Windows does not allow), it is "&lt;file name&gt;
+    /// files" ("CON.osa" → "_CON.osa files"), made safe in the same way. The result always passes
+    /// <see cref="PathSafety.Validate"/>.
     /// </summary>
     public static string StemOf(string path)
     {
         string name = System.IO.Path.GetFileName(path);
-        string stem = System.IO.Path.GetFileNameWithoutExtension(name);
+        string? stem = null;
+        foreach (var ext in DoubleExtensions)
+            if (name.Length > ext.Length && name.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) stem = name[..^ext.Length];
+        stem ??= System.IO.Path.GetFileNameWithoutExtension(name);
         if (IsSafeName(stem)) return stem;
         return MakeSafe(name.Length == 0 ? "files" : name + " files");
     }
