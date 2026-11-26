@@ -16,6 +16,8 @@ internal sealed record ZipTestHooks
     public Func<string, Stream, Stream>? VerifyStreamFilter { get; init; }
     /// <summary>Called with a source file's full path once its bytes are copied, before it is checked for changes.</summary>
     public Action<string>? AfterRead { get; init; }
+    /// <summary>Called with the written ZIP, open for reading and writing, before it is checked (to change a byte).</summary>
+    public Action<FileStream>? BeforeVerify { get; init; }
 }
 
 /// <summary>
@@ -96,6 +98,7 @@ internal static class ZipWriter
                     continue;
                 }
                 fs.Flush(flushToDisk: true);
+                hooks?.BeforeVerify?.Invoke(fs);
                 if (o.Verify) Verify(fs, [.. kept.Where(i => i.File is null || !leftOut.Contains(i.File.FullPath))], written, o, hooks, progress, ct);
                 long length = fs.Length;
                 fs.Dispose();
@@ -194,8 +197,13 @@ internal static class ZipWriter
                         unreadable.Add((src.FullPath, e.Message));
                         continue;
                     }
-                    bool stored = o.StoreCompressedTypes && StoredExtensions.Contains(Path.GetExtension(src.RelPath).TrimStart('.').ToLowerInvariant());
-                    var entry = zip.CreateEntry(item.Name, stored ? CompressionLevel.NoCompression : o.Level);
+                    // A file of 4 GiB or more is never stored: its size cannot go in its local header ahead of the data
+                    // here, and a stored entry ended only by a data descriptor cannot be read from the start of the ZIP.
+                    bool huge = lengthBefore > uint.MaxValue;
+                    bool stored = !huge && o.StoreCompressedTypes && StoredExtensions.Contains(Path.GetExtension(src.RelPath).TrimStart('.').ToLowerInvariant());
+                    var level = stored ? CompressionLevel.NoCompression
+                        : huge && o.Level == CompressionLevel.NoCompression ? CompressionLevel.Fastest : o.Level;
+                    var entry = zip.CreateEntry(item.Name, level);
                     entry.LastWriteTime = ZipTime(timeBefore);
                     var crc = new Crc32();
                     long read = 0;
@@ -285,6 +293,8 @@ internal static class ZipWriter
                 }
                 if (length != w.Length || crc.GetCurrentHashAsUInt32() != w.Crc) throw NotVerified(current);
             }
+            // The local headers too: readers that read the ZIP from its start rely on them, not on the central directory.
+            if (ZipHeaders.FirstMismatch(fs) is { } bad) throw NotVerified(bad);
         }
         catch (InvalidDataException e) when (!e.Message.StartsWith(NotVerifiedText, StringComparison.Ordinal))
         {

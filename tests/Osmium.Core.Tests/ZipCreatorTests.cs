@@ -251,6 +251,66 @@ public class ZipCreatorTests
     }
 
     [Fact]
+    public async Task ALocalHeaderThatDisagreesWithTheFileListFailsTheCheck()
+    {
+        using var t = new TempDir();
+        string input = P(t, "in");
+        MakeTree(input);
+        string output = P(t, "out.zip");
+        // System.IO.Compression reads the central directory only; a reader that reads the ZIP from its start relies on
+        // the local header, so a CRC that differs there must be found too.
+        var hooks = new ZipTestHooks
+        {
+            BeforeVerify = fs =>
+            {
+                fs.Position = 0;
+                var bytes = new byte[fs.Length];
+                fs.ReadExactly(bytes);
+                int name = bytes.AsSpan().IndexOf("in/docs/readme.txt"u8); // the local header's copy comes first
+                fs.Position = name - 30 + 14; // its CRC-32
+                int b = fs.ReadByte();
+                fs.Position--;
+                fs.WriteByte((byte)(b ^ 0xFF));
+            },
+        };
+        var e = await Assert.ThrowsAsync<InvalidDataException>(() => Zip(input, output, hooks: hooks));
+        Assert.Equal("The ZIP file did not verify: in/docs/readme.txt.", e.Message);
+        Assert.False(File.Exists(output));
+        Assert.Empty(Partials(t.Path));
+    }
+
+    [Fact]
+    [Trait("Category", "Slow")]
+    public async Task AVideoOver4GiBIsDeflatedSoThatItCanBeReadFromTheStart()
+    {
+        Assert.SkipUnless(Environment.GetEnvironmentVariable("OSMIUM_SLOW_TESTS") == "1", "Writes a 4 GiB sparse file; set OSMIUM_SLOW_TESTS=1 to run it.");
+        using var t = new TempDir();
+        string input = P(t, "in");
+        Directory.CreateDirectory(input);
+        long size = (4L << 30) + 12345;
+        using (var f = new FileStream(Path.Combine(input, "big.mkv"), FileMode.CreateNew)) f.SetLength(size);
+        File.WriteAllText(Path.Combine(input, "z-after.txt"), "after the big one");
+        string output = P(t, "big.zip");
+        var r = await Zip(input, output);
+        Assert.Equal((0, 2), (r.FilesStored, r.FilesDeflated)); // a .mkv is stored, unless it is 4 GiB or more
+        // Read from the start, as a streaming reader does: every entry, to its end.
+        using var stream = File.OpenRead(output);
+        using var reader = SharpCompress.Readers.ReaderFactory.Open(stream);
+        var seen = new Dictionary<string, long>();
+        while (reader.MoveToNextEntry())
+        {
+            if (reader.Entry.IsDirectory) continue;
+            using var s = reader.OpenEntryStream();
+            long n = 0;
+            var buffer = new byte[1 << 20];
+            for (int k; (k = s.Read(buffer)) > 0;) n += k;
+            seen[reader.Entry.Key!] = n;
+        }
+        Assert.Equal(size, seen["in/big.mkv"]);
+        Assert.Equal(17, seen["in/z-after.txt"]);
+    }
+
+    [Fact]
     public async Task CancelingLeavesNoPartialFile()
     {
         using var t = new TempDir();
