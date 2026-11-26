@@ -171,6 +171,7 @@ internal sealed class ZipSource : ForeignSource
     private Stream Decoder(ZipRecord r, Stream s, string name)
     {
         var limits = Options.Limits;
+        if (r.RealMethod != 0) s = new EndGuardStream(s, r.RealMethod == 14 ? 0 : 8);
         switch (r.RealMethod)
         {
             case 0: return s;
@@ -220,16 +221,36 @@ internal sealed class ZipSource : ForeignSource
     /// </summary>
     protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
     {
-        var r = _records[encrypted[0].Index];
-        var entry = encrypted[0];
-        if (r.IsAes)
+        // The first selected encrypted entry that can be read decides; damaged ones are passed over (they fail on
+        // their own when extracted) and, when every one is damaged, nothing proves the password.
+        foreach (var entry in encrypted)
         {
-            using var raw = new FileSlice(_handle, r.DataStart, r.CompressedSize) { OnRead = op.Read };
-            var keys = WinZipAes.Keys(raw, password, r.AesStrength) ?? throw new WrongPasswordException();
-            long cipher = r.CompressedSize - WinZipAes.Overhead(r.AesStrength);
-            if (cipher < 0 || !WinZipAes.Authentic(raw, keys.MacKey, cipher, op.Token)) throw new WrongPasswordException();
-            return true;
+            var r = _records[entry.Index];
+            if (r.Damaged is not null || r.DataStart < 0) continue;
+            bool? right;
+            try { right = r.IsAes ? CheckAes(r, password, op) : CheckZipCrypto(r, entry, password, op); }
+            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { continue; }
+            if (right == true) return true;
+            if (right == false) throw new WrongPasswordException();
         }
+        return false;
+    }
+
+    /// <summary>The verifier, then the authentication code over the encrypted bytes (read once, nothing decoded).</summary>
+    private bool? CheckAes(ZipRecord r, string password, Operation op)
+    {
+        using var raw = new FileSlice(_handle, r.DataStart, r.CompressedSize) { OnRead = op.Read };
+        long cipher = r.CompressedSize - WinZipAes.Overhead(r.AesStrength);
+        if (cipher < 0) return null;
+        var keys = WinZipAes.Keys(raw, password, r.AesStrength);
+        return keys is not null && WinZipAes.Authentic(raw, keys.Value.MacKey, cipher, op.Token);
+    }
+
+    /// <summary>The check byte, then the whole entry decoded into a discarding sink and its CRC-32 compared, with the
+    /// password as UTF-8 and then in the OEM code pages.</summary>
+    private bool? CheckZipCrypto(ZipRecord r, ForeignEntry entry, string password, Operation op)
+    {
+        if (r.CompressedSize < 12) return null;
         var candidates = new List<byte[]> { Encoding.UTF8.GetBytes(password) };
         ArchiveSources.EnsureCodePages();
         foreach (int cp in new[] { OemCodePageOverride ?? ZipDirectory.SystemOemCodePage(), 437, 850, 1252 })
@@ -260,7 +281,7 @@ internal sealed class ZipSource : ForeignSource
             }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { } // not this one
         }
-        throw new WrongPasswordException();
+        return false;
     }
 
     protected override IReadOnlyList<ArchiveDetail> Describe()

@@ -275,7 +275,7 @@ internal sealed class XzDecoder : ReadOnlyStream
 
         slice = new SubStream(input, input.Position, compressedSize);
         Stream s;
-        try { s = new LzmaStream([prop], slice, compressedSize, outSize, null, isLzma2: true); }
+        try { s = new LzmaStream([prop], new EndGuardStream(slice, allowedEndReads: 0), compressedSize, outSize, null, isLzma2: true); }
         catch (OutOfMemoryException) { throw LimitGuard.MemoryRefusal(name, dict); }
         for (int i = filters.Count - 2; i >= 0; i--)
         {

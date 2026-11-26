@@ -40,6 +40,7 @@ internal sealed class FileSlice : Stream
 
     public FileSlice(SafeFileHandle handle, long offset, long length, int bufferSize = 1 << 16)
     {
+        if (offset < 0 || length < 0) throw new CorruptDataException("damaged data (an entry lies outside the file)");
         _handle = handle;
         _offset = offset;
         Length = Math.Max(0, length);
@@ -217,6 +218,42 @@ internal sealed class ExactStream(Stream inner, long length, string what) : Read
         if (n <= 0) throw new CorruptDataException($"{what}: the data ends early");
         _left -= n;
         return n;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) inner.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
+/// <summary>
+/// Stops a decoder that keeps reading after its input ended. Some SharpCompress decoders treat the end of their input
+/// as bytes of 0xFF and can then loop without producing output (LZMA2 reads a chunk header of -1 bytes, for one).
+/// LZMA and LZMA2 never read past the end of valid data, so for them the first read at the end means damage; other
+/// decoders may look once or twice, so a few reads are allowed.
+/// </summary>
+internal sealed class EndGuardStream(Stream inner, int allowedEndReads = 8) : ReadOnlyStream
+{
+    private int _endReads;
+
+    public override int Read(Span<byte> buffer)
+    {
+        int n = inner.Read(buffer);
+        if (n == 0 && !buffer.IsEmpty) End();
+        return n;
+    }
+
+    public override int ReadByte()
+    {
+        int b = inner.ReadByte();
+        if (b < 0) End();
+        return b;
+    }
+
+    private void End()
+    {
+        if (++_endReads > allowedEndReads) throw new CorruptDataException("damaged data (the compressed data ends early)");
     }
 
     protected override void Dispose(bool disposing)

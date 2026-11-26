@@ -120,7 +120,9 @@ internal static class SevenZipDecoder
     private static Stream Coder(SzCoder c, Stream[] inputs, long outSize, ImportLimits limits, string name, Func<byte[], byte[]>? key)
     {
         if (c.Id != 0x0303011B && inputs.Length != 1) throw new NotSupportedException($"{name} uses a coder layout Osmium cannot read.");
-        Stream input = inputs[0];
+        // Decoders get their input through a guard that stops them reading on and on past its end.
+        Stream input = c.Id is 0x00 or SevenZipHeader.AesId ? inputs[0]
+            : new EndGuardStream(inputs[0], c.Id is 0x21 or 0x030101 ? 0 : 8);
         Stream Exact(Stream s) => new ExactStream(s, outSize, "a 7z coder");
         switch (c.Id)
         {
