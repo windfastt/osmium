@@ -12,7 +12,8 @@ namespace Osmium.Cli
 {
     /// <summary>Minimal argument parser: positional args + "--name value" / "--name=value" / "--flag" options. An option
     /// that takes a value never takes the next option as it ("--password --encrypt" has no password): a value that
-    /// starts with "--" is given as "--name=--value".</summary>
+    /// starts with "--" is given as "--name=--value". After "--" every argument is positional (a file named "-x").
+    /// Anything else that starts with '-' ("-psecret") is kept as a stray option, which the command refuses.</summary>
     internal sealed class Args
     {
         public List<string> Positional { get; } = [];
@@ -21,9 +22,10 @@ namespace Osmium.Cli
         {
             "overwrite", "skip", "rename", "no-verify", "explain", "experimental", "verbose", "v", "json", "force",
             "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery", "ship-symmetric",
-            "encrypt",
+            "encrypt", "help", "h",
         };
         private readonly HashSet<string> _withoutValue = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> _stray = [];
 
         public Args(IEnumerable<string> argv)
         {
@@ -31,6 +33,11 @@ namespace Osmium.Cli
             for (int i = 0; i < list.Count; i++)
             {
                 var a = list[i];
+                if (a == "--")
+                {
+                    Positional.AddRange(list.Skip(i + 1));
+                    break;
+                }
                 if (IsOption(a))
                 {
                     string name = a.TrimStart('-');
@@ -41,9 +48,21 @@ namespace Osmium.Cli
                     else if (!Flags.Contains(name)) _withoutValue.Add(name);
                     _opts[name] = value ?? "true";
                 }
+                else if (a.Length > 1 && a[0] == '-' && !char.IsDigit(a[1])) _stray.Add(a);
                 else Positional.Add(a);
             }
         }
+
+        /// <summary>The names of the options given, as typed (without their dashes).</summary>
+        public IEnumerable<string> Names => _opts.Keys;
+
+        /// <summary>How an option is shown in a message: "-q", "--profile"; a stray one only by its first two
+        /// characters, since "-psecret" may hold a password.</summary>
+        public static string Shown(string name) => name.Length == 1 ? "-" + name : "--" + name;
+
+        /// <summary>The first option that <paramref name="known"/> does not hold, as it is shown, or null.</summary>
+        public string? Unknown(IReadOnlySet<string> known) =>
+            _stray.Count > 0 ? _stray[0][..2] + "…" : Names.FirstOrDefault(n => !known.Contains(n)) is { } n ? Shown(n) : null;
 
         private static bool IsOption(string a) => a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1]));
 
@@ -68,6 +87,9 @@ namespace Osmium.Cli
             if (argv.Length == 0 || argv[0] is "-h" or "--help" or "help") { Usage(); return 0; }
             var cmd = argv[0].ToLowerInvariant();
             var a = new Args(argv.Skip(1));
+            if (a.Has("help") || a.Has("h")) { Usage(); return 0; }
+            if (CommandOptions.TryGetValue(cmd, out var known) && a.Unknown(known) is { } unknown)
+                return Fail($"Unknown option '{unknown}' for osmium {cmd}. Run 'osmium help' for the options.");
             if (a.FirstMissingValue is { } missing)
                 return Fail(missing.Equals("password", StringComparison.OrdinalIgnoreCase)
                     ? PasswordNeedsAValue
@@ -115,6 +137,44 @@ namespace Osmium.Cli
 
         private static int Fail(string msg) { Console.Error.WriteLine("error: " + msg); return 1; }
 
+        private static HashSet<string> Options(params string[] names) => new(names, StringComparer.OrdinalIgnoreCase);
+
+        private static readonly string[] PasswordOptions = ["password", "password-stdin"];
+        private static readonly string[] PlanOptionNames = ["rules", "dedup", "dedup-chunks", "threads", "mem", "block", "decode-speed", "experimental", "pipeline"];
+
+        /// <summary>The options each command reads; any other is refused, so a mistyped one ("--pasword", "-p") is
+        /// never silently ignored.</summary>
+        private static readonly Dictionary<string, HashSet<string>> CommandOptions = Aliases(new()
+        {
+            [["a", "add", "compress"]] = Options([.. PasswordOptions, .. PlanOptionNames, "profile", "exclude", "encrypt", "kdf-iterations",
+                "workers", "cluster-key", "allow-remote-encrypted", "ship-symmetric", "no-verify", "overwrite", "explain", "no-plan-log",
+                "quiet", "q", "spare-copies"]),
+            [["x", "extract"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
+            [["l", "list"]] = Options([.. PasswordOptions, "v", "verbose"]),
+            [["t", "test"]] = Options([.. PasswordOptions, "quiet", "q"]),
+            [["salvage"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
+            [["i", "info"]] = Options(PasswordOptions),
+            [["explain"]] = Options(PasswordOptions),
+            [["analyze"]] = Options(),
+            [["lab", "bench"]] = Options("profile", "sample", "candidates"),
+            [["tune"]] = Options([.. PlanOptionNames, "profile", "export-rule"]),
+            [["methods"]] = Options(),
+            [["profiles"]] = Options(),
+            [["rules"]] = Options(),
+            [["worker"]] = Options("key", "port", "slots", "mem", "name", "no-discovery"),
+            [["keygen"]] = Options(),
+            [["version", "--version"]] = Options(),
+            [["license", "licence", "--license"]] = Options(),
+        });
+
+        private static Dictionary<string, HashSet<string>> Aliases(Dictionary<string[], HashSet<string>> byNames)
+        {
+            var map = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (var (names, options) in byNames)
+                foreach (var n in names) map[n] = options;
+            return map;
+        }
+
         /// <summary>The archive named first is in a format other than .osa (the .osa code path is unchanged).</summary>
         private static bool Foreign(Args a) => a.Positional.Count > 0 && ForeignKind(a.Positional[0]) is not null;
 
@@ -156,6 +216,7 @@ namespace Osmium.Cli
             x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
             .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files (extracted next to themselves), recognised
             by their content. Passwords: --password-stdin | --password <pw> (--password=<pw> when it starts with --).
+            Options a command does not know are refused; "--" ends the options, for a file whose name starts with '-'.
             --force extracts an archive that expands to more than 1,000 times its size; names that would leave the
             destination, links and devices are never extracted.
 

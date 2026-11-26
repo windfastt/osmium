@@ -1,0 +1,85 @@
+namespace Osmium.Cli.Tests;
+
+/// <summary>Every command refuses options it does not read, so a mistyped or foreign one ("-p secret", "--pasword",
+/// the attached "-psecret") never leaves an archive unprotected while the run says it succeeded.</summary>
+[Collection(ConsoleCollection.Name)]
+public sealed class OptionTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "osmium-cli-" + Guid.NewGuid().ToString("N")[..8]);
+
+    public OptionTests()
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, "in"));
+        File.WriteAllText(Path.Combine(_dir, "in", "a.txt"), "the contents");
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, true); } catch (IOException) { }
+    }
+
+    private string P(params string[] parts) => Path.Combine([_dir, .. parts]);
+
+    [Theory]
+    [InlineData(new[] { "-p", "secret" }, "'-p'")]
+    [InlineData(new[] { "-psecret" }, "'-p…'")]
+    [InlineData(new[] { "--pasword", "secret" }, "'--pasword'")]
+    [InlineData(new[] { "--pw=secret" }, "'--pw'")]
+    public async Task AnUnknownOptionIsAnErrorAndWritesNothing(string[] options, string shown)
+    {
+        var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "store", .. options]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains($"Unknown option {shown} for osmium a", r.Error);
+        Assert.DoesNotContain("secret", r.Error + r.Output);
+        Assert.False(File.Exists(P("out.osa")));
+    }
+
+    [Theory]
+    [InlineData("x", "--overwrit")]
+    [InlineData("t", "--force")]
+    [InlineData("l", "--quiet")]
+    [InlineData("info", "-v")]
+    [InlineData("salvage", "--include")]
+    public async Task EveryCommandRefusesOptionsItDoesNotRead(string command, string option)
+    {
+        var made = await CliRunner.RunAsync(["a", P("ok.osa"), P("in"), "--profile", "store", "-q"]);
+        Assert.Equal(0, made.ExitCode);
+        var r = await CliRunner.RunAsync([command, P("ok.osa"), P("dest"), option, "x"]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains($"Unknown option '{option}' for osmium {command}", r.Error);
+        Assert.False(Directory.Exists(P("dest")));
+    }
+
+    [Fact]
+    public async Task OptionsOfOsaArchivesAreRefusedForAZipFile()
+    {
+        var r = await CliRunner.RunAsync(["a", P("out.zip"), P("in"), "--threads", "2"]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains("--threads does not apply to ZIP files", r.Error);
+        Assert.False(File.Exists(P("out.zip")));
+    }
+
+    [Fact]
+    public async Task TwoDashesEndTheOptions()
+    {
+        File.WriteAllText(P("-dash.txt"), "a file whose name starts with a dash");
+        string previous = Environment.CurrentDirectory;
+        Environment.CurrentDirectory = _dir;
+        try
+        {
+            var r = await CliRunner.RunAsync(["a", P("out.osa"), "--profile", "store", "-q", "--", "-dash.txt"]);
+            Assert.True(r.ExitCode == 0, r.Error);
+            var l = await CliRunner.RunAsync(["l", P("out.osa")]);
+            Assert.Contains("-dash.txt", l.Output);
+        }
+        finally { Environment.CurrentDirectory = previous; }
+    }
+
+    [Fact]
+    public async Task HelpAfterACommandPrintsTheUsage()
+    {
+        var r = await CliRunner.RunAsync(["x", "--help"]);
+        Assert.Equal(0, r.ExitCode);
+        Assert.Contains("Usage: osmium <command> [options]", r.Output);
+    }
+}
