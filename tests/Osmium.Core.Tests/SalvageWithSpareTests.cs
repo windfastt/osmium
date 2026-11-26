@@ -91,6 +91,57 @@ public class SalvageWithSpareTests
     }
 
     [Fact]
+    public void TheSpareFileListOfAnotherArchiveIsNeverTakenForThisArchives()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(4, 3000); // one stored block per file, in name order
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Never });
+        var other = new Dictionary<string, byte[]> { ["away/elsewhere.bin"] = SpareArchives.Files(1, 5000, seed: 9).Values.Single() };
+        var otherBytes = File.ReadAllBytes(SpareArchives.Write(t.Sub("other.osa"), other, WithSpares()));
+        long cut;
+        using (var r = OsaReader.Open(path)) cut = r.Blocks[2].Offset + r.Blocks[2].FrameLength / 2;
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), _ => { });
+        File.WriteAllBytes(bad, [.. File.ReadAllBytes(path).AsSpan(0, (int)cut), .. otherBytes]); // cut short, another archive after it
+
+        var res = Salvage.Run(bad, t.Sub("out"), null, null, Ct);
+        Assert.False(res.IndexRecovered, string.Join(" | ", res.Summary()));
+        Assert.False(Directory.Exists(t.Sub(Path.Combine("out", "away"))));
+        var ours = files.OrderBy(f => f.Key, StringComparer.Ordinal).Select(f => f.Value).ToList();
+        for (int k = 0; k < 2; k++) Assert.Equal(ours[k], File.ReadAllBytes(t.Sub(Path.Combine("out", $"block-{k}.bin"))));
+        Assert.All(res.Frames.Where(f => f.IsIndex && f.Intact), f => Assert.Equal(SalvageFrameState.Ignored, f.State));
+    }
+
+    [Fact]
+    public void AnArchiveStoredInABlockKeepsItsBlocksWhenItHasSpareCopies()
+    {
+        using var t = new TempDir();
+        var inner = File.ReadAllBytes(SpareArchives.Write(t.Sub("inner.osa"), new Dictionary<string, byte[]> { ["inner/x.bin"] = new byte[3000] }, WithSpares()));
+        var rnd = new Random(4);
+        var filler = new byte[70_000];
+        rnd.NextBytes(filler);
+        var notes = System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Range(0, 300).Select(i => $"note {i}\n")));
+        // Block 0 holds the filler and then the stored archive, block 1 the notes.
+        string path = ExtractSafetyTests.Write(t.Sub("a.osa"), [("a-filler.bin", filler), ("backups/inner.osa", inner), ("notes.txt", notes)],
+            blockSize: filler.Length + inner.Length);
+        long indexOffset;
+        using (var r = OsaReader.Open(path))
+        {
+            Assert.Equal(2, r.Blocks.Count);
+            indexOffset = r.Blocks[^1].Offset + r.Blocks[^1].FrameLength;
+        }
+        var bytes = File.ReadAllBytes(path);
+        Array.Clear(bytes, 0, 512); // the header and block 0's frame header
+        File.WriteAllBytes(t.Sub("bad.osa"), bytes[..(int)indexOffset]); // and the file list and footer gone
+
+        var res = Salvage.Run(t.Sub("bad.osa"), t.Sub("out"), null, null, Ct);
+        Assert.False(res.IndexRecovered);
+        Assert.Equal(notes, File.ReadAllBytes(t.Sub(Path.Combine("out", "block-1.bin"))));
+        Assert.False(File.Exists(t.Sub(Path.Combine("out", "block-0.bin"))), "the stored archive's block was taken for this archive's block 0");
+        var innerBlock = Assert.Single(res.Frames, f => !f.IsIndex && f.ForeignIndexOffset is not null);
+        Assert.Equal($"block-0-at-{innerBlock.Offset}.bin", innerBlock.Output);
+    }
+
+    [Fact]
     public async Task ASalvagedReadOnlyProgramKeepsTheMarkOnARealStream()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "needs NTFS alternate data streams");

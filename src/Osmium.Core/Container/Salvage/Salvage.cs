@@ -259,8 +259,20 @@ internal sealed class SalvageRun : IDisposable
     /// <summary>An intact, readable index frame, and what ties it to this archive.</summary>
     /// <param name="AtEnd">The footer at the end of the file directly follows it.</param>
     /// <param name="Vouched">A footer naming this archive directly follows it, or it authenticated under this archive's key.</param>
-    /// <param name="Span">How many bytes its blocks occupy, ending where the index frame starts.</param>
-    private sealed record IndexCandidate(SalvageFrame Frame, ArchiveIndex Index, bool AtEnd, bool Vouched, long Span);
+    /// <param name="Span">How many bytes its blocks occupy, ending at <paramref name="BlocksEnd"/>.</param>
+    /// <param name="BlocksEnd">Where its blocks end: where the index frame starts, or, with spare copies (container 1.1),
+    /// where the spare copy of the index frame starts.</param>
+    private sealed record IndexCandidate(SalvageFrame Frame, ArchiveIndex Index, bool AtEnd, bool Vouched, long Span, long BlocksEnd);
+
+    /// <summary>Where the blocks of the index in <paramref name="f"/> end: an index frame with a header copy's trailer
+    /// just before it has its blocks end before its spare copy and the header copy (FORMAT §4.1).</summary>
+    private long BlocksEnd(SalvageFrame f, ArchiveIndex index)
+    {
+        if (!index.Metadata.ContainsKey(ArchiveIndex.SparesKey) || f.Offset < SpareCopies.TrailerSize) return f.Offset;
+        return SpareTrailer.Read(_src.Read(f.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+            && f.Offset - t.CopyLength - f.FrameLength is var start and >= 0
+            ? start : f.Offset;
+    }
 
     /// <summary>
     /// Picks this archive's index among the intact index frames. Set aside, unless a footer naming this archive follows
@@ -278,9 +290,10 @@ internal sealed class SalvageRun : IDisposable
         void Disown(IndexCandidate c)
         {
             foreach (var b in frames)
-                if (b.Intact && b.ForeignIndexOffset is null && b.Offset >= c.Frame.Offset - c.Span && b.Offset < c.Frame.Offset && Lists(c.Index, b))
+                if (b.Intact && b.ForeignIndexOffset is null && b.Offset >= c.BlocksEnd - c.Span && b.Offset < c.BlocksEnd && Lists(c.Index, b))
                     b.ForeignIndexOffset = c.Frame.Offset;
         }
+        var foreignIndexes = new List<IndexCandidate>();
         foreach (var f in all.Where(f => f.State == SalvageFrameState.Verified))
         {
             var footer = FooterInfo.At(_src, f.Offset + f.FrameLength);
@@ -308,18 +321,29 @@ internal sealed class SalvageRun : IDisposable
             bool atEnd = footer is not null && f.Offset + f.FrameLength + Osa.FooterSize == _src.Length;
             // An encrypted index that authenticated is this archive's: its tag binds the exact header bytes.
             bool vouched = (footer is not null && idPrefix is not null) || f.Encrypted;
-            var candidate = new IndexCandidate(f, index, atEnd, vouched, Math.Clamp(span, 0, f.Offset));
+            long blocksEnd = BlocksEnd(f, index);
+            var candidate = new IndexCandidate(f, index, atEnd, vouched, Math.Clamp(span, 0, blocksEnd), blocksEnd);
             if (foreign)
             {
                 f.Reject(SalvageFrameState.Ignored, "the footer after it names another archive");
                 Disown(candidate);
+                foreignIndexes.Add(candidate);
             }
             else candidates.Add(candidate);
+        }
+        // A copy of an index frame (a spare copy, container 1.1) belongs to the archive the index frame belongs to.
+        foreach (var c in candidates.Where(c => foreignIndexes.Any(o => c.Frame.SameContent(o.Frame))).ToList())
+        {
+            var of = foreignIndexes.First(o => c.Frame.SameContent(o.Frame));
+            c.Frame.Reject(SalvageFrameState.Ignored, $"a copy of the index at offset {of.Frame.Offset:N0}, whose footer names another archive");
+            Disown(c);
+            candidates.Remove(c);
         }
 
         // Copies of one index count once; the best placed copy stands for them. The copy an index names as its spare
         // (container 1.1) is no sign of damage.
         var kept = new List<IndexCandidate>();
+        var copies = new Dictionary<IndexCandidate, List<IndexCandidate>>();
         foreach (var c in candidates.OrderByDescending(c => c.AtEnd).ThenByDescending(c => c.Vouched)
                      .ThenBy(c => c.Frame.EnclosingOffset is not null).ThenByDescending(c => c.Frame.Offset))
         {
@@ -329,6 +353,7 @@ internal sealed class SalvageRun : IDisposable
                     && BinaryPrimitives.ReadUInt64LittleEndian(v) == (ulong)c.Frame.Offset;
                 c.Frame.Reject(SalvageFrameState.Duplicate, c.Frame.IsSpareCopy
                     ? $"the spare copy of the index at offset {same.Frame.Offset:N0}" : $"a copy of the index at offset {same.Frame.Offset:N0}");
+                (copies.TryGetValue(same, out var list) ? list : copies[same] = []).Add(c);
             }
             else kept.Add(c);
         }
@@ -341,7 +366,7 @@ internal sealed class SalvageRun : IDisposable
             if (c.AtEnd || c.Vouched) return (null, false);
             if (c.Frame.EnclosingOffset is { } enc)
                 return ($"it lies inside the damaged frame at offset {enc:N0}, so it may belong to an archive stored in that frame", true);
-            if (kept.FirstOrDefault(o => o != c && c.Frame.Offset >= o.Frame.Offset - o.Span && c.Frame.Offset < o.Frame.Offset) is { } outer)
+            if (kept.FirstOrDefault(o => o != c && c.Frame.Offset >= o.BlocksEnd - o.Span && c.Frame.Offset < o.BlocksEnd) is { } outer)
                 return ($"it lies within the blocks of the index at offset {outer.Frame.Offset:N0}, so it belongs to an archive stored in one of them", true);
             // An archive has one index, after all of its frames (the format has no appends).
             if (outside.FirstOrDefault(b => b.Offset > c.Frame.Offset && !Lists(c.Index, b)) is { } later)
@@ -354,7 +379,14 @@ internal sealed class SalvageRun : IDisposable
             var (why, foreign) = Objection(c);
             if (why is null) { eligible.Add(c); continue; }
             c.Frame.Reject(SalvageFrameState.Ignored, why);
-            if (foreign) Disown(c);
+            if (!foreign) continue;
+            Disown(c);
+            foreach (var copy in copies.GetValueOrDefault(c, []))
+            {
+                copy.Frame.IsSpareCopy = false;
+                copy.Frame.Reject(SalvageFrameState.Ignored, $"a copy of the index at offset {c.Frame.Offset:N0}, which belongs to another archive");
+                Disown(copy);
+            }
         }
         var best = eligible.OrderByDescending(c => c.AtEnd).ThenByDescending(c => c.Vouched)
             .ThenByDescending(c => outside.Count(b => Lists(c.Index, b))).ThenByDescending(c => c.Frame.Offset).FirstOrDefault();
@@ -366,7 +398,8 @@ internal sealed class SalvageRun : IDisposable
 
         if (all.Count == 0)
             return (null, null, FooterAt(_src.Length - Osa.FooterSize) ? "no index frame was found" : "no index frame was found (the end of the archive is missing)");
-        var telling = all.OrderBy(f => f.State == SalvageFrameState.Ignored).ThenByDescending(f => f.Offset).First();
+        var telling = all.OrderBy(f => f.State == SalvageFrameState.Ignored).ThenBy(f => f.State == SalvageFrameState.Duplicate)
+            .ThenByDescending(f => f.Offset).First();
         string problem = telling.State switch
         {
             SalvageFrameState.NeedsNewerVersion => $"the index needs a newer version of Osmium ({telling.Problem})",
