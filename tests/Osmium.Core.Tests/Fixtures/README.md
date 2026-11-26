@@ -46,6 +46,11 @@ With `S="-bso0 -bsp0 -mtc=off -mta=off"`:
 | `bcj2.7z` | `7z a $S -t7z -m0=BCJ2 -m1=LZMA:d=64k -m2=LZMA:d=64k -m3=LZMA:d=64k -mb0:1 -mb0s1:2 -mb0s2:3 7z/bcj2.7z code.bin` |
 | `aes.7z` | `7z a $S -t7z -m0=LZMA2 -mhe=off '-pPässwörd ü' 7z/aes.7z in` |
 | `aes-headers.7z` | `7z a $S -t7z -m0=LZMA2 -mhe=on '-pPässwörd ü' 7z/aes-headers.7z in` |
+| `aes-nonsolid.7z` | `7z a $S -t7z -m0=LZMA2 -ms=off -mhe=off '-pPässwörd ü' 7z/aes-nonsolid.7z in` |
+| `ppmd-plain-header.7z` | `7z a $S -t7z -m0=PPMd -mhc=off 7z/ppmd-plain-header.7z in` |
+| `lzma-plain-header.7z` | `7z a $S -t7z -m0=LZMA -mhc=off 7z/lzma-plain-header.7z in` |
+
+The two `-plain-header` files keep their header uncompressed, so tests can change a coder's properties in place.
 
 ## xz (`xz/`)
 

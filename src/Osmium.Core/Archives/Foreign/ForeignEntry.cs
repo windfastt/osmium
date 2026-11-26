@@ -27,6 +27,14 @@ internal sealed class ForeignEntry
 
     public bool HasData => Type == EntryType.File;
 
+    /// <summary>A copy refused for this one operation (the listing keeps the original).</summary>
+    public ForeignEntry Refused(string unsupported) => new()
+    {
+        Index = Index, Path = Path, Type = Type, Size = Size, PackedSize = PackedSize, ModifiedUtc = ModifiedUtc,
+        Encrypted = Encrypted, Method = Method, LinkTarget = LinkTarget, ReadOnly = ReadOnly, Hidden = Hidden,
+        Unsupported = unsupported, Unsafe = Unsafe,
+    };
+
     public ArchiveItem ToItem() => new(Index, Path, Type == EntryType.Directory, Type == EntryType.Directory ? null : Size,
         PackedSize, ModifiedUtc, Encrypted, Method)
     {

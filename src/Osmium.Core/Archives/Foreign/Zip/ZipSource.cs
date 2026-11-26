@@ -218,16 +218,17 @@ internal sealed class ZipSource : ForeignSource
     /// (read once, nothing decrypted or decoded). ZipCrypto: the check byte, then the whole entry decoded into a
     /// discarding sink and its CRC-32 compared, trying the password as UTF-8 and then in the OEM code page.
     /// </summary>
-    protected override void VerifyPassword(ForeignEntry entry, string password, Operation op)
+    protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
     {
-        var r = _records[entry.Index];
+        var r = _records[encrypted[0].Index];
+        var entry = encrypted[0];
         if (r.IsAes)
         {
             using var raw = new FileSlice(_handle, r.DataStart, r.CompressedSize) { OnRead = op.Read };
             var keys = WinZipAes.Keys(raw, password, r.AesStrength) ?? throw new WrongPasswordException();
             long cipher = r.CompressedSize - WinZipAes.Overhead(r.AesStrength);
             if (cipher < 0 || !WinZipAes.Authentic(raw, keys.MacKey, cipher, op.Token)) throw new WrongPasswordException();
-            return;
+            return true;
         }
         var candidates = new List<byte[]> { Encoding.UTF8.GetBytes(password) };
         ArchiveSources.EnsureCodePages();
@@ -255,7 +256,7 @@ internal sealed class ZipSource : ForeignSource
                     op.Progress.Checking(sink.Written, r.UncompressedSize);
                 }
                 _zipCryptoPassword = candidate;
-                return;
+                return true;
             }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { } // not this one
         }

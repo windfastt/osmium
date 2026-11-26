@@ -89,9 +89,10 @@ internal abstract class ForeignSource : IArchiveSource
     /// to <see cref="Operation.Sink"/>; entries not selected are skipped, and their decoded bytes still counted.</summary>
     protected abstract void Run(Operation op);
 
-    /// <summary>Checks the password on <paramref name="entry"/> (the first selected encrypted file), streaming into a
-    /// discarding sink under the operation's limits; throws <see cref="WrongPasswordException"/> when it is wrong.</summary>
-    protected virtual void VerifyPassword(ForeignEntry entry, string password, Operation op) { }
+    /// <summary>Checks the password on the selected encrypted files (normally the first one), streaming into a
+    /// discarding sink under the operation's limits; throws <see cref="WrongPasswordException"/> when it is wrong.
+    /// Returns false when nothing in the selection can show whether it is right (7z data without any stored CRC).</summary>
+    protected virtual bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op) => true;
 
     /// <summary>Asks for the password (at most once per source); a refusal stays spent.</summary>
     protected string ObtainPassword()
@@ -166,15 +167,15 @@ internal abstract class ForeignSource : IArchiveSource
         op = new Operation(guard, Selected, reporter, ct);
 
         // Rule 1: the password is asked lazily and checked before anything is created.
-        if (chosen?.FirstOrDefault(e => e.Encrypted && e.HasData && e.Unsafe is null && e.Unsupported is null) is { } first)
+        var encrypted = chosen?.Where(e => e.Encrypted && e.HasData && e.Unsafe is null && e.Unsupported is null).ToList() ?? [];
+        if (encrypted.Count > 0)
         {
             string password = ObtainPassword();
             if (!PasswordProven)
             {
                 reporter.Current("Checking the password");
-                try { VerifyPassword(first, password, op); }
+                try { PasswordProven = VerifyPassword(encrypted, password, op); }
                 catch (WrongPasswordException) { throw SpendPassword(); }
-                PasswordProven = true;
                 reporter.Current(null);
             }
         }
