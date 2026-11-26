@@ -205,7 +205,7 @@ off the command line, where other programs on the PC can read it.
 | [Roadmap](ROADMAP.md) | What 0.2.0 is building and what is planned after it |
 | [Benchmarks](docs/BENCHMARKS.md) | Method, tool versions, commands and full results of the 0.1.1 comparison |
 | [Settings reference](docs/SETTINGS.md) | Every setting, profile and codec or filter parameter, generated from the code |
-| [Archive format](docs/FORMAT.md) | The `.osa` 1.0 format: header, frames, pipelines, index, encryption, integrity checks |
+| [Archive format](docs/FORMAT.md) | The `.osa` 1.1 format: header, frames, pipelines, index, spare copies, encryption, integrity checks |
 | [Architecture](docs/BLUEPRINT.md) | How Osmium is built: container, codecs, filters, analysis, planner, cluster, app, security |
 | [Contributing](CONTRIBUTING.md) | How to build and test, and the rules for changes |
 | [Security policy](SECURITY.md) | How to report a vulnerability privately |

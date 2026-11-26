@@ -47,8 +47,30 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 - **Mark of the Web:** a file extracted from an archive downloaded from the internet lost Windows' "downloaded from
   the internet" mark when the archive marked it read-only (the mark was written after the attribute, and the failure
   was ignored). The mark is now written before any attribute, and a failure to write it is reported.
+- **Extracting into a folder with links:** Osmium could write through a symbolic link or junction that was already in
+  the destination; it now plans every target before writing and refuses to write through a link. Each file is
+  written to a new part file that stays open until it is verified, then moved into place.
+- **Canceling an extraction** left partly written `.osmium-part-…` files behind; they are now removed (files that were
+  finished stay).
+- **Extracting over an existing folder** could change that folder's attributes and dates; Osmium now sets them only on
+  folders it creates, and never makes a folder it creates read-only or a system folder.
+- **Names that differ only in case** (`Makefile`, `makefile`) could replace each other on Windows; the second is now
+  renamed and reported. An entry that matches an existing file only through its short 8.3 name gets a free name
+  instead of replacing it.
+- **Renamed files could collide:** when extracting next to existing files, two files could be given the same new name,
+  or a renamed file could take the name of another file in the same archive (`report (2).txt`). Every file now keeps
+  its own name or gets one that nothing else uses.
+- **Memory when extracting:** Osmium reserved memory only for the first step of a block's decoding, so some archives
+  could make it use more memory than its limit; it now reserves for the largest step, and a block whose stored sizes
+  or pipeline differ from the file list's is refused before it is decoded.
 
 ### Added
+- **Spare copy of the file list and header.** Archives of 1 MiB and more whose file list is small next to their data
+  (at most 2 % of it) keep a second copy of their file list and header at the end, which costs the size of the file
+  list plus 4 KiB. If the main copy is damaged or unreadable, as with a bad sector, Osmium opens the archive from the
+  spare and tells you so; *Test* also checks the spare. The .osa container is now version 1.1: Osmium 0.1.x opens,
+  tests and extracts 1.1 archives made with the methods it knows. Archives that contain blocks compressed with the
+  methods new in 0.2.0 need 0.2.0; 0.1.x does not open them and says they were made by a newer version.
 - **Verifiable downloads:** every release file carries a build provenance attestation, so
   `gh attestation verify <file> --repo windfastt/osmium` shows that it was built by the repository's own workflow from
   the published source; a modified copy fails the check. CI builds drop machine-specific paths, so a commit builds to
@@ -69,7 +91,9 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   when the index is lost, each verified block as `block-<n>.bin` with a report of its pipeline, sizes and hashes),
   and lists every file it could not recover and why. Encrypted archives need the password and an intact enough
   header; archives stored inside an archive are never mistaken for it. It refuses to write more than the expansion
-  limit or the free space allows unless `--force` is given, and exits with 0 only when nothing was lost.
+  limit or the free space allows unless `--force` is given, and exits with 0 only when nothing was lost. It uses the
+  spare copies of the file list and header when the main ones are lost, including the key of an encrypted archive
+  whose header is destroyed, and writes recovered files by the same rules as extraction.
 - **About Osmium** (tray menu and Settings page): version, engine fingerprint, license, and buttons that open the
   license and third-party notices.
 - Exiting asks first when the Settings, Rules or Cluster page has unsaved edits.
@@ -108,6 +132,11 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   every page and dialog at a fixed size in light and dark; the product page and the settings reference are checked
   against their generators.
 - **Rules files** keep `&`, `<`, `+` and non-ASCII characters readable instead of writing `&`-style escapes.
+- **Archives page:** an archive's details show its own .osa version and whether it has a spare copy of its file list.
+- **Compressing:** the check of a new archive now also fails when the archive opens with any warning or its spare
+  copies do not check out; such an archive is never kept.
+- **CI:** a compatibility check builds Osmium 0.1.1 from its tag and has it test and extract archives made by this
+  version.
 
 ## [0.1.1] — 2026-11-24 — patch release
 
