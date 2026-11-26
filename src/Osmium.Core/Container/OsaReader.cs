@@ -10,7 +10,7 @@ public sealed class WrongPasswordException() : Exception("Wrong password.");
 /// <summary>Random-access reader. Thread-safe for concurrent block reads.</summary>
 public sealed class OsaReader : IDisposable
 {
-    private readonly SafeFileHandle _handle;
+    private readonly ArchiveFile _handle;
     private readonly ArchiveKey? _key;
     private readonly MethodRegistry _registry;
     private readonly ArchiveFooter _footer;
@@ -44,7 +44,7 @@ public sealed class OsaReader : IDisposable
     /// <summary>Where the spare copies are: B (the copy of the index frame), followed by H, whose trailer this is.</summary>
     private sealed record Spares(long IndexCopyOffset, long HeaderCopyOffset, SpareTrailer Trailer);
 
-    private OsaReader(string path, SafeFileHandle handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length,
+    private OsaReader(string path, ArchiveFile handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length,
         MethodRegistry reg, ArchiveFooter footer, Spares? spares, List<string> warnings, bool usedSpareHeader, bool usedSpareIndex)
     {
         Path = path; _handle = handle; Header = header; _key = key; Index = index; FileLength = length; _registry = reg;
@@ -57,14 +57,18 @@ public sealed class OsaReader : IDisposable
     /// error is the original one. A wrong password and a feature of a newer version are never taken for damage.
     /// </summary>
     /// <param name="password">Called only when the archive is encrypted; return null to cancel.</param>
-    public static OsaReader Open(string path, Func<string?>? password = null, MethodRegistry? registry = null)
+    public static OsaReader Open(string path, Func<string?>? password = null, MethodRegistry? registry = null) =>
+        Open(path, password, registry, unreadable: null);
+
+    /// <param name="unreadable">Tests: (offset, count) of a read that fails with an I/O error, as a bad sector does.</param>
+    internal static OsaReader Open(string path, Func<string?>? password, MethodRegistry? registry, Func<long, int, bool>? unreadable)
     {
         registry ??= MethodRegistry.Default;
         // FileShare.Delete: Explorer can still rename or delete an archive that is open; reads go on through the handle.
-        var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess);
+        var handle = new ArchiveFile(File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess), unreadable);
         try
         {
-            long length = RandomAccess.GetLength(handle);
+            long length = RandomAccess.GetLength(handle.Handle);
             if (length < Osa.FooterSize + 36) throw new CorruptDataException("File is too small to be an Osmium archive.");
             var warnings = new List<string>();
             ArchiveHeader? header = null;
@@ -122,10 +126,25 @@ public sealed class OsaReader : IDisposable
         }
     }
 
-    /// <summary>Damage the spare copies can stand in for: never a wrong password, a missing one, or a feature of a newer
-    /// version (a <see cref="NewerVersionException"/> is a <see cref="CorruptDataException"/>, so it is excluded by name).</summary>
+    /// <summary>Damage the spare copies can stand in for: bytes that do not check out, or that cannot be read at all (a
+    /// bad sector), but never a wrong password, a missing one, or a feature of a newer version (a
+    /// <see cref="NewerVersionException"/> is an <see cref="IOException"/>, so it is excluded by name).</summary>
     private static bool IsDamage(Exception e) =>
-        e is InvalidDataException or EndOfStreamException || (e is CorruptDataException && e is not NewerVersionException);
+        e is InvalidDataException || (e is IOException && e is not NewerVersionException);
+
+    /// <summary>The open archive file. Every read goes through it, so that a test can make a range unreadable.</summary>
+    private sealed class ArchiveFile(SafeFileHandle handle, Func<long, int, bool>? unreadable) : IDisposable
+    {
+        public SafeFileHandle Handle => handle;
+
+        public int Read(Span<byte> buffer, long offset)
+        {
+            if (unreadable?.Invoke(offset, buffer.Length) == true) throw new IOException($"The archive cannot be read at offset {offset:N0}.");
+            return RandomAccess.Read(handle, buffer, offset);
+        }
+
+        public void Dispose() => handle.Dispose();
+    }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     private static void Rethrow(Exception e) => System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e);
@@ -137,7 +156,7 @@ public sealed class OsaReader : IDisposable
     }
 
     /// <summary>The header at <paramref name="offset"/>: 36 fixed bytes, the extensions, the CRC (FORMAT §1).</summary>
-    private static ArchiveHeader ReadHeader(SafeFileHandle handle, long offset, long length)
+    private static ArchiveHeader ReadHeader(ArchiveFile handle, long offset, long length)
     {
         var fixedPart = new byte[36];
         if (offset + 36 > length || !TryRead(handle, offset, fixedPart)) throw new CorruptDataException("Unexpected end of archive.");
@@ -150,7 +169,7 @@ public sealed class OsaReader : IDisposable
     }
 
     /// <summary>The footer at the end of the file, when its marker and CRC check out.</summary>
-    private static ArchiveFooter? ReadFooter(SafeFileHandle handle, long length)
+    private static ArchiveFooter? ReadFooter(ArchiveFile handle, long length)
     {
         var b = new byte[Osa.FooterSize];
         if (!TryRead(handle, length - Osa.FooterSize, b)) return null;
@@ -165,7 +184,7 @@ public sealed class OsaReader : IDisposable
     /// the end of the file, H's trailer just before it checks out, the header it holds checks out as a header, and the
     /// archive id is the footer's. Null otherwise. A header copy of a newer version throws, as the header would.
     /// </summary>
-    private static ArchiveHeader? HeaderFromCopy(SafeFileHandle handle, ArchiveFooter footer, long length)
+    private static ArchiveHeader? HeaderFromCopy(ArchiveFile handle, ArchiveFooter footer, long length)
     {
         if (footer.IndexOffset <= 0 || footer.IndexLength <= 0 || footer.IndexOffset + footer.IndexLength + Osa.FooterSize != length) return null;
         if (ReadTrailer(handle, footer.IndexOffset) is not { Newer: false } t) return null;
@@ -183,7 +202,7 @@ public sealed class OsaReader : IDisposable
     /// trailer damaged) found by its frame header in the bytes before the index frame. It is read with every check
     /// of the index frame, and must name its own offset as the spare copy's. Null when no copy is usable.
     /// </summary>
-    private static ArchiveIndex? IndexFromCopy(SafeFileHandle handle, ArchiveFooter footer, ArchiveHeader header, ArchiveKey? key, MethodRegistry registry)
+    private static ArchiveIndex? IndexFromCopy(ArchiveFile handle, ArchiveFooter footer, ArchiveHeader header, ArchiveKey? key, MethodRegistry registry)
     {
         var candidates = new List<long>();
         if (ReadTrailer(handle, footer.IndexOffset) is { Newer: false } t && footer.IndexOffset - t.CopyLength - footer.IndexLength is var b and >= 0)
@@ -204,13 +223,15 @@ public sealed class OsaReader : IDisposable
 
     /// <summary>Offsets, nearest first, of frame headers that check out and could be the spare copy of the index frame:
     /// the index flag, the index frame number and the index frame's length.</summary>
-    private static IEnumerable<long> IndexFrameHeadersBefore(SafeFileHandle handle, ArchiveFooter footer, ArchiveHeader header)
+    private static IEnumerable<long> IndexFrameHeadersBefore(ArchiveFile handle, ArchiveFooter footer, ArchiveHeader header)
     {
         long hi = footer.IndexOffset - footer.IndexLength - SpareCopies.TrailerSize; // the latest start that leaves room for a trailer
         long lo = Math.Max(header.Length, footer.IndexOffset - footer.IndexLength - SpareSearchMargin);
         if (hi < lo) yield break;
+        // Read in pieces on 4 KiB boundaries of the file, and a piece that fails sector by sector: what cannot be read
+        // stays zero (no frame header is zeros), and the rest is still searched.
         var window = new byte[hi - lo + Osa.FrameHeaderSize];
-        if (!TryRead(handle, lo, window)) yield break;
+        ReadAround(handle, lo, window, 4096);
         int found = 0;
         for (int i = (int)(hi - lo); i >= 0 && found < 8; i--)
         {
@@ -225,7 +246,7 @@ public sealed class OsaReader : IDisposable
 
     /// <summary>Reads, decrypts, decodes and checks an index frame at <paramref name="offset"/>; its blocks must end by
     /// <paramref name="blocksEnd"/>.</summary>
-    private static ArchiveIndex ReadIndex(SafeFileHandle handle, long offset, long frameLength, long blocksEnd, ArchiveHeader header,
+    private static ArchiveIndex ReadIndex(ArchiveFile handle, long offset, long frameLength, long blocksEnd, ArchiveHeader header,
         ArchiveKey? key, MethodRegistry registry)
     {
         var body = ReadFrame(handle, offset, frameLength, Osa.IndexFrameNumber, header, key, registry, isIndex: true);
@@ -243,7 +264,7 @@ public sealed class OsaReader : IDisposable
     /// the index names spare copies that are not there as it says. A trailer of a newer writer is not used and is no
     /// damage.
     /// </summary>
-    private static Spares? FindSpares(SafeFileHandle handle, ArchiveIndex index, ArchiveFooter footer, ArchiveHeader header, out bool damaged)
+    private static Spares? FindSpares(ArchiveFile handle, ArchiveIndex index, ArchiveFooter footer, ArchiveHeader header, out bool damaged)
     {
         damaged = false;
         if (!index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var value)) return null;
@@ -261,23 +282,49 @@ public sealed class OsaReader : IDisposable
     }
 
     /// <summary>H's trailer: the 32 bytes before the index frame, if they are one.</summary>
-    private static SpareTrailer? ReadTrailer(SafeFileHandle handle, long indexOffset)
+    private static SpareTrailer? ReadTrailer(ArchiveFile handle, long indexOffset)
     {
         if (indexOffset < SpareCopies.TrailerSize) return null;
         var t = new byte[SpareCopies.TrailerSize];
         return TryRead(handle, indexOffset - SpareCopies.TrailerSize, t) ? SpareTrailer.Read(t) : null;
     }
 
-    private static bool TryRead(SafeFileHandle handle, long offset, Span<byte> buffer)
+    /// <summary>Fills <paramref name="buffer"/> from <paramref name="offset"/> in pieces of <paramref name="piece"/> bytes
+    /// on the file's own boundaries; a piece that cannot be read is read again in 512-byte sectors, and what still fails
+    /// is left zero.</summary>
+    private static void ReadAround(ArchiveFile handle, long offset, Span<byte> buffer, int piece)
     {
-        int read = 0;
-        while (read < buffer.Length)
+        for (int at = 0; at < buffer.Length;)
         {
-            int n = RandomAccess.Read(handle, buffer[read..], offset + read);
-            if (n <= 0) return false;
-            read += n;
+            int n = (int)Math.Min(buffer.Length - at, piece - (offset + at) % piece);
+            var part = buffer.Slice(at, n);
+            if (!TryRead(handle, offset + at, part))
+            {
+                if (piece > 512) ReadAround(handle, offset + at, part, 512);
+                else part.Clear();
+            }
+            at += n;
         }
-        return true;
+    }
+
+    /// <summary>Reads exactly <paramref name="buffer"/>; false when the file ends first or the bytes cannot be read.</summary>
+    private static bool TryRead(ArchiveFile handle, long offset, Span<byte> buffer)
+    {
+        try
+        {
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int n = handle.Read(buffer[read..], offset + read);
+                if (n <= 0) return false;
+                read += n;
+            }
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -339,13 +386,13 @@ public sealed class OsaReader : IDisposable
         return true;
     }
 
-    private static BlockBody ReadFrame(SafeFileHandle h, long offset, long frameLength, ulong expectedFrame,
+    private static BlockBody ReadFrame(ArchiveFile h, long offset, long frameLength, ulong expectedFrame,
         ArchiveHeader header, ArchiveKey? key, MethodRegistry reg, bool isIndex)
     {
         if (frameLength < Osa.FrameHeaderSize || frameLength - Osa.FrameHeaderSize > BlockLimits.MaxRawSize * 2)
             throw new CorruptDataException("Invalid frame length.");
         var fh = new byte[Osa.FrameHeaderSize];
-        if (RandomAccess.Read(h, fh, offset) != fh.Length) throw new CorruptDataException("Unexpected end of archive.");
+        if (h.Read(fh, offset) != fh.Length) throw new CorruptDataException("Unexpected end of archive.");
         if (!fh.AsSpan(0, 4).SequenceEqual(Osa.FrameMagic)) throw new CorruptDataException($"Frame {expectedFrame} has no frame marker.");
         if (Osa.Crc(fh.AsSpan(0, 24)) != BinaryPrimitives.ReadUInt32LittleEndian(fh.AsSpan(24)))
             throw new CorruptDataException($"Frame {expectedFrame} header is corrupt.");
@@ -364,7 +411,7 @@ public sealed class OsaReader : IDisposable
         int read = 0;
         while (read < body.Length)
         {
-            int n = RandomAccess.Read(h, body.AsSpan(read), offset + Osa.FrameHeaderSize + read);
+            int n = h.Read(body.AsSpan(read), offset + Osa.FrameHeaderSize + read);
             if (n <= 0) throw new CorruptDataException("Unexpected end of archive.");
             read += n;
         }

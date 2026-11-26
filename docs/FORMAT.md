@@ -176,21 +176,22 @@ archive without spare copies has no `spares` key, and still has minor 1.
 
 Readers:
 1. **Every open** with an intact A that holds `spares` checks H's trailer (magic, CRC, flags and reserved 0, lengths a
-   header can have) and that the offsets add up as above, with B after the last block. If not, the archive opens with
-   the warning "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk." A
+   header can have) and that the offsets add up as above, with B after the last block. If not, or if the trailer cannot
+   be read, the archive opens with the warning "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk." A
    trailer whose CRC checks out but which has a flag or reserved bit set was written by a newer version: the reader
    does not use H and gives no warning.
 2. **Test** and **salvage** compare B with A byte for byte and H's header bytes with the header at offset 0, and check
    that the padding is zero; a difference is a warning, the archive is complete. This is not done on every open: it
    reads the index twice.
-3. **A fails** (frame CRC, GCM tag, payload hash, decompression, raw hash or index structure): the reader reads B, found
-   through H's trailer or, when that is damaged too, as the frame header with the index flag, the index frame number and
-   the footer's index length that is nearest before A within `indexLength + 1 MiB + 8 KiB` of `indexOffset`. B gets
+3. **A fails** (frame CRC, GCM tag, payload hash, decompression, raw hash or index structure, or its bytes cannot be read
+   at all, as with a bad sector): the reader reads B, found through H's trailer or, when that is damaged too, as the
+   frame header with the index flag, the index frame number and the footer's index length that is nearest before A
+   within `indexLength + 1 MiB + 8 KiB` of `indexOffset` (sectors that cannot be read are skipped). B gets
    every check A gets, and its index must name B's own offset in `spares`. The archive then opens with the warning "The
    file list of this archive was damaged; Osmium used its spare copy. Every file can be checked with Test." Test
    reports it too. A wrong password, a missing password and a feature of a newer version are not damage and never lead
    to B. When B fails as well, the error is A's.
-4. **The header fails** for any reason (magic, major version, CRC, lengths) while the footer checks out, places the index
+4. **The header fails** for any reason (magic, major version, CRC, lengths, or a read error) while the footer checks out, places the index
    frame at the end of the file, and H's trailer checks out: the reader takes the header copy from H and checks it the
    same way; its archive id must match the footer's. An encrypted archive's index is then authenticated with H's
    header bytes, which are the original header bytes. Warning: "The header of this archive was damaged; Osmium used its

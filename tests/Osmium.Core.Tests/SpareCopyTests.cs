@@ -735,6 +735,71 @@ public class SpareCopyTests
         }
     }
 
+    // ------------------------------------------------------------------ read errors (bad sectors)
+
+    /// <summary>Opens with the bytes in [from, to) unreadable, as a bad sector is; extracts every file and returns the
+    /// reader's warnings.</summary>
+    private static IReadOnlyList<string> OpenWithBadSector(string path, IReadOnlyDictionary<string, byte[]> files, long from, long to, string? password = null)
+    {
+        bool Unreadable(long offset, int count) => offset < to && offset + count > from;
+        using var r = OsaReader.Open(path, () => password, null, Unreadable);
+        string dest = path + ".out";
+        var x = Extractor.Extract(r, dest, null, null, null, Ct);
+        Assert.Equal(files.Count, x.FilesOk);
+        foreach (var (name, data) in files) Assert.Equal(data, File.ReadAllBytes(Path.Combine([dest, .. name.Split('/')])));
+        Directory.Delete(dest, recursive: true);
+        return r.Warnings;
+    }
+
+    [Fact]
+    public void AnUnreadableTrailerNeverStopsACompleteArchiveFromOpening()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        Assert.Equal([OsaReader.SpareDamaged], OpenWithBadSector(path, files, tail.TrailerOffset, tail.IndexOffset));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnreadableFileListOpensThroughItsSpareCopy(bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(pw));
+        var tail = SpareArchives.TailOf(path, pw);
+        Assert.Equal([OsaReader.UsedSpareIndex], OpenWithBadSector(path, files, tail.IndexOffset, tail.IndexOffset + 100, pw));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnreadableHeaderOpensThroughItsSpareCopy(bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(pw));
+        Assert.Equal([OsaReader.UsedSpareHeader], OpenWithBadSector(path, files, 0, 40, pw));
+    }
+
+    [Fact]
+    public void AnUnreadablePieceOfTheSearchDoesNotHideTheSpareFileList()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        // The file list and the trailer are damaged, so the spare copy is searched for; a piece of the header copy's
+        // padding, which the search reads, cannot be read.
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => { b[tail.IndexOffset + 40] ^= 1; b[tail.TrailerOffset + 1] ^= 1; });
+        long padding = tail.HeaderCopyOffset + tail.HeaderLength + tail.Trailer!.Value.PaddingLength / 2;
+        Assert.Equal([OsaReader.UsedSpareIndex], OpenWithBadSector(bad, files, padding, padding + 200));
+    }
+
     [Fact]
     public void AnOpenArchiveCanBeRenamedAndStillBeRead()
     {
