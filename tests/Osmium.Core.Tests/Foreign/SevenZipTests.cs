@@ -170,6 +170,36 @@ public class SevenZipTests
     }
 
     [Fact]
+    public void TheKeyIsDerivedOncePerSaltNotOncePerFolder()
+    {
+        // 7z writers give every folder its own IV; the key does not depend on it.
+        using (var s = (SevenZipSource)Open(ForeignData.Fixture("7z", "aes-nonsolid.7z"), new ArchiveOpenOptions { Password = () => Password }))
+        {
+            var r = s.Test(null, null, Ct);
+            Assert.Equal((3, 0), (r.FilesOk, r.FilesFailed));
+            Assert.Equal(1L << 19, s.KeyRoundsSpent);
+        }
+        using var t = new TempDir();
+        byte[] Iv(byte b) => [.. Enumerable.Repeat(b, 16)];
+        var a = "first"u8.ToArray();
+        var b = "second"u8.ToArray();
+        var c = "third"u8.ToArray();
+        string path = ForeignData.Write(t, "salts.7z", SevenZipCraft.Build(
+        [
+            SevenZipCraft.Encrypted("pw", SevenZipCraft.AesProps(10, [1, 2], Iv(1)), a),
+            SevenZipCraft.Encrypted("pw", SevenZipCraft.AesProps(10, [1, 2], Iv(2)), b),
+            SevenZipCraft.Encrypted("pw", SevenZipCraft.AesProps(10, [3, 4], Iv(3)), c),
+        ]));
+        using (var s = (SevenZipSource)Open(path, new ArchiveOpenOptions { Password = () => "pw" }))
+        {
+            var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal((3, 0), (r.FilesOk, r.FilesFailed));
+            Assert.Equal("third", File.ReadAllText(Path.Combine(t.Sub("out"), "f2.bin")));
+            Assert.Equal(2L << 10, s.KeyRoundsSpent);
+        }
+    }
+
+    [Fact]
     public void DamageFailsTheFileAndTheRestOfItsSolidBlockOnly()
     {
         using var t = new TempDir();

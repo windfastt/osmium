@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.Win32.SafeHandles;
 using Osmium.Core.Container;
 using Osmium.Core.Pipeline;
@@ -19,7 +18,7 @@ internal sealed class SevenZipSource : ForeignSource
     private readonly SafeFileHandle _handle;
     private SzDatabase _db = new();
     private bool _encryptedHeaders;
-    private readonly ConcurrentDictionary<string, byte[]> _keys = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, byte[]> _keys = new(StringComparer.Ordinal);
     private CancellationToken _ct;
 
     /// <summary>For tests (this async flow only): forget the stored CRCs of the folders this accepts when the archive is
@@ -88,12 +87,22 @@ internal sealed class SevenZipSource : ForeignSource
         }
     }
 
-    /// <summary>The AES key for a coder's properties, deriving it once per salt and round count.</summary>
+    /// <summary>The SHA-256 rounds of key derivation this source has run so far.</summary>
+    internal long KeyRoundsSpent { get; private set; }
+
+    /// <summary>The AES key for a coder's properties, derived once per salt and round count (7z writers give every
+    /// folder its own IV, which the key does not depend on).</summary>
     private byte[] Key(byte[] props)
     {
         string password = ObtainPassword();
-        return _keys.GetOrAdd(Convert.ToHexString(props.AsSpan(0, Math.Min(props.Length, 2 + 16))) + "|" + props.Length,
-            _ => SevenZipAes.Key(props, password, _ct));
+        string identity = SevenZipAes.KeyIdentity(props);
+        lock (_keys)
+        {
+            if (_keys.TryGetValue(identity, out var known)) return known;
+            var key = SevenZipAes.Key(props, password, _ct);
+            KeyRoundsSpent += SevenZipAes.Rounds(props);
+            return _keys[identity] = key;
+        }
     }
 
     private ForeignEntry Make(SzFile f, int index)

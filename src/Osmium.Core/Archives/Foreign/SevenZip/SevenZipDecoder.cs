@@ -195,6 +195,21 @@ internal static class SevenZipAes
 
     public static byte[] Iv(byte[] props) => Parse(props).Iv;
 
+    /// <summary>What the key depends on (the round count and the salt, never the IV, which differs in every folder):
+    /// coders with the same identity share one key.</summary>
+    public static string KeyIdentity(byte[] props)
+    {
+        var (power, salt, _) = Parse(props);
+        return power.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + Convert.ToHexString(salt);
+    }
+
+    /// <summary>The SHA-256 rounds deriving the key takes (0 for a stored key, or a count Osmium refuses anyway).</summary>
+    public static long Rounds(byte[] props)
+    {
+        int power = Parse(props).Power;
+        return power is 0x3F or > MaxCyclesPower ? 0 : 1L << power;
+    }
+
     /// <summary>The key for <paramref name="password"/> under the coder's properties.</summary>
     public static byte[] Key(byte[] props, string password, CancellationToken ct)
     {
