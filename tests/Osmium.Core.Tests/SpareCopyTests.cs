@@ -752,6 +752,42 @@ public class SpareCopyTests
         Assert.Equal(expected, s.Extract(t.Sub("out2"), new Archives.ArchiveExtractRequest(), null, Ct).Warnings);
     }
 
+    /// <summary>The same archive with <paramref name="extra"/> more bytes of padding in its header copy (as a writer that
+    /// aligns the index frame might write it): the index frame moves, the footer follows.</summary>
+    private static string WithMorePadding(string path, string output, int extra)
+    {
+        var b = File.ReadAllBytes(path);
+        var tail = SpareArchives.TailOf(path);
+        var t = tail.Trailer!.Value;
+        var trailer = new byte[SpareCopies.TrailerSize];
+        (t with { PaddingLength = t.PaddingLength + extra }).Write(trailer);
+        long h = tail.HeaderCopyOffset;
+        var footer = new ArchiveFooter(tail.IndexOffset + extra, tail.IndexLength, BinaryPrimitives.ReadUInt64LittleEndian(b.AsSpan(16))).Serialize();
+        File.WriteAllBytes(output, [.. b.AsSpan(0, (int)(h + t.HeaderLength)), .. new byte[t.PaddingLength + extra], .. trailer,
+            .. b.AsSpan((int)tail.IndexOffset, (int)tail.IndexLength), .. footer]);
+        return output;
+    }
+
+    [Fact]
+    public void MorePaddingThanTheLeastIsAcceptedUpToTheLimit()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        string padded = WithMorePadding(path, t.Sub("padded.osa"), 8192);
+        var (open, test, spares) = Check(padded, files);
+        Assert.Equal((true, 0, 0), (spares, open.Count, test.Count));
+
+        // Damaged file list and trailer: the spare file list is found by its frame header across the longer padding.
+        var tail = SpareArchives.TailOf(padded);
+        string bad = SpareArchives.Damage(padded, t.Sub("bad.osa"), b => { b[tail.IndexOffset + 40] ^= 1; b[tail.TrailerOffset + 1] ^= 1; });
+        Assert.Equal([OsaReader.UsedSpareIndex], Check(bad, files).Open);
+
+        // At the limit and beyond: taken as damaged, the archive still opens.
+        string over = WithMorePadding(path, t.Sub("over.osa"), SpareCopies.MaxPadding);
+        Assert.Equal([OsaReader.SpareDamaged], Check(over, files).Open);
+    }
+
     // ------------------------------------------------------------------ read errors (bad sectors)
 
     /// <summary>Opens with the bytes in [from, to) unreadable, as a bad sector is; extracts every file and returns the

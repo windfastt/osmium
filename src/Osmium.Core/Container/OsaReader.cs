@@ -38,8 +38,8 @@ public sealed class OsaReader : IDisposable
     internal const string EndDamaged = "The end of this archive is damaged. Try Recover files in the app or osmium salvage.";
 
     /// <summary>How far before the index frame the spare copy of it may start: its own length, plus the header copy
-    /// (at most the longest header and the padding), plus a margin.</summary>
-    private const long SpareSearchMargin = (1 << 20) + (8 << 10);
+    /// (at most the longest header, the most padding readers accept and the trailer), plus a margin.</summary>
+    private const long SpareSearchMargin = (1 << 20) + (72 << 10);
 
     private readonly bool _usedSpareIndex, _usedSpareHeader;
 

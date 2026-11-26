@@ -168,7 +168,9 @@ writer can also be told to add them whenever an archive has a block, or never.
   | 24 | 4 | reserved = 0 |
   | 28 | 4 | CRC-32 of bytes 0..27 |
 
-  So `spares + indexLength + headerLength + paddingLength + 32 = indexOffset`.
+  So `spares + indexLength + headerLength + paddingLength + 32 = indexOffset`. A writer uses the least padding that
+  makes H 4096 bytes long (none when the header is longer) and may add more, for example to align A, but the padding
+  length is always below 65,536: readers take a trailer with more as damaged.
 
 The spare copies cost a copy of the index frame plus at least 4 KiB. The index frame's length, which decides whether they
 are worth it, is known before the index is sealed (the tag adds 16 bytes), so the index is sealed once either way. An
@@ -186,7 +188,7 @@ Readers:
 3. **A fails** (frame CRC, GCM tag, payload hash, decompression, raw hash or index structure, or its bytes cannot be read
    at all, as with a bad sector): the reader reads B, found through H's trailer or, when that is damaged too, as the
    frame header with the index flag, the index frame number and the footer's index length that is nearest before A
-   within `indexLength + 1 MiB + 8 KiB` of `indexOffset` (sectors that cannot be read are skipped). B gets
+   within `indexLength + 1 MiB + 72 KiB` of `indexOffset` (sectors that cannot be read are skipped). B gets
    every check A gets, and its index must name B's own offset in `spares`. The archive then opens with the warning "The
    file list of this archive was damaged; Osmium used its spare copy. Every file can be checked with Test." Test
    reports it too. A wrong password, a missing password and a feature of a newer version are not damage and never lead

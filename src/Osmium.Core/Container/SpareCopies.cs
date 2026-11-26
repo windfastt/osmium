@@ -46,6 +46,9 @@ public static class SpareCopies
     public static ReadOnlySpan<byte> TrailerMagic => "OHDR"u8;
     /// <summary>The longest header the reader accepts (36 fixed bytes, at most 1 MiB of extensions, the CRC).</summary>
     internal const long MaxHeaderLength = 36 + (1 << 20) + 4;
+    /// <summary>Readers accept H's padding up to (not including) this many bytes; writers use the least padding that
+    /// makes H <see cref="MinHeaderCopyLength"/> bytes long, but may pad more, for example to align the index frame.</summary>
+    public const int MaxPadding = 1 << 16;
 
     /// <summary>The header copy H: <paramref name="header"/> (the raw header bytes), zero padding up to
     /// <see cref="MinHeaderCopyLength"/>, then the trailer.</summary>
@@ -103,7 +106,7 @@ public readonly record struct SpareTrailer(uint Flags, long HeaderLength, long P
             BinaryPrimitives.ReadInt64LittleEndian(t[16..]), BinaryPrimitives.ReadUInt32LittleEndian(t[24..]));
         if (trailer.Newer) return trailer;
         bool possible = trailer.HeaderLength is >= 40 and <= SpareCopies.MaxHeaderLength
-            && trailer.PaddingLength is >= 0 and < SpareCopies.MinHeaderCopyLength;
+            && trailer.PaddingLength is >= 0 and < SpareCopies.MaxPadding;
         return possible ? trailer : null;
     }
 }
