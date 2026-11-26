@@ -445,7 +445,8 @@ public static class Extractor
     /// <summary>
     /// Creates the part file of <paramref name="target"/> under a new random name and keeps it open: it never opens a
     /// file (or a link) that is already there, and refuses when a folder on the way from <paramref name="root"/> has
-    /// become a link since the targets were planned.
+    /// become a link since the targets were planned. It is shared with nothing (never FileShare.Delete), so on Windows
+    /// it cannot be deleted, renamed or replaced while it is open.
     /// </summary>
     internal static (string Path, Microsoft.Win32.SafeHandles.SafeFileHandle Handle) CreatePart(string root, string target)
     {

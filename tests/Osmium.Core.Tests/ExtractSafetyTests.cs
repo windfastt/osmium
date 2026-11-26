@@ -486,20 +486,42 @@ public class ExtractSafetyTests
         string archive = Write(P(t, "a.osa"), [("big.bin", big)], blockSize: 64 << 10); // three blocks
         string dest = P(t, "out"), victim = P(t, "victim.txt");
         File.WriteAllText(victim, "precious");
-        bool swapped = false;
+        bool tried = false, swapped = false, linked = false;
+        Exception? refused = null;
         var progress = new SyncProgress(_ =>
         {
-            if (swapped) return;
-            swapped = true;
-            string part = Directory.GetFiles(dest, "*.osmium-part-*").Single(); // after the first block
-            File.Delete(part);
-            if (!TryFileLink(part, victim)) Assert.Skip("Symbolic links cannot be created here (Windows needs Developer Mode or administrator rights).");
+            if (tried) return;
+            tried = true;
+            // Caught here, so that nothing the swap throws reaches the extraction.
+            try
+            {
+                string part = Directory.GetFiles(dest, "*.osmium-part-*").Single(); // after the first block
+                File.Delete(part);
+                swapped = true;
+                linked = TryFileLink(part, victim);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { refused = e; }
         });
         ExtractResult res;
         using (var r = OsaReader.Open(archive))
             res = Extractor.Extract(r, dest, null, new ExtractOptions { MaxParallelBlocks = 1 }, progress, Ct);
-        Assert.True(swapped);
+        Assert.True(tried);
         Assert.Equal("precious", File.ReadAllText(victim));
+        if (OperatingSystem.IsWindows())
+        {
+            // The part file stays open from its creation, without FileShare.Delete, so Windows refuses to delete or
+            // replace it: the swap cannot happen at all, and the file is written whole where it belongs.
+            Assert.IsAssignableFrom<IOException>(refused);
+            Assert.False(swapped);
+            Assert.Equal((1, 0), (res.FilesOk, res.FilesFailed));
+            Assert.Equal(big, File.ReadAllBytes(Path.Combine(dest, "big.bin")));
+            Assert.Equal(["big.bin"], Directory.GetFileSystemEntries(dest).Select(Path.GetFileName));
+            return;
+        }
+        // Elsewhere an open file can be deleted, and its name taken by a link: nothing is written through it.
+        Assert.Null(refused);
+        Assert.True(swapped);
+        if (!linked) Assert.Skip("Symbolic links cannot be created here.");
         Assert.Equal((0, 1), (res.FilesOk, res.FilesFailed));
         Assert.Contains(res.Errors, e => e.Contains("replaced by a link", StringComparison.Ordinal));
         Assert.False(File.Exists(Path.Combine(dest, "big.bin")));
