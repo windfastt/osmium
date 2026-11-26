@@ -82,6 +82,48 @@ public sealed class OptionTests : IDisposable
     }
 
     [Fact]
+    public async Task ListAndInfoTakeTheForceThatOpeningReads()
+    {
+        string zip = P("a.zip");
+        System.IO.Compression.ZipFile.CreateFromDirectory(P("in"), zip);
+        foreach (var command in new[] { "l", "info" })
+        {
+            var r = await CliRunner.RunAsync([command, zip, "--force"]);
+            Assert.True(r.ExitCode == 0, r.Error);
+        }
+    }
+
+    /// <summary>Each command run once on the paths it has, with the options it takes: the runner fails any run whose
+    /// code reads an option its row of the table leaves out. (methods and license read none, and print the codecs'
+    /// and the notices' own text.)</summary>
+    [Fact]
+    public async Task EveryCommandReadsOnlyTheOptionsItDeclares()
+    {
+        string osa = P("o.osa"), zip = P("o.zip"), rules = P("rules.json");
+        File.WriteAllText(rules, "{ \"rules\": [] }");
+        string[][] runs =
+        [
+            ["a", osa, P("in"), "--profile", "store", "-q", "--spare-copies", "never", "--no-verify"],
+            ["a", zip, P("in"), "-q"],
+            ["l", osa, "-v"], ["l", zip, "-v"],
+            ["t", osa, "-q"], ["t", zip, "-q", "--include", "*"],
+            ["info", osa], ["info", zip],
+            ["x", osa, P("x1"), "-q", "--include", "*"], ["x", zip, P("x2"), "-q", "--skip"],
+            ["salvage", osa, P("x3"), "-q"],
+            ["explain", osa], ["analyze", P("in")], ["profiles"], ["version"],
+            ["rules", "check", rules],
+            ["lab", Path.Combine(P("in"), "a.txt"), "--profile", "fast", "--sample", "64K"],
+            ["tune", Path.Combine(P("in"), "a.txt"), "--profile", "fast"],
+            ["keygen"],
+        ];
+        foreach (var run in runs)
+        {
+            var r = await CliRunner.RunAsync(run);
+            Assert.True(r.ExitCode is 0 or 2, $"osmium {string.Join(' ', run)}: {r.Error}");
+        }
+    }
+
+    [Fact]
     public async Task OptionsOfOsaArchivesAreRefusedForAZipFile()
     {
         var r = await CliRunner.RunAsync(["a", P("out.zip"), P("in"), "--threads", "2"]);

@@ -75,16 +75,31 @@ namespace Osmium.Cli
 
         private static bool IsOption(string a) => a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1]));
 
-        public bool Has(string n) => _opts.ContainsKey(n);
+        /// <summary>The options the running command declares (its row of <see cref="Cli.CommandOptions"/>); null before
+        /// the command starts.</summary>
+        internal IReadOnlySet<string>? Declared { get; set; }
+
+        /// <summary>For tests: called with each option the running command's code reads but does not declare, so a test
+        /// run of every command keeps the option tables what the code reads (an option read but not declared would be
+        /// refused before the code could read it).</summary>
+        internal static Action<string>? UndeclaredRead { get; set; }
+
+        private string Read(string n)
+        {
+            if (Declared is { } declared && !declared.Contains(n)) UndeclaredRead?.Invoke(n);
+            return n;
+        }
+
+        public bool Has(string n) => _opts.ContainsKey(Read(n));
         /// <summary>An option that takes a value has none: nothing, or another option, follows it.</summary>
-        public bool MissingValue(string n) => _withoutValue.Contains(n);
+        public bool MissingValue(string n) => _withoutValue.Contains(Read(n));
         /// <summary>The first option that takes a value but was given none.</summary>
         public string? FirstMissingValue => _withoutValue.FirstOrDefault();
         /// <summary>The password of this run, once read (standard input can be read only once).</summary>
         internal string? CachedPassword { get; set; }
         internal bool PasswordRead { get; set; }
-        public string? Get(string n) => _opts.GetValueOrDefault(n);
-        public string Get(string n, string d) => _opts.GetValueOrDefault(n) ?? d;
+        public string? Get(string n) => _opts.GetValueOrDefault(Read(n));
+        public string Get(string n, string d) => _opts.GetValueOrDefault(Read(n)) ?? d;
         public long Size(string n, long d) => Has(n) ? ParamValues.ParseNumber(Get(n)!) : d;
         public int Int(string n, int d) => Has(n) ? int.Parse(Get(n)!, CultureInfo.InvariantCulture) : d;
     }
@@ -103,6 +118,7 @@ namespace Osmium.Cli
                 return Fail(missing.Equals("password", StringComparison.OrdinalIgnoreCase)
                     ? PasswordNeedsAValue
                     : $"--{missing} needs a value: --{missing} <value>, or --{missing}=<value> for a value that starts with --.");
+            a.Declared = known;
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); Console.Error.WriteLine("\nCancelling…"); };
             try
@@ -153,16 +169,16 @@ namespace Osmium.Cli
 
         /// <summary>The options each command reads; any other is refused, so a mistyped one ("--pasword", "-p") is
         /// never silently ignored.</summary>
-        private static readonly Dictionary<string, HashSet<string>> CommandOptions = Aliases(new()
+        internal static readonly Dictionary<string, HashSet<string>> CommandOptions = Aliases(new()
         {
             [["a", "add", "compress"]] = Options([.. PasswordOptions, .. PlanOptionNames, "profile", "exclude", "encrypt", "kdf-iterations",
                 "workers", "cluster-key", "allow-remote-encrypted", "ship-symmetric", "no-verify", "overwrite", "explain", "no-plan-log",
                 "quiet", "q", "spare-copies"]),
             [["x", "extract"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
-            [["l", "list"]] = Options([.. PasswordOptions, "v", "verbose"]),
+            [["l", "list"]] = Options([.. PasswordOptions, "force", "v", "verbose"]),
             [["t", "test"]] = Options([.. PasswordOptions, "include", "force", "quiet", "q"]),
             [["salvage"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
-            [["i", "info"]] = Options(PasswordOptions),
+            [["i", "info"]] = Options([.. PasswordOptions, "force"]),
             [["explain"]] = Options(PasswordOptions),
             [["analyze"]] = Options(),
             [["lab", "bench"]] = Options("profile", "sample", "candidates"),

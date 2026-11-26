@@ -17,7 +17,8 @@ public sealed record CliResult(int ExitCode, string Output, string Error);
 public static class CliRunner
 {
     /// <summary>Runs <c>osmium &lt;args&gt;</c> with <paramref name="input"/> as standard input; the console's own
-    /// streams are restored afterwards, also when the run throws.</summary>
+    /// streams are restored afterwards, also when the run throws. Every run also checks that the command's code read
+    /// no option its row of the option table leaves out (it would be refused before it could be read).</summary>
     public static async Task<CliResult> RunAsync(string[] args, string input = "")
     {
         TextWriter output = Console.Out, error = Console.Error;
@@ -25,6 +26,8 @@ public static class CliRunner
         using var o = new StringWriter();
         using var e = new StringWriter();
         using var i = new StringReader(input);
+        var undeclared = new List<string>();
+        Args.UndeclaredRead = undeclared.Add;
         try
         {
             Console.SetOut(o);
@@ -33,10 +36,12 @@ public static class CliRunner
             int code = await Cli.RunAsync(args);
             var result = new CliResult(code, o.ToString(), e.ToString());
             UserTextNames.AssertNone(result.Output + result.Error, "osmium " + string.Join(' ', args));
+            Assert.True(undeclared.Count == 0, $"osmium {args.FirstOrDefault()} reads options it does not declare: {string.Join(", ", undeclared.Distinct())}");
             return result;
         }
         finally
         {
+            Args.UndeclaredRead = null;
             Console.SetOut(output);
             Console.SetError(error);
             Console.SetIn(stdin);
