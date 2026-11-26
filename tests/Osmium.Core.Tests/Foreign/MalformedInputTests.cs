@@ -14,7 +14,12 @@ namespace Osmium.Core.Tests.Foreign;
 /// </summary>
 public class MalformedInputTests
 {
+    /// <summary>The password for kinds without one of their own; an encrypted fixture gets its real password, so that
+    /// damaged bytes reach decryption and the decoders behind it ("…!wrong": a wrong one, which stops at the check).</summary>
     private const string Password = "Pässwörd ü";
+
+    private static string PasswordOf(string kind) =>
+        kind.EndsWith("!wrong", StringComparison.Ordinal) ? "wrong" : FixtureTests.PasswordFor(kind) ?? Password;
     private static readonly TimeSpan CaseBudget = TimeSpan.FromSeconds(10);
 
     private static byte[] Sample(string kind)
@@ -38,8 +43,10 @@ public class MalformedInputTests
     public static TheoryData<string> Kinds() =>
     [
         "zip", "zip-stored", "tar", "tar.gz", "tar.bz2", "tar.zst", "gz", "bz2", "zst",
-        "zip/aes256.zip", "zip/zipcrypto.zip", "zip/deflate64.zip", "zip/lzma.zip", "zip/ppmd.zip", "zip/bzip2.zip",
+        "zip/aes256.zip", "zip/zipcrypto.zip", "zip/aes256.zip!wrong", "zip/zipcrypto.zip!wrong",
+        "zip/deflate64.zip", "zip/lzma.zip", "zip/ppmd.zip", "zip/bzip2.zip",
         "7z/lzma2-solid.7z", "7z/lzma.7z", "7z/ppmd.7z", "7z/bcj2.7z", "7z/bcj.7z", "7z/delta.7z", "7z/aes.7z", "7z/aes-headers.7z",
+        "7z/aes.7z!wrong",
         "7z/bzip2.7z", "7z/deflate.7z",
         "xz/crc64.xz", "xz/multiblock.xz", "xz/concat.xz", "xz/x86.xz", "xz/tree.tar.xz",
     ];
@@ -63,7 +70,7 @@ public class MalformedInputTests
     }
 
     /// <summary>Open, list, test and (sometimes) extract; returns the unexpected exception, if any.</summary>
-    private static Exception? Exercise(string path, string dest, bool extract)
+    private static Exception? Exercise(string path, string dest, bool extract, string password)
     {
         Exception? fault = null;
         Archives.Foreign.ForeignErrors.FaultObserver = e => { if (fault is null && OwnFault(e) is not null) fault = e; };
@@ -75,17 +82,17 @@ public class MalformedInputTests
 
         Exception? Run()
         {
-            var unexpected = Attempt(path, dest, extract);
+            var unexpected = Attempt(path, dest, extract, password);
             return unexpected ?? (fault is null ? null : new InvalidOperationException($"a fault in {OwnFault(fault)} was taken for damage", fault));
         }
     }
 
-    private static Exception? Attempt(string path, string dest, bool extract)
+    private static Exception? Attempt(string path, string dest, bool extract, string password)
     {
         try
         {
             var limits = ImportLimits.Default with { ExpansionFloorBytes = 64 << 20, MaxExpansionRatio = 1000, MemoryBudgetBytes = 256 << 20 };
-            using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Password, Limits = limits });
+            using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => password, Limits = limits });
             _ = s.Items.Count;
             _ = s.Details.Count;
             s.Test(null, null, CancellationToken.None);
@@ -98,6 +105,8 @@ public class MalformedInputTests
 
     private static void Run(string kind, Func<byte[], int, byte[]> mutate, int cases)
     {
+        string password = PasswordOf(kind);
+        kind = kind.Split('!')[0];
         var original = Sample(kind);
         using var t = new TempDir();
         string archive = t.Sub("case." + (kind.Contains('/') ? Path.GetExtension(kind).TrimStart('.') : kind));
@@ -108,7 +117,7 @@ public class MalformedInputTests
             var data = mutate(original, i);
             File.WriteAllBytes(archive, data);
             string dest = t.Sub("out" + i);
-            var task = Task.Run(() => Exercise(archive, dest, extract: i % 4 == 0));
+            var task = Task.Run(() => Exercise(archive, dest, extract: i % 4 == 0, password));
             if (!task.Wait(CaseBudget)) { failures.Add($"case {i}: did not finish within {CaseBudget.TotalSeconds:F0} s"); break; }
             if (task.Result is { } e) failures.Add($"case {i}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}{(e.InnerException is { } inner ? $"\n{inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}" : "")}");
             if (Directory.Exists(dest))

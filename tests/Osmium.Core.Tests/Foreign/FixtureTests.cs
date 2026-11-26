@@ -10,7 +10,7 @@ namespace Osmium.Core.Tests.Foreign;
 /// comment or a path other than the generated content's.</summary>
 public partial class FixtureTests
 {
-    private static string? PasswordFor(string fixture) =>
+    internal static string? PasswordFor(string fixture) =>
         fixture.Contains("aes", StringComparison.Ordinal) && fixture.EndsWith(".7z", StringComparison.Ordinal) ? "Pässwörd ü"
         : fixture.EndsWith("zipcrypto-nonascii.zip", StringComparison.Ordinal) ? "Pässwörd ü"
         : fixture.Contains("aes", StringComparison.Ordinal) || fixture.Contains("zipcrypto", StringComparison.Ordinal) ? "secret"
