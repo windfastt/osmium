@@ -207,9 +207,13 @@ jobs:
           ### SharpCompress: other credits
           HEADINGS
           section() { awk -v h="$1" 'index($0, h) == 1 { f = 1; next } /^##/ { f = 0 } f' "$n"; }
-          section "### SharpCompress: LZW" | grep -q "SharpZipLib" || fail "the LZW section does not name SharpZipLib"
-          section "### SharpCompress: BZip2" | grep -q "This product includes software developed at" || fail "the BZip2 section lacks Apache Ant's NOTICE"
-          section "### SharpCompress: BZip2" | grep -q "The Apache Software Foundation" || fail "the BZip2 section lacks Apache Ant's NOTICE"
+          # Each section is captured first: piping into grep -q under pipefail fails when grep stops at an early match
+          # and the writer then dies of SIGPIPE.
+          lzw=$(section "### SharpCompress: LZW")
+          bzip2=$(section "### SharpCompress: BZip2")
+          grep -qF "SharpZipLib" <<< "$lzw" || fail "the LZW section does not name SharpZipLib"
+          grep -qF "This product includes software developed at" <<< "$bzip2" || fail "the BZip2 section lacks Apache Ant's NOTICE"
+          grep -qF "The Apache Software Foundation" <<< "$bzip2" || fail "the BZip2 section lacks Apache Ant's NOTICE"
           if grep -q "No separate NOTICE file ships with the SharpCompress source" "$n"; then fail "the old sentence about a missing NOTICE file is still there"; fi
           echo "notices match the packages"
 
