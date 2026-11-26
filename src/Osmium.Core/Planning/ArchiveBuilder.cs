@@ -52,6 +52,9 @@ public sealed record BuildOptions
     internal byte[]? TestFixedSalt { get; init; }
     /// <summary>Tests only: see <see cref="OsaWriterOptions.TestFixedSaltAcknowledged"/>.</summary>
     internal bool TestFixedSaltAcknowledged { get; init; }
+    /// <summary>Tests only: called with the path of the finished, not yet checked archive (to change a byte the check
+    /// before it takes its place must catch).</summary>
+    internal Action<string>? TestBeforeCheck { get; init; }
 }
 
 public sealed record BuildProgress(string Phase, long BytesIn, long BytesInTotal, long BytesOut, int BlocksDone, int BlocksTotal, string? Detail);
@@ -265,6 +268,7 @@ public static class ArchiveBuilder
         if (o.StorePlanLog) meta["plan"] = JsonSerializer.SerializeToUtf8Bytes(planLog);
         Report("Writing index");
         writer.Finish(entries, meta);
+        o.TestBeforeCheck?.Invoke(writer.TempPath);
 
         // Structural re-read of the written file (CRCs, payload hashes, index, spare copies) before it replaces
         // anything. A fresh archive must be perfect: any warning fails the build.

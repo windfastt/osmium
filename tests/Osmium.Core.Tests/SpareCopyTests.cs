@@ -972,6 +972,40 @@ public class SpareCopyTests
     }
 
     [Theory]
+    [InlineData("the spare file list")]
+    [InlineData("the header copy")]
+    [InlineData("the padding of the header copy")]
+    [InlineData("the trailer")]
+    public async Task ABuildWhoseSpareCopiesDoNotCheckOutWritesNothing(string what)
+    {
+        using var t = new TempDir();
+        var options = new Planning.BuildOptions
+        {
+            OutputPath = "", SpareCopies = SpareCopyPolicy.Always,
+            TestBeforeCheck = partial =>
+            {
+                var tail = SpareArchives.TailOf(partial);
+                long at = what switch
+                {
+                    "the spare file list" => tail.SpareOffset + tail.IndexLength / 2,
+                    "the header copy" => tail.HeaderCopyOffset + 9,
+                    "the padding of the header copy" => tail.HeaderCopyOffset + tail.HeaderLength + 7,
+                    _ => tail.TrailerOffset + 3,
+                };
+                using var f = new FileStream(partial, FileMode.Open, FileAccess.ReadWrite);
+                f.Position = at;
+                int old = f.ReadByte();
+                f.Position = at;
+                f.WriteByte((byte)(old ^ 0x04));
+            },
+        };
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Build(t, "bad", options));
+        Assert.EndsWith("The archive was not written.", e.Message);
+        Assert.False(File.Exists(t.Sub("bad.osa")));
+        Assert.Empty(Directory.GetFiles(t.Path, "*.partial-*"));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task TheBuilderWritesSpareCopiesThatPassItsOwnCheck(bool encrypted)
