@@ -222,7 +222,7 @@ public static class Extractor
                     errors.Enqueue($"{e.Path}: {ex.Message}");
                 }
             }
-            var planner = new TargetNames(root!, names, own.Values, options.WrittenEarlier);
+            var planner = new TargetNames(root!, names, own.Values, options.WrittenEarlier, TargetNames.FileIdentity(reader.Path));
             foreach (var e in entries)
             {
                 if (!own.TryGetValue(e, out var path)) continue;

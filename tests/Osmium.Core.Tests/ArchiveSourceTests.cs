@@ -336,7 +336,7 @@ public class ArchiveSourceTests
             var e = Assert.Throws<NotSupportedException>(() => ArchiveSources.Open(t.Sub(name), ct: Ct));
             Assert.Equal("This file is not an archive Osmium can read.", e.Message);
         }
-        Assert.Equal([".osa"], ArchiveSources.Extensions);
+        Assert.Equal(".osa", ArchiveSources.Extensions[0]);
     }
 
     [Theory]

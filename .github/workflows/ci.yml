@@ -42,6 +42,184 @@ jobs:
       - name: Settings reference matches the code (tools/settingsdoc regenerates docs/SETTINGS.md)
         run: dotnet run --project tools/settingsdoc -c Release -- --check
 
+      - name: Archive tools for the format checks
+        run: |
+          tools="tar gzip bzip2 xz zstd zip unzip 7z diff cmp python3"
+          missing=""
+          for t in $tools; do command -v "$t" > /dev/null || missing="$missing $t"; done
+          if [ -n "$missing" ]; then
+            echo "Installing:$missing"
+            sudo apt-get update -q && sudo apt-get install -y -q zip unzip 7zip zstd xz-utils bzip2
+          fi
+          for t in $tools; do
+            command -v "$t" > /dev/null || { echo "::error::'$t' is not installed, so the archive format checks cannot run"; exit 1; }
+          done
+          7z | head -2; xz --version | head -1; zstd --version; tar --version | head -1; zip -v | sed -n 2p
+
+      # Archives written by the standard tools, read by osmium: list, test, extract, and compare with the originals.
+      - name: CLI smoke test with other archive formats
+        run: |
+          set -euo pipefail
+          osmium() { dotnet "$GITHUB_WORKSPACE/src/Osmium.Cli/bin/Release/net10.0/osmium.dll" "$@"; }
+          w=$(mktemp -d)
+          # A ZIP written by osmium, checked by Info-ZIP's unzip (an independent reader).
+          osmium a "$w/smoke.zip" docs -q
+          unzip -tq "$w/smoke.zip"
+          # A small generated folder: text, random bytes, an empty file, an empty folder, a non-ASCII name.
+          mkdir -p "$w/src/tree/sub/empty"
+          seq 1 20000 > "$w/src/tree/numbers.txt"
+          head -c 300000 /dev/urandom > "$w/src/tree/sub/random.bin"
+          : > "$w/src/tree/empty.txt"
+          printf 'non-ASCII name\n' > "$w/src/tree/sub/ünïcödé.txt"
+          cd "$w/src"
+          tar czf ../tree.tar.gz tree
+          tar cjf ../tree.tar.bz2 tree
+          tar cJf ../tree.tar.xz tree
+          tar --zstd -cf ../tree.tar.zst tree
+          zip -qr ../tree.zip tree
+          7z a -bso0 -bsp0 ../tree.7z tree
+          cd "$w"
+          for a in tree.tar.gz tree.tar.bz2 tree.tar.xz tree.tar.zst tree.zip tree.7z; do
+            echo "== $a"
+            osmium l "$a"
+            osmium t "$a"
+            osmium x "$a" "out-$a" -q
+            diff -r src/tree "out-$a/tree"
+          done
+          cp src/tree/numbers.txt single.txt
+          gzip -k single.txt; bzip2 -k single.txt; xz -k single.txt; zstd -q -k single.txt
+          for ext in gz bz2 xz zst; do
+            echo "== single.txt.$ext"
+            osmium l "single.txt.$ext"
+            osmium t "single.txt.$ext"
+            osmium x "single.txt.$ext" "out-$ext" -q
+            cmp single.txt "out-$ext/single.txt"
+          done
+
+      # Every committed test fixture is made again from the command in Fixtures/README.md and compared with the
+      # committed file: the same listing and the same content (encrypted archives differ byte for byte: random salt).
+      - name: Test fixtures match their documented commands
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib, re, subprocess, sys, tempfile
+          root = pathlib.Path("tests/Osmium.Core.Tests/Fixtures").resolve()
+          readme = (root / "README.md").read_text(encoding="utf-8")
+          work = pathlib.Path(tempfile.mkdtemp())
+          env = dict(os.environ, TZ="UTC", LC_ALL="C.UTF-8", LANG="C.UTF-8")
+          content = re.search(r"```sh\n(.*?)```", readme, re.S).group(1)
+          subprocess.run(["bash", "-e", "-c", content], cwd=work, env=env, check=True)
+          rows, s, folder = [], "", None
+          for line in readme.splitlines():
+              m = re.match(r"## .*\(`(\w+)/`\)", line)
+              if m: folder, s = m.group(1), ""
+              m = re.match(r'With `S="([^"]*)"`', line)
+              if m: s = m.group(1)
+              m = re.match(r"\| `([^`]+)` \| `(.+)` \|$", line)
+              if m and folder: rows.append((folder, m.group(1), m.group(2).replace("\\|", "|"), s))
+          committed = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and p.suffix != ".md")
+          made = sorted(f"{f}/{n}" for f, n, _, _ in rows)
+          if made != committed:
+              sys.exit(f"fixtures without a command, or commands without a fixture: {sorted(set(made) ^ set(committed))}")
+          for f, _, cmd, s in rows:
+              (work / f).mkdir(exist_ok=True)
+              subprocess.run(["bash", "-e", "-o", "pipefail", "-c", f'S="{s}"; {cmd}'], cwd=work, env=env, check=True)
+
+          def run(*args):
+              return subprocess.run(args, capture_output=True, env=env)
+
+          def password(cmd):
+              m = re.search(r"'-p([^']*)'|-p'([^']*)'|-P '([^']*)'|-p(\S+)", cmd)
+              return next((g for g in m.groups() if g), "") if m else ""
+
+          failures = []
+
+          # What a tool printed; a tool that fails (a damaged footer, bytes after the end) is a failure even when it
+          # printed everything first.
+          def output(rel, *args):
+              r = run(*args)
+              if r.returncode: failures.append(f"{rel}: {' '.join(args[:2])} failed: {r.stderr.decode(errors='replace').strip()}")
+              return r.stdout
+
+          for f, name, cmd, _ in rows:
+              rel = f"{f}/{name}"
+              a, b = root / rel, work / rel
+              pw = password(cmd)
+              if name.endswith(".tar.xz"):
+                  if output(rel, "tar", "-tvJf", str(a)) != output(rel, "tar", "-tvJf", str(b)): failures.append(f"{rel}: listing differs")
+                  if output(rel, "xz", "-dc", str(a)) != output(rel, "xz", "-dc", str(b)): failures.append(f"{rel}: content differs")
+                  continue
+              if name.endswith(".xz"):
+                  if output(rel, "xz", "-dc", str(a)) != output(rel, "xz", "-dc", str(b)): failures.append(f"{rel}: content differs")
+                  def totals(p):
+                      out = output(rel, "xz", "--robot", "-l", str(p)).decode()
+                      return [l.split("\t")[i] for l in out.splitlines() if l.startswith("totals") for i in (1, 2, 4, 6)]
+                  if totals(a) != totals(b): failures.append(f"{rel}: streams, blocks, size or check differ")
+                  continue
+              ea, eb = work / ("a-" + rel.replace("/", "_")), work / ("b-" + rel.replace("/", "_"))
+              if cmd.startswith("zip "):
+                  # Made by Info-ZIP: read by Info-ZIP (its password bytes are UTF-8 here). Info-ZIP adds a folder's entries
+                  # in the order the file system lists them, which differs between file systems, so the listings are compared
+                  # as sorted lines: the same names, sizes and times, in any order.
+                  la = sorted(output(rel, "unzip", "-l", str(a)).decode().splitlines()[1:])
+                  lb = sorted(output(rel, "unzip", "-l", str(b)).decode().splitlines()[1:])
+                  if la != lb: failures.append(f"{rel}: listing differs\ncommitted:\n" + "\n".join(la) + "\nmade again:\n" + "\n".join(lb))
+                  for archive, into in ((a, ea), (b, eb)):
+                      r = run("unzip", "-q", *(["-P", pw] if pw else []), str(archive), "-d", str(into))
+                      if r.returncode: failures.append(f"{rel}: {r.stderr.decode()}")
+              else:
+                  keep = (b"Path = ", b"Size = ", b"CRC = ", b"Encrypted = ", b"Method = ", b"Folder = ")
+                  def listing(p):
+                      out = output(rel, "7z", "l", "-slt", *([f"-p{pw}"] if pw else []), str(p)).split(b"----------", 1)[-1]
+                      return [l for l in out.splitlines() if l.startswith(keep)]
+                  if listing(a) != listing(b):
+                      failures.append(f"{rel}: listing differs\ncommitted:\n" + b"\n".join(listing(a)).decode() + "\nmade again:\n" + b"\n".join(listing(b)).decode())
+                  for archive, into in ((a, ea), (b, eb)):
+                      r = run("7z", "x", "-bso0", "-bsp0", *([f"-p{pw}"] if pw else []), f"-o{into}", str(archive))
+                      if r.returncode: failures.append(f"{rel}: {r.stderr.decode()}")
+              if run("diff", "-r", str(ea), str(eb)).returncode: failures.append(f"{rel}: content differs")
+          if failures: sys.exit("\n".join(failures))
+          print(f"{len(rows)} fixtures match their commands")
+          EOF
+
+      # THIRD-PARTY-NOTICES.md must follow the packages: plain checks, the notices themselves are written by hand.
+      - name: Third-party notices match the packages
+        run: |
+          set -euo pipefail
+          n=THIRD-PARTY-NOTICES.md
+          fail() { echo "::error file=$n::$1"; exit 1; }
+          v=$(grep -oP '<PackageReference Include="SharpCompress" Version="\K[^"]+' src/Osmium.Core/Osmium.Core.csproj)
+          grep -q "^## SharpCompress $v\$" "$n" || fail "SharpCompress $v (Osmium.Core.csproj) has no section in $n"
+          grep -q "^| SharpCompress | $v |" "$n" || fail "the table row of SharpCompress does not say $v"
+          grep -hoP '<PackageReference Include="\K[^"]+" Version="[^"]+' src/*/*.csproj | sort -u | while IFS= read -r ref; do
+            name=${ref%%\"*}; ver=${ref##*\"}
+            grep -qE "^## ${name//./\\.} ${ver//./\\.}( |\$)" "$n" || fail "$name $ver has no section in $n"
+          done
+          while IFS= read -r h; do
+            grep -qxF "$h" "$n" || fail "missing heading: $h"
+          done <<'HEADINGS'
+          ### SharpCompress: Zstandard (`Compressors/ZStandard/`)
+          ### SharpCompress: Deflate, zlib and GZip (`Compressors/Deflate/`)
+          ### SharpCompress: Deflate64 (`Compressors/Deflate64/`)
+          ### SharpCompress: BZip2 (`Compressors/BZip2/`)
+          ### SharpCompress: Adler-32 (`Algorithms/Adler32.cs`)
+          ### SharpCompress: Explode (`Compressors/Explode/`)
+          ### SharpCompress: RAR decoders (`Compressors/Rar/`, `Compressors/PPMd/H/`)
+          ### SharpCompress: PPMd (`Compressors/PPMd/I1/`, `Compressors/PPMd/H/`)
+          ### SharpCompress: LZW (`Compressors/Lzw/LzwStream.cs`)
+          ### SharpCompress: ADC (`Compressors/ADC/`)
+          ### SharpCompress: other credits
+          HEADINGS
+          section() { awk -v h="$1" 'index($0, h) == 1 { f = 1; next } /^##/ { f = 0 } f' "$n"; }
+          # Each section is captured first: piping into grep -q under pipefail fails when grep stops at an early match
+          # and the writer then dies of SIGPIPE.
+          lzw=$(section "### SharpCompress: LZW")
+          bzip2=$(section "### SharpCompress: BZip2")
+          grep -qF "SharpZipLib" <<< "$lzw" || fail "the LZW section does not name SharpZipLib"
+          grep -qF "This product includes software developed at" <<< "$bzip2" || fail "the BZip2 section lacks Apache Ant's NOTICE"
+          grep -qF "The Apache Software Foundation" <<< "$bzip2" || fail "the BZip2 section lacks Apache Ant's NOTICE"
+          if grep -q "No separate NOTICE file ships with the SharpCompress source" "$n"; then fail "the old sentence about a missing NOTICE file is still there"; fi
+          echo "notices match the packages"
+
   windows:
     name: Windows ${{ matrix.arch }}
     runs-on: windows-latest
@@ -116,6 +294,35 @@ jobs:
           $b = Get-ChildItem -Recurse -File smoke/out/in | ForEach-Object { (Get-FileHash $_.FullName).Hash } | Sort-Object
           if (Compare-Object $a $b) { throw 'extracted files differ' }
           & $cli info smoke/test.osa
+
+      - name: CLI smoke test with ZIP files (Windows' own ZIP tools and other readers)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $cli = "artifacts/publish/win-x64/osmium.exe"
+          $w = "zipsmoke"
+          New-Item -ItemType Directory -Force "$w/in/sub" | Out-Null
+          Copy-Item README.md, docs/*.md "$w/in/"
+          Copy-Item artifacts/publish/win-x64/Osmium.Core.dll "$w/in/sub/"
+          function Hashes($root) {
+            $base = (Resolve-Path $root).Path
+            Get-ChildItem -Recurse -File $root | ForEach-Object { "$([IO.Path]::GetRelativePath($base, $_.FullName))|$((Get-FileHash $_.FullName).Hash)" } | Sort-Object
+          }
+          # A ZIP made by PowerShell's Compress-Archive, extracted by osmium.
+          Compress-Archive -Path "$w/in/*" -DestinationPath "$w/powershell.zip"
+          & $cli x "$w/powershell.zip" "$w/from-powershell" -q; if ($LASTEXITCODE) { throw 'osmium x of a Compress-Archive ZIP failed' }
+          if (Compare-Object (Hashes "$w/in") (Hashes "$w/from-powershell")) { throw 'files extracted from the Compress-Archive ZIP differ' }
+          # A ZIP made by osmium, read by three other readers.
+          $out = & $cli a "$w/osmium.zip" "$w/in" 2>&1
+          if ($LASTEXITCODE) { throw "osmium a x.zip failed: $out" }
+          # tar.exe is libarchive's bsdtar, part of Windows: a reader independent of .NET.
+          tar.exe -tf "$w/osmium.zip"; if ($LASTEXITCODE) { throw 'tar.exe could not read the ZIP' }
+          # 7-Zip, installed on the runner: an independent reader that checks every file's CRC.
+          & "C:\Program Files\7-Zip\7z.exe" t "$w/osmium.zip"; if ($LASTEXITCODE) { throw '7-Zip found a problem in the ZIP' }
+          # Expand-Archive reads with .NET's own ZIP code, the code family that wrote it: a round trip, not an
+          # independent check.
+          Expand-Archive "$w/osmium.zip" "$w/expanded"
+          if (Compare-Object (Hashes "$w/in") (Hashes "$w/expanded/in")) { throw 'files expanded from the osmium ZIP differ' }
 
       - uses: actions/upload-artifact@v6
         with:

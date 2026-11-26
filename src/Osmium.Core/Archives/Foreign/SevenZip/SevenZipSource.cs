@@ -1,0 +1,413 @@
+using Microsoft.Win32.SafeHandles;
+using Osmium.Core.Container;
+using Osmium.Core.Pipeline;
+using Osmium.Core.Text;
+
+namespace Osmium.Core.Archives.Foreign.SevenZip;
+
+/// <summary>
+/// A 7z archive, read with Osmium's own header reader and folder decoder (SharpCompress 1.0.0 decodes a solid folder
+/// again from its start for every file in it, so a solid archive of many files took quadratic time). Each folder is
+/// decoded once, in order, and the files nobody selected are read through and discarded (their bytes still count
+/// against the limits). Every file is checked against its stored CRC-32; one without a stored CRC counts as unverified.
+/// Encrypted file lists ask for the password in Open; encrypted data asks for it on the first operation that needs it.
+/// </summary>
+internal sealed class SevenZipSource : ForeignSource
+{
+    /// <summary>The SHA-256 rounds of key derivation one archive may cost in all: 256 keys at the 2^19 rounds 7z
+    /// writers use, 8 at the most Osmium accepts for one key. Each salt needs its own key, so without this a small
+    /// archive of many folders, each with its own salt, could keep the processor busy for days.</summary>
+    public const long MaxKeyRounds = 1L << 27;
+
+    /// <summary>After a first try fails, the password search stops at this many failed folders, or once this much
+    /// data was decoded in all, and the password is taken as wrong: a wrong one must not cost a full decrypt of a large
+    /// archive of many folders. A damaged first folder still tells itself apart when a cheap next one proves the key.</summary>
+    public const int MaxProofFolders = 3;
+    public const long MaxProofBytes = 64L << 20;
+
+    private static readonly AsyncLocal<long?> ProofBytesSeam = new();
+
+    /// <summary>For tests: the data the password search may decode instead of <see cref="MaxProofBytes"/>.</summary>
+    internal static long? MaxProofBytesOverride { get => ProofBytesSeam.Value; set => ProofBytesSeam.Value = value; }
+
+    /// <summary>The bytes the password checks of this source have decoded so far.</summary>
+    internal long ProofBytesRead { get; private set; }
+
+    internal const string Unprovable = "encrypted without a stored checksum, so Osmium cannot check the password";
+
+    internal const string KeyBudgetRefusal = "this archive asks for more password key derivation than Osmium allows for one archive";
+
+    private static readonly AsyncLocal<Func<int, bool>?> DropChecksums = new();
+    private static readonly AsyncLocal<long?> KeyRoundsSeam = new();
+    private readonly SafeFileHandle _handle;
+    private SzDatabase _db = new();
+    private bool _encryptedHeaders;
+    private readonly Dictionary<string, byte[]> _keys = new(StringComparer.Ordinal);
+    private CancellationToken _ct;
+
+    /// <summary>For tests (this async flow only): forget the stored CRCs of the folders this accepts when the archive is
+    /// read, as an archive written without checksums would be.</summary>
+    internal static Func<int, bool>? DropChecksumsForTests { get => DropChecksums.Value; set => DropChecksums.Value = value; }
+
+    /// <summary>For tests: the key derivation budget instead of <see cref="MaxKeyRounds"/>.</summary>
+    internal static long? MaxKeyRoundsOverride { get => KeyRoundsSeam.Value; set => KeyRoundsSeam.Value = value; }
+
+    private static long KeyBudget => MaxKeyRoundsOverride ?? MaxKeyRounds;
+
+    private SevenZipSource(string path, ArchiveOpenOptions options) : base(path, options) =>
+        _handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+
+    public static SevenZipSource Open(string path, ArchiveOpenOptions options, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var s = new SevenZipSource(path, options);
+        try
+        {
+            s._ct = ct;
+            s.Load(ct);
+            s._ct = default;
+            return s;
+        }
+        catch
+        {
+            s.Dispose();
+            throw;
+        }
+    }
+
+    public override ArchiveKind Kind => ArchiveKind.SevenZip;
+    public override string FormatName => "7z";
+    public override bool IsEncrypted => _encryptedHeaders || base.IsEncrypted;
+    private string Name => System.IO.Path.GetFileName(Path);
+
+    private void Load(CancellationToken ct)
+    {
+        using var file = new FileSlice(_handle, 0, FileLength, 4096);
+        // One guard for every level of packed headers, against the file's size and the limits the caller gave.
+        var guard = new LimitGuard(Options.Limits, FileLength, ct);
+        bool headerProof = true;
+        try
+        {
+            _db = SevenZipHeader.Read(file, Options.Limits, ct, DecodeHeader);
+        }
+        catch (Exception e) when (_encryptedHeaders && (e is SevenZipHeader.HeaderCheckException || ForeignErrors.IsDecoderFailure(e)))
+        {
+            // Encrypted headers decode to nonsense under a wrong password.
+            throw SpendPassword();
+        }
+        catch (Exception e) when (ForeignErrors.IsDecoderFailure(e)) { throw ForeignErrors.Damaged(Name, e); }
+        catch (OutOfMemoryException) { throw SevenZipHeader.TooLarge(); } // a last resort: the limits above come first
+        // The file list decoded and matched its CRC: that proves the password when decrypted bytes reached it.
+        if (_encryptedHeaders && headerProof) PasswordProven = true;
+        if (DropChecksumsForTests is { } drop)
+        {
+            foreach (var f in _db.Files) if (f.Folder >= 0 && drop(f.Folder)) f.Crc = null;
+            for (int i = 0; i < _db.Folders.Count; i++) if (drop(i)) _db.Folders[i].UnpackCrc = null;
+        }
+        var entries = new List<ForeignEntry>(_db.Files.Count);
+        for (int i = 0; i < _db.Files.Count; i++) entries.Add(Make(_db.Files[i], i));
+        SetEntries(entries, complete: true);
+
+        byte[] DecodeHeader(SzDatabase packed, SzFolder folder, long size)
+        {
+            if (folder.IsEncrypted) _encryptedHeaders = true;
+            var aes = new List<SevenZipAesStream>();
+            using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null, aes), guard);
+            // Grown as it is decoded, so a header that declares far more than its data holds allocates only what came.
+            var bytes = new byte[Math.Min(size, 1L << 20)];
+            long done = 0;
+            while (done < size)
+            {
+                if (done == bytes.Length) Array.Resize(ref bytes, (int)Math.Min(size, 2L * bytes.Length));
+                int n = s.Read(bytes, (int)done, bytes.Length - (int)done);
+                if (n == 0) throw SevenZipHeader.Corrupt("the header ends early");
+                done += n;
+            }
+            if (folder.IsEncrypted) headerProof &= folder.UnpackCrc is not null && size > 0 && aes.Any(a => a.Proves);
+            return bytes;
+        }
+    }
+
+    /// <summary>The SHA-256 rounds of key derivation this source has run so far.</summary>
+    internal long KeyRoundsSpent { get; private set; }
+
+    /// <summary>The AES key for a coder's properties, derived once per salt and round count (7z writers give every
+    /// folder its own IV, which the key does not depend on).</summary>
+    private byte[] Key(byte[] props)
+    {
+        string password = ObtainPassword();
+        string identity = SevenZipAes.KeyIdentity(props);
+        lock (_keys)
+        {
+            if (_keys.TryGetValue(identity, out var known)) return known;
+            long rounds = SevenZipAes.Rounds(props);
+            if (KeyRoundsSpent + rounds > KeyBudget) throw new NotSupportedException(KeyBudgetRefusal);
+            var key = SevenZipAes.Key(props, password, _ct);
+            KeyRoundsSpent += rounds;
+            return _keys[identity] = key;
+        }
+    }
+
+    /// <summary>Whether the keys of the folder's AES coders are known or fit in what is left of the budget (damaged
+    /// properties are reported when the folder is opened).</summary>
+    private bool KeysWithinBudget(SzFolder f)
+    {
+        lock (_keys)
+        {
+            try
+            {
+                long needed = f.Coders.Where(c => c.Id == SevenZipHeader.AesId).DistinctBy(c => SevenZipAes.KeyIdentity(c.Props))
+                    .Where(c => !_keys.ContainsKey(SevenZipAes.KeyIdentity(c.Props))).Sum(c => SevenZipAes.Rounds(c.Props));
+                return KeyRoundsSpent + needed <= KeyBudget;
+            }
+            catch (CorruptDataException) { return true; }
+        }
+    }
+
+    private ForeignEntry Make(SzFile f, int index)
+    {
+        uint attr = f.Attributes ?? 0;
+        uint mode = (attr & 0x8000) != 0 ? attr >> 16 : 0;
+        var folder = f.Folder >= 0 ? _db.Folders[f.Folder] : null;
+        var type = f.IsAnti ? EntryType.Anti
+            : (mode & 0xF000) == 0xA000 || (attr & 0x400) != 0 ? EntryType.SymbolicLink
+            : (mode & 0xF000) is 0x1000 or 0x2000 or 0x6000 or 0xC000 ? EntryType.Special
+            : f.IsDir ? EntryType.Directory
+            : EntryType.File;
+        return new ForeignEntry
+        {
+            Index = index,
+            Path = f.Name.Replace('\\', '/').TrimEnd('/'),
+            Type = type,
+            Size = type == EntryType.File ? f.Size : null,
+            PackedSize = null,
+            ModifiedUtc = f.ModifiedUtc,
+            Encrypted = type == EntryType.File && folder is { IsEncrypted: true },
+            Method = type == EntryType.File && folder is not null ? SevenZipDecoder.Methods(folder) : null,
+            ReadOnly = type == EntryType.File && ((attr & 1) != 0 || (mode != 0 && (mode & 0x80) == 0)),
+            Hidden = (attr & 2) != 0,
+            Unsupported = type == EntryType.Special ? "a device, FIFO or socket" : null,
+        };
+    }
+
+    /// <summary>Files of each folder in folder order (their order in the archive).</summary>
+    private Dictionary<int, List<int>> FilesByFolder()
+    {
+        var map = new Dictionary<int, List<int>>();
+        for (int i = 0; i < _db.Files.Count; i++)
+        {
+            int f = _db.Files[i].Folder;
+            if (f < 0) continue;
+            if (!map.TryGetValue(f, out var list)) map[f] = list = [];
+            list.Add(i);
+        }
+        return map;
+    }
+
+    /// <summary>The file whose CRC can prove the password in a folder: the first with a stored CRC and at least one
+    /// byte (an empty file is the same under every password); -1 when only the folder's own CRC can, over at least one
+    /// byte; null when nothing in the folder can.</summary>
+    private int? ProofFile(int folder, Dictionary<int, List<int>> byFolder)
+    {
+        int first = byFolder[folder].FirstOrDefault(i => _db.Files[i].Crc is not null && _db.Files[i].Size > 0, -1);
+        if (first >= 0) return first;
+        var f = _db.Folders[folder];
+        return f.UnpackCrc is not null && f.UnpackSize > 0 ? -1 : null;
+    }
+
+    /// <summary>Whether a folder can show that the password is right.</summary>
+    private bool Checkable(int folder, Dictionary<int, List<int>> byFolder) => ProofFile(folder, byFolder) is not null;
+
+    /// <summary>
+    /// Rule 1 for 7z, which has no password verifier: the first selected encrypted folder that has a stored CRC is
+    /// decoded from its start into a discarding sink until the end of its first file with a CRC and data (the whole
+    /// folder when only the folder has one), and compared. It proves the password only when bytes an AES coder
+    /// decrypted reached that output (a coder whose output nothing reads, or that feeds only BCJ2's range coder, proves
+    /// nothing). When nothing proves the password, no file without a stored CRC is written under it. A data error or a
+    /// mismatch is a wrong password or damage, which
+    /// 7z cannot tell apart: the next such folder is tried (the cheapest proofs first, within
+    /// <see cref="MaxProofFolders"/> failures and <see cref="MaxProofBytes"/>), and when one proves the password the
+    /// failed one is reported as damaged when it is read; otherwise the password is wrong. When no selected encrypted
+    /// folder has any CRC, nothing can prove the password; those entries are then refused.
+    /// </summary>
+    protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
+    {
+        var byFolder = FilesByFolder();
+        // The cheapest proofs first: the fewest bytes to decode up to the end of the file whose CRC decides.
+        var candidates = new List<(int Folder, int StopAfter, long Cost)>();
+        foreach (int folder in encrypted.Select(e => _db.Files[e.Index].Folder).Distinct())
+        {
+            if (ProofFile(folder, byFolder) is not { } stopAfter) continue;
+            var f0 = _db.Folders[folder];
+            long cost = stopAfter < 0 ? f0.UnpackSize : byFolder[folder].TakeWhile(i => i != stopAfter).Sum(i => _db.Files[i].Size) + _db.Files[stopAfter].Size;
+            candidates.Add((folder, stopAfter, cost));
+        }
+        candidates.Sort((a, b) => a.Cost != b.Cost ? a.Cost.CompareTo(b.Cost) : a.Folder.CompareTo(b.Folder));
+        int tries = 0, failures = 0;
+        long read = 0, budget = MaxProofBytesOverride ?? MaxProofBytes;
+        foreach (var (folder, stopAfter, total) in candidates)
+        {
+            // The first try always runs; after it, at most MaxProofFolders failures and MaxProofBytes read in all.
+            if (tries > 0 && (failures >= MaxProofFolders || read + total > budget)) break;
+            var f = _db.Folders[folder];
+            if (!KeysWithinBudget(f)) continue;
+            tries++;
+            long before = ProofBytesRead;
+            var aes = new List<SevenZipAesStream>();
+            try
+            {
+                _ct = op.Token;
+                using var s = new CountingStream(SevenZipDecoder.Open(_handle, _db, f, op.Guard.Limits, Name, Key, op.Read, aes), op.Guard);
+                var buf = new byte[1 << 16];
+                if (stopAfter < 0)
+                {
+                    var crc = new System.IO.Hashing.Crc32();
+                    long done = 0;
+                    int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0) { crc.Append(buf.AsSpan(0, n)); done += n; ProofBytesRead += n; op.Progress.Checking(done, total); }
+                    if (crc.GetCurrentHashAsUInt32() != f.UnpackCrc) { failures++; continue; }
+                }
+                else
+                {
+                    long skipped = 0;
+                    foreach (int i in byFolder[folder])
+                    {
+                        var file = _db.Files[i];
+                        using var part = new VerifyingStream(new ExactStream(new NonClosing(s), file.Size, "a file"), file.Size, i == stopAfter ? file.Crc : null, "the file");
+                        int n;
+                        while ((n = part.Read(buf, 0, buf.Length)) > 0) { skipped += n; ProofBytesRead += n; op.Progress.Checking(skipped, total); }
+                        if (i == stopAfter) break;
+                    }
+                }
+                if (aes.Any(a => a.Proves)) return true;
+            }
+            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failures++; }
+            finally
+            {
+                _ct = default;
+                read += ProofBytesRead - before;
+            }
+        }
+        if (failures > 0) throw new WrongPasswordException();
+        return false;
+    }
+
+    protected override void Run(Operation op)
+    {
+        _ct = op.Token;
+        try { RunFolders(op); }
+        finally { _ct = default; }
+    }
+
+    private void RunFolders(Operation op)
+    {
+        var byFolder = FilesByFolder();
+        // Entries without data (folders, empty files, links, deletion markers), in archive order.
+        for (int i = 0; i < _db.Files.Count; i++)
+        {
+            var file = _db.Files[i];
+            if (file.Folder >= 0) continue;
+            var e = Entries[i];
+            if (op.Selected(e) is not { } rel) continue;
+            try { op.Sink.Accept(e, rel, e.HasData ? () => new EntryContent(Stream.Null, Verified: true) : null); }
+            catch (EntryDataException) { }
+        }
+        for (int folder = 0; folder < _db.Folders.Count; folder++)
+        {
+            op.Token.ThrowIfCancellationRequested();
+            if (!byFolder.TryGetValue(folder, out var files)) continue;
+            var wanted = files.Where(i => op.Selected(Entries[i]) is not null).ToList();
+            if (wanted.Count == 0) continue;
+            var f = _db.Folders[folder];
+            bool unprovable = f.IsEncrypted && !Checkable(folder, byFolder);
+            if (unprovable && !PasswordProven)
+            {
+                foreach (int i in wanted)
+                    op.Sink.Accept(Entries[i].Refused(Unprovable), op.Selected(Entries[i])!, null);
+                continue;
+            }
+            if (f.IsEncrypted && !KeysWithinBudget(f))
+            {
+                foreach (int i in wanted) op.Sink.Accept(Entries[i].Refused(KeyBudgetRefusal), op.Selected(Entries[i])!, null);
+                continue;
+            }
+            int last = wanted[^1];
+            var accepted = new HashSet<int>();
+            Stream? folderStream = null;
+            try
+            {
+                folderStream = new CountingStream(SevenZipDecoder.Open(_handle, _db, f, op.Guard.Limits, Name, f.IsEncrypted ? Key : null, op.Read), op.Guard);
+                var scratch = new byte[1 << 16];
+                foreach (int i in files)
+                {
+                    var file = _db.Files[i];
+                    var e = Entries[i];
+                    string? rel = op.Selected(e);
+                    using (var part = new ExactStream(new NonClosing(folderStream), file.Size, "a file"))
+                    {
+                        if (rel is not null && f.IsEncrypted && !PasswordProven && file.Crc is null && file.Size > 0)
+                        {
+                            // Nothing proved the password, and nothing checks this file: it is not written under it.
+                            accepted.Add(i);
+                            op.Sink.Accept(e.Refused(Unprovable), rel, null);
+                        }
+                        else if (rel is not null)
+                        {
+                            accepted.Add(i);
+                            bool verified = file.Crc is not null;
+                            if (!verified && f.IsEncrypted) op.Sink.Warn($"{DisplayText.Escape(e.Path)}: no stored checksum; the contents were not checked");
+                            op.Sink.Accept(e, rel, () => new EntryContent(new VerifyingStream(new NonClosing(part), file.Size, file.Crc, "the file"), verified));
+                        }
+                        // Whatever the sink did not read (an entry refused or skipped, or not selected) is read through.
+                        while (part.Read(scratch, 0, scratch.Length) > 0) { }
+                    }
+                    if (i == last) break;
+                }
+            }
+            catch (Exception ex) when (ex is EntryDataException || ForeignErrors.IsDecoderFailure(ex) || ex is NotSupportedException)
+            {
+                // The rest of this solid block cannot be read; other folders are independent.
+                string message = ex switch
+                {
+                    EntryDataException => "not read: an earlier file of its solid block is damaged",
+                    NotSupportedException => "not read: " + ex.Message,
+                    _ => $"not read: damaged data ({DisplayText.Escape(ForeignErrors.Reason(ex))})",
+                };
+                foreach (int i in wanted)
+                    if (!accepted.Contains(i)) op.Sink.Fail(Entries[i], message);
+            }
+            finally { folderStream?.Dispose(); }
+        }
+    }
+
+    protected override IReadOnlyList<ArchiveDetail> Describe()
+    {
+        var files = Entries.Where(e => e.HasData).ToList();
+        var byFolder = FilesByFolder();
+        var d = new List<ArchiveDetail>
+        {
+            new("Format", FormatName),
+            new("Files", Count(files.Count)),
+            new("Folders", Count(Entries.Count(e => e.Type == EntryType.Directory))),
+        };
+        if (TotalSize is { } total) d.Add(new("Original size", Bytes(total)));
+        d.Add(new("Archive size", Bytes(FileLength)));
+        bool solid = byFolder.Values.Any(l => l.Count > 1);
+        d.Add(new("Solid", solid ? $"yes ({Count(_db.Folders.Count)} block{(_db.Folders.Count == 1 ? "" : "s")})" : "no"));
+        var methods = _db.Folders.Select(SevenZipDecoder.Methods).Distinct().ToList();
+        if (methods.Count > 0) d.Add(new("Methods", string.Join("; ", methods)));
+        d.Add(new("Encrypted", _encryptedHeaders ? "yes (AES-256, file names too)" : _db.Folders.Any(f => f.IsEncrypted) ? "yes (AES-256)" : "no"));
+        int unchecked_ = _db.Files.Count(f => f.HasStream && f.Crc is null);
+        if (unchecked_ > 0) d.Add(new("Without a checksum", $"{Count(unchecked_)} file(s)"));
+        int links = Entries.Count(e => e.Type == EntryType.SymbolicLink);
+        if (links > 0) d.Add(new("Links", $"{Count(links)} (not extracted)"));
+        return d;
+    }
+
+    public override void Dispose() => _handle.Dispose();
+
+    private sealed class NonClosing(Stream inner) : ReadOnlyStream
+    {
+        public override int Read(Span<byte> buffer) => inner.Read(buffer);
+    }
+}

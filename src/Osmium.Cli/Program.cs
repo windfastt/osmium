@@ -10,7 +10,10 @@ return await Cli.RunAsync(args);
 
 namespace Osmium.Cli
 {
-    /// <summary>Minimal argument parser: positional args + "--name value" / "--flag" options.</summary>
+    /// <summary>Minimal argument parser: positional args + "--name value" / "--name=value" / "--flag" options. An option
+    /// that takes a value never takes the next option as it ("--password --encrypt" has no password): a value that
+    /// starts with "--" is given as "--name=--value". After "--" every argument is positional (a file named "-x").
+    /// Anything else that starts with '-' ("-psecret") is kept as a stray option, which the command refuses.</summary>
     internal sealed class Args
     {
         public List<string> Positional { get; } = [];
@@ -19,7 +22,10 @@ namespace Osmium.Cli
         {
             "overwrite", "skip", "rename", "no-verify", "explain", "experimental", "verbose", "v", "json", "force",
             "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery", "ship-symmetric",
+            "encrypt", "help", "h",
         };
+        private readonly HashSet<string> _withoutValue = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> _stray = [];
 
         public Args(IEnumerable<string> argv)
         {
@@ -27,33 +33,92 @@ namespace Osmium.Cli
             for (int i = 0; i < list.Count; i++)
             {
                 var a = list[i];
-                if (a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1])))
+                if (a == "--")
+                {
+                    Positional.AddRange(list.Skip(i + 1));
+                    break;
+                }
+                if (IsOption(a))
                 {
                     string name = a.TrimStart('-');
                     string? value = null;
                     int eq = name.IndexOf('=');
                     if (eq > 0) { value = name[(eq + 1)..]; name = name[..eq]; }
-                    else if (!Flags.Contains(name) && i + 1 < list.Count) value = list[++i];
+                    else if (!Flags.Contains(name) && i + 1 < list.Count && !IsOption(list[i + 1])) value = list[++i];
+                    else if (!Flags.Contains(name)) _withoutValue.Add(name);
                     _opts[name] = value ?? "true";
                 }
+                else if (a.Length > 1 && a[0] == '-' && !char.IsDigit(a[1])) _stray.Add(a);
                 else Positional.Add(a);
             }
         }
 
-        public bool Has(string n) => _opts.ContainsKey(n);
-        public string? Get(string n) => _opts.GetValueOrDefault(n);
-        public string Get(string n, string d) => _opts.GetValueOrDefault(n) ?? d;
+        /// <summary>The names of the options given, as typed (without their dashes).</summary>
+        public IEnumerable<string> Names => _opts.Keys;
+
+        /// <summary>How a known option is shown in a message: "-q", "--profile".</summary>
+        public static string Shown(string name) => name.Length == 1 ? "-" + name : "--" + name;
+
+        /// <summary>The first option that <paramref name="known"/> does not hold, as it is shown: only its dashes and its
+        /// first two characters ("--pa…", "-p…"), since what was typed may hold a password ("-psecret",
+        /// "--password:secret"); null when every option is known.</summary>
+        public string? Unknown(IReadOnlySet<string> known)
+        {
+            if (_stray.Count > 0) return _stray[0][..2] + "…";
+            if (Names.FirstOrDefault(n => !known.Contains(n)) is not { } name) return null;
+            string dashes = name.Length == 1 ? "-" : "--";
+            return name.Length <= 2 ? dashes + name : dashes + name[..2] + "…";
+        }
+
+        /// <summary>The first option, by name, that <paramref name="known"/> does not hold, or null.</summary>
+        public string? FirstOutside(IReadOnlySet<string> known) => Names.FirstOrDefault(n => !known.Contains(n));
+
+        private static bool IsOption(string a) => a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1]));
+
+        /// <summary>The options the running command declares (its row of <see cref="Cli.CommandOptions"/>); null before
+        /// the command starts.</summary>
+        internal IReadOnlySet<string>? Declared { get; set; }
+
+        /// <summary>For tests: called with each option the running command's code reads but does not declare, so a test
+        /// run of every command keeps the option tables what the code reads (an option read but not declared would be
+        /// refused before the code could read it).</summary>
+        internal static Action<string>? UndeclaredRead { get; set; }
+
+        private string Read(string n)
+        {
+            if (Declared is { } declared && !declared.Contains(n)) UndeclaredRead?.Invoke(n);
+            return n;
+        }
+
+        public bool Has(string n) => _opts.ContainsKey(Read(n));
+        /// <summary>An option that takes a value has none: nothing, or another option, follows it.</summary>
+        public bool MissingValue(string n) => _withoutValue.Contains(Read(n));
+        /// <summary>The first option that takes a value but was given none.</summary>
+        public string? FirstMissingValue => _withoutValue.FirstOrDefault();
+        /// <summary>The password of this run, once read (standard input can be read only once).</summary>
+        internal string? CachedPassword { get; set; }
+        internal bool PasswordRead { get; set; }
+        public string? Get(string n) => _opts.GetValueOrDefault(Read(n));
+        public string Get(string n, string d) => _opts.GetValueOrDefault(Read(n)) ?? d;
         public long Size(string n, long d) => Has(n) ? ParamValues.ParseNumber(Get(n)!) : d;
         public int Int(string n, int d) => Has(n) ? int.Parse(Get(n)!, CultureInfo.InvariantCulture) : d;
     }
 
-    internal static class Cli
+    internal static partial class Cli
     {
         public static async Task<int> RunAsync(string[] argv)
         {
             if (argv.Length == 0 || argv[0] is "-h" or "--help" or "help") { Usage(); return 0; }
             var cmd = argv[0].ToLowerInvariant();
             var a = new Args(argv.Skip(1));
+            if (a.Has("help") || a.Has("h")) { Usage(); return 0; }
+            if (CommandOptions.TryGetValue(cmd, out var known) && a.Unknown(known) is { } unknown)
+                return Fail($"Unknown option '{unknown}' for osmium {cmd}. Run 'osmium help' for the options.");
+            if (a.FirstMissingValue is { } missing)
+                return Fail(missing.Equals("password", StringComparison.OrdinalIgnoreCase)
+                    ? PasswordNeedsAValue
+                    : $"--{missing} needs a value: --{missing} <value>, or --{missing}=<value> for a value that starts with --.");
+            a.Declared = known;
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); Console.Error.WriteLine("\nCancelling…"); };
             try
@@ -61,11 +126,11 @@ namespace Osmium.Cli
                 return cmd switch
                 {
                     "a" or "add" or "compress" => await Compress(a, cts.Token),
-                    "x" or "extract" => Extract(a, cts.Token),
-                    "l" or "list" => List(a),
-                    "t" or "test" => Test(a, cts.Token),
+                    "x" or "extract" => Foreign(a) ? ExtractForeign(a, a.Positional[0], cts.Token) : Extract(a, cts.Token),
+                    "l" or "list" => Foreign(a) ? ListForeign(a, a.Positional[0], cts.Token) : List(a),
+                    "t" or "test" => Foreign(a) ? TestForeign(a, a.Positional[0], cts.Token) : Test(a, cts.Token),
                     "salvage" => SalvageCmd(a, cts.Token),
-                    "i" or "info" => Info(a),
+                    "i" or "info" => Foreign(a) ? InfoForeign(a, a.Positional[0], cts.Token) : Info(a),
                     "explain" => Explain(a),
                     "analyze" => Analyze(a),
                     "lab" or "bench" => await Lab(a, cts.Token),
@@ -83,6 +148,8 @@ namespace Osmium.Cli
             catch (OperationCanceledException) { Console.Error.WriteLine("Cancelled."); return 130; }
             catch (PasswordRequiredException e) { return Fail(e.Message + " Use --password or --password-stdin."); }
             catch (WrongPasswordException e) { return Fail(e.Message); }
+            catch (Osmium.Core.Archives.ExpansionLimitException e) { return Fail(e.Message + " Use --force to extract it anyway."); }
+            catch (NotSupportedException e) { return Fail(e); }
             catch (AggregateException e) when (e.Flatten().InnerExceptions.All(i => i is IOException or InvalidDataException or ArgumentException or FormatException or InvalidOperationException or UnauthorizedAccessException))
             {
                 return Fail(e.Flatten().InnerExceptions[0]);
@@ -94,6 +161,47 @@ namespace Osmium.Cli
         }
 
         private static int Fail(string msg) { Console.Error.WriteLine("error: " + msg); return 1; }
+
+        private static HashSet<string> Options(params string[] names) => new(names, StringComparer.OrdinalIgnoreCase);
+
+        private static readonly string[] PasswordOptions = ["password", "password-stdin"];
+        private static readonly string[] PlanOptionNames = ["rules", "dedup", "dedup-chunks", "threads", "mem", "block", "decode-speed", "experimental", "pipeline"];
+
+        /// <summary>The options each command reads; any other is refused, so a mistyped one ("--pasword", "-p") is
+        /// never silently ignored.</summary>
+        internal static readonly Dictionary<string, HashSet<string>> CommandOptions = Aliases(new()
+        {
+            [["a", "add", "compress"]] = Options([.. PasswordOptions, .. PlanOptionNames, "profile", "exclude", "encrypt", "kdf-iterations",
+                "workers", "cluster-key", "allow-remote-encrypted", "ship-symmetric", "no-verify", "overwrite", "explain", "no-plan-log",
+                "quiet", "q", "spare-copies"]),
+            [["x", "extract"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
+            [["l", "list"]] = Options([.. PasswordOptions, "force", "v", "verbose"]),
+            [["t", "test"]] = Options([.. PasswordOptions, "include", "force", "quiet", "q"]),
+            [["salvage"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
+            [["i", "info"]] = Options([.. PasswordOptions, "force"]),
+            [["explain"]] = Options(PasswordOptions),
+            [["analyze"]] = Options(),
+            [["lab", "bench"]] = Options("profile", "sample", "candidates"),
+            [["tune"]] = Options([.. PlanOptionNames, "profile", "export-rule"]),
+            [["methods"]] = Options(),
+            [["profiles"]] = Options(),
+            [["rules"]] = Options(),
+            [["worker"]] = Options("key", "port", "slots", "mem", "name", "no-discovery"),
+            [["keygen"]] = Options(),
+            [["version", "--version"]] = Options(),
+            [["license", "licence", "--license"]] = Options(),
+        });
+
+        private static Dictionary<string, HashSet<string>> Aliases(Dictionary<string[], HashSet<string>> byNames)
+        {
+            var map = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (var (names, options) in byNames)
+                foreach (var n in names) map[n] = options;
+            return map;
+        }
+
+        /// <summary>The archive named first is in a format other than .osa (the .osa code path is unchanged).</summary>
+        private static bool Foreign(Args a) => a.Positional.Count > 0 && ForeignKind(a.Positional[0]) is not null;
 
         private static int Fail(Exception e) =>
             Fail(Environment.GetEnvironmentVariable("OSMIUM_DEBUG") == "1" ? e.ToString() : e.Message);
@@ -109,14 +217,17 @@ namespace Osmium.Cli
                   --rules rules.json   per-file rules / patches      --exclude "*.tmp,build/**"
                   --dedup off|files|chunks   --block 256M   --threads N   --mem 8G
                   --decode-speed 0|1|2  (penalise slow-to-decode codecs)   --experimental
-                  --password <pw> | --password-stdin   --kdf-iterations N
+                  --password-stdin | --password <pw>   --encrypt (ask for the password)   --kdf-iterations N
                   --workers host:port,…  --cluster-key OSM1-…   (distribute work)
                   --no-verify   --overwrite   --explain   --no-plan-log
-              x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob)
-              l <archive> [-v]       List contents        t <archive>    Test (full decode + hashes)
+                  --spare-copies auto|always|never   a spare copy of the file list and header at the end (default auto:
+                                 for archives of 1 MiB and more whose file list is small next to their data)
+              a <archive.zip> <files/dirs…>   Write a ZIP file (not encrypted)   --exclude "…"   --no-verify   --overwrite
+              x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob, --force)
+              l <archive> [-v]       List contents        t <archive>    Test (full decode + checksums)
               info <archive>         Archive details      explain <archive>  Show planner decisions
               salvage <archive> <dest>   Recover every file that verifies from a damaged archive; list what was lost
-                  --password <pw> | --password-stdin   --overwrite | --skip | --rename   --force
+                  --password-stdin | --password <pw>   --overwrite | --skip | --rename   --force
               analyze <files…>       Detect type / class / statistics
               lab <file> [--profile p] [--sample 4M] [--candidates "spec;spec"]   Benchmark candidates
               tune <file> [--profile insane] [--export-rule rules.json]   Search the best pipeline for a file
@@ -126,6 +237,16 @@ namespace Osmium.Cli
               keygen                 Create a cluster pairing key
               license                Show the license and third-party notices
               version                Show the version
+
+            x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
+            .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files (extracted next to themselves), recognised
+            by their content. Passwords: --password-stdin | --password <pw> (--password=<pw> when it starts with --).
+            Options a command does not know are refused; "--" ends the options, for a file whose name starts with '-'.
+            --force extracts an archive that expands to more than 1,000 times its size; names that would leave the
+            destination, links and devices are never extracted.
+
+            Exit codes: 0 done; 1 error; 2 files damaged, failed or left out; 3 (t) every file verified, with
+            warnings (such as a damaged spare copy of the file list); 130 cancelled.
 
             Osmium is free software under the MIT License and comes with no warranty.
             Keep backups, and test archives (osmium t) before deleting originals.
@@ -153,10 +274,56 @@ namespace Osmium.Cli
 
         // ------------------------------------------------------------ compress
 
-        private static string? Password(Args a)
+        /// <summary>Standard input as bytes, for tests (the console's own stream otherwise).</summary>
+        internal static Func<Stream>? StandardInputOverride { get; set; }
+
+        /// <summary>
+        /// The password given with --password-stdin or --password, read once per run; null when neither was given.
+        /// A --password without a value and an empty password are refused (an empty password would write an archive
+        /// without encryption). Standard input is read as UTF-8, one line, with one trailing CR/LF and a leading byte
+        /// order mark removed.
+        /// </summary>
+        private const string PasswordNeedsAValue =
+            "--password needs a value: --password-stdin reads it from standard input, or give --password <password> (--password=<password> for one that starts with --).";
+
+        internal static string? Password(Args a)
         {
-            if (a.Has("password-stdin")) return Console.In.ReadLine();
-            return a.Get("password");
+            if (a.PasswordRead) return a.CachedPassword;
+            string? pw;
+            if (a.Has("password-stdin") && a.Has("password"))
+                throw new ArgumentException("Give the password once: with --password-stdin or with --password, not both.");
+            if (a.Has("password-stdin")) pw = ReadPasswordLine();
+            else if (a.Has("password"))
+            {
+                if (a.MissingValue("password")) throw new ArgumentException(PasswordNeedsAValue);
+                pw = a.Get("password");
+                Console.Error.WriteLine("warning: a password given with --password can be seen by other programs on this computer; --password-stdin keeps it private.");
+            }
+            else return null;
+            if (string.IsNullOrEmpty(pw)) throw new ArgumentException("An empty password cannot protect an archive.");
+            a.CachedPassword = pw;
+            a.PasswordRead = true;
+            return pw;
+        }
+
+        /// <summary>One line of standard input as UTF-8 (not the console's code page), without its CR/LF and without a
+        /// leading byte order mark.</summary>
+        private static string ReadPasswordLine()
+        {
+            var stdin = StandardInputOverride?.Invoke() ?? Console.OpenStandardInput();
+            var bytes = new List<byte>();
+            while (true)
+            {
+                int b = stdin.ReadByte();
+                if (b < 0 || b == '\n') break;
+                bytes.Add((byte)b);
+                if (bytes.Count > 1 << 16) throw new ArgumentException("The password on standard input is too long.");
+            }
+            if (bytes.Count > 0 && bytes[^1] == '\r') bytes.RemoveAt(bytes.Count - 1);
+            // A byte order mark (a password file saved as "UTF-8 with BOM") marks the file, not the password.
+            if (bytes.Count >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) bytes.RemoveRange(0, 3);
+            try { return new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes.ToArray()); }
+            catch (System.Text.DecoderFallbackException) { throw new ArgumentException("The password on standard input is not UTF-8 text."); }
         }
 
         internal static PlanOptions PlanOptionsFrom(Args a, Profile profile, Action<string> log, Action<string, double>? progress = null)
@@ -188,7 +355,28 @@ namespace Osmium.Cli
         {
             if (a.Positional.Count < 2) return Fail("usage: osmium a <archive.osa> <inputs…>");
             string output = a.Positional[0];
+            switch (ArchiveTypeOf(output, out var refusal))
+            {
+                case "zip": return await CompressZip(a, output, ct);
+                case "refused": return Fail(refusal!);
+            }
             if (!output.EndsWith(Osa.Extension, StringComparison.OrdinalIgnoreCase)) output += Osa.Extension;
+            var spareCopies = a.Get("spare-copies")?.ToLowerInvariant() switch
+            {
+                null or "auto" => SpareCopyPolicy.Auto,
+                "always" => SpareCopyPolicy.Always,
+                "never" => SpareCopyPolicy.Never,
+                var v => throw new ArgumentException($"--spare-copies must be auto, always or never (got {v})."),
+            };
+            // The password first: a refused one must stop the run before anything is planned or written.
+            string? password = Password(a);
+            if (password is null && a.Has("encrypt"))
+            {
+                if (Console.IsInputRedirected) return Fail("--encrypt needs a password: give it with --password-stdin.");
+                password = PromptPassword("Password: ");
+                if (string.IsNullOrEmpty(password)) return Fail("An empty password cannot protect an archive.");
+                if (PromptPassword("Repeat the password: ") != password) return Fail("The passwords do not match; nothing was written.");
+            }
             var profile = Profile.ByName(a.Get("profile", "balanced"));
             if (profile.Experimental && !a.Has("experimental"))
                 Console.Error.WriteLine($"note: profile '{profile.Name}' is experimental.");
@@ -217,13 +405,14 @@ namespace Osmium.Cli
             var result = await ArchiveBuilder.BuildAsync(plan, new BuildOptions
             {
                 OutputPath = output,
-                Password = Password(a),
+                Password = password,
                 KdfIterations = a.Int("kdf-iterations", ArchiveKey.DefaultIterations),
                 VerifyBlocks = !a.Has("no-verify"),
                 Overwrite = a.Has("overwrite"),
                 Threads = po.Threads + (cluster?.ExtraSlots ?? 0),
                 MemoryBudget = po.MemoryBudget,
                 StorePlanLog = !a.Has("no-plan-log"),
+                SpareCopies = spareCopies,
                 Compressor = cluster?.Compressor ?? LocalBlockCompressor.Instance,
                 Progress = p => progress.Update($"{p.Phase} {Fmt.Pct(p.BytesIn, p.BytesInTotal)}  {Fmt.Bytes(p.BytesIn)} → {Fmt.Bytes(p.BytesOut)}  [{p.BlocksDone}/{p.BlocksTotal}] {p.Detail}"),
             }, ct);
@@ -240,12 +429,19 @@ namespace Osmium.Cli
 
         // ------------------------------------------------------------ extract / test / list
 
-        private static OsaReader Open(Args a, string path) => OsaReader.Open(path, () => Password(a) ?? PromptPassword());
+        private static OsaReader Open(Args a, string path)
+        {
+            var r = OsaReader.Open(path, () => Password(a) ?? PromptPassword());
+            foreach (var w in r.Warnings) Console.Error.WriteLine("warning: " + w);
+            return r;
+        }
 
-        private static string? PromptPassword()
+        private static string? PromptPassword() => PromptPassword("Password: ");
+
+        private static string? PromptPassword(string label)
         {
             if (Console.IsInputRedirected) return null;
-            Console.Error.Write("Password: ");
+            Console.Error.Write(label);
             var sb = new System.Text.StringBuilder();
             // Read Ctrl+C as a key so it can end the prompt (otherwise ReadKey keeps waiting after the cancel handler).
             bool treatCtrlC = Console.TreatControlCAsInput;
@@ -275,7 +471,9 @@ namespace Osmium.Cli
         {
             if (a.Positional.Count < 1) return Fail("usage: osmium x <archive> [destination]");
             using var r = Open(a, a.Positional[0]);
-            string dest = a.Positional.Count > 1 ? a.Positional[1] : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a.Positional[0]))!, Path.GetFileNameWithoutExtension(a.Positional[0]));
+            // The default folder is named as for every other format: "...osa" gives "...osa files", never "..".
+            string dest = a.Positional.Count > 1 ? a.Positional[1]
+                : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a.Positional[0]))!, Osmium.Core.Archives.ArchiveSources.StemOf(a.Positional[0]));
             var mode = a.Has("overwrite") ? OverwriteMode.Overwrite : a.Has("skip") ? OverwriteMode.Skip : OverwriteMode.Rename;
             if (r.ExpansionFactor > 200 && !a.Has("force"))
                 return Fail($"archive expands {r.ExpansionFactor:F0}× (heavy dedup or a decompression bomb); re-run with --force to continue.");
@@ -321,10 +519,22 @@ namespace Osmium.Cli
             var res = Extractor.Test(r, new Progress<ExtractProgress>(p => progress.Update($"Testing {Fmt.Pct(p.BytesDone, p.BytesTotal)}")), ct);
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
-            Console.WriteLine(res.FilesFailed == 0 && res.Errors.Count == 0
-                ? $"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified."
-                : $"FAILED — {FailureSummary(res)}.");
-            return res.FilesFailed == 0 && res.Errors.Count == 0 ? 0 : 2;
+            foreach (var w in res.Warnings) Console.Error.WriteLine("warning: " + w);
+            bool ok = res.FilesFailed == 0 && res.Errors.Count == 0;
+            if (!ok)
+            {
+                Console.WriteLine($"FAILED — {FailureSummary(res)}.");
+                return 2;
+            }
+            if (res.Warnings.Count > 0)
+            {
+                // Every file verified, but something else is not as it should be (a damaged spare copy of the file
+                // list, a header that had to be read from its copy): not a plain OK.
+                Console.WriteLine($"OK with {res.Warnings.Count} warning(s) — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified; see the warnings above.");
+                return 3;
+            }
+            Console.WriteLine($"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified.");
+            return 0;
         }
 
         private static int SalvageCmd(Args a, CancellationToken ct)
@@ -364,7 +574,8 @@ namespace Osmium.Cli
             if (a.Positional.Count < 1) return Fail("usage: osmium info <archive>");
             using var r = Open(a, a.Positional[0]);
             Console.WriteLine($"Archive:      {r.Path}");
-            Console.WriteLine($"Format:       .osa {Osa.Major}.{Osa.Minor}   created by {r.Header.Creator}");
+            Console.WriteLine($"Format:       .osa {Osa.Major}.{r.Header.Minor}   created by {r.Header.Creator}");
+            Console.WriteLine($"Spare copy:   {SpareCopyText(r.SpareCopyStatus)}");
             Console.WriteLine($"Encrypted:    {(r.Header.Encrypted ? $"yes (AES-256-GCM, PBKDF2-SHA512 ×{r.Header.Encryption!.Iterations:N0})" : "no")}");
             Console.WriteLine($"Experimental: {(r.Header.Experimental ? "yes" : "no")}");
             Console.WriteLine($"Profile:      {r.Index.MetaString("profile") ?? "?"}");
@@ -379,6 +590,14 @@ namespace Osmium.Cli
                 Console.WriteLine($"Note: {newer.Message} Blocks marked \"needs a newer Osmium\" cannot be extracted by this version; the others can.");
             return 0;
         }
+
+        private static string SpareCopyText(SpareCopyStatus status) => status switch
+        {
+            SpareCopyStatus.Present => "yes, of the file list and header",
+            SpareCopyStatus.Damaged => "damaged (run osmium t for details)",
+            SpareCopyStatus.Newer => "in a form of a newer version of Osmium, not used",
+            _ => "none",
+        };
 
         private static int Explain(Args a)
         {

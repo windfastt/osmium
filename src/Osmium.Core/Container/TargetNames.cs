@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Osmium.Core.Container;
 
@@ -35,12 +36,16 @@ internal sealed class TargetNames
     private readonly Dictionary<string, Dictionary<string, bool>?> _listings;
     private readonly Dictionary<string, int> _nextFree;
     private readonly Dictionary<string, string?> _links;
+    private readonly string? _protected;
 
     /// <param name="root">The destination's full path.</param>
     /// <param name="own">Every entry's own resolved full path (files and folders).</param>
     /// <param name="writtenEarlier">Paths an earlier pass of the same operation wrote: taken, never replaced or skipped.</param>
-    public TargetNames(string root, StringComparer names, IEnumerable<string> own, IEnumerable<string>? writtenEarlier)
+    /// <param name="protectedFile">The <see cref="FileIdentity(string)"/> of the archive being read: a file in the
+    /// destination that is the archive, under whatever path, gets a free name in every mode and is never replaced.</param>
+    public TargetNames(string root, StringComparer names, IEnumerable<string> own, IEnumerable<string>? writtenEarlier, string? protectedFile = null)
     {
+        _protected = protectedFile;
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         _names = names;
         _reserved = new HashSet<string>(names);
@@ -74,7 +79,8 @@ internal sealed class TargetNames
     {
         string path = own;
         // Folders above it, outermost first: one that a file of this run took moves to a free name, with everything
-        // below it; one that exists already must not be a link.
+        // below it, and so does one where a file is already in the destination (in Skip mode the folder is skipped,
+        // in Fail mode it fails: a file is never replaced by a folder); one that exists already must not be a link.
         var parts = Path.GetRelativePath(_root, own).Split(Path.DirectorySeparatorChar);
         string current = _root;
         for (int i = 0; i < parts.Length - 1; i++)
@@ -82,6 +88,11 @@ internal sealed class TargetNames
             string next = Path.Combine(current, parts[i]);
             if (_dirRenames.TryGetValue(next, out var moved)) next = moved;
             else if (_files.Contains(next)) next = _dirRenames[next] = FreeName(next, folder: true);
+            else if (!_dirs.Contains(next) && OnDisk(next) == OnDiskKind.File)
+            {
+                if (FileInTheWay(mode) is { } refused) return refused;
+                next = _dirRenames[next] = FreeName(next, folder: true);
+            }
             _dirs.Add(next);
             if (LinkAt(next) is { } why) return new(Outcome.Unsafe, null, false, false, why);
             current = next;
@@ -92,6 +103,11 @@ internal sealed class TargetNames
         {
             if (_dirRenames.TryGetValue(path, out var moved)) path = moved;
             else if (_files.Contains(path)) path = _dirRenames[path] = FreeName(path, folder: true);
+            else if (!_dirs.Contains(path) && OnDisk(path) == OnDiskKind.File)
+            {
+                if (FileInTheWay(mode) is { } refused) return refused;
+                path = _dirRenames[path] = FreeName(path, folder: true);
+            }
             if (LinkAt(path) is { } why) return new(Outcome.Unsafe, null, false, false, why);
             _dirs.Add(path);
             return new(Outcome.Planned, path, false, !_names.Equals(path, own), null);
@@ -103,16 +119,18 @@ internal sealed class TargetNames
         else
         {
             var kind = OnDisk(path);
-            if (kind != OnDiskKind.None)
+            if (kind == OnDiskKind.File && _protected is not null && FileIdentity(path) == _protected)
+                path = FreeName(path, folder: false); // the archive being read, reached by another spelling of its path
+            else if (kind != OnDiskKind.None)
             {
                 switch (mode)
                 {
                     case OverwriteMode.Skip: return new(Outcome.Skipped, null, false, false, null);
                     case OverwriteMode.Fail: return new(Outcome.Failed, null, false, false, kind == OnDiskKind.Directory ? "A folder of this name exists." : "File exists.");
                     case OverwriteMode.Overwrite when kind == OnDiskKind.File && !otherSpelling: replaces = true; break;
-                    case OverwriteMode.Overwrite when kind == OnDiskKind.Directory:
-                        return new(Outcome.Failed, null, false, false, "A folder of this name is in the destination; it is not replaced by a file.");
-                    default: path = FreeName(path, folder: false); break; // Rename, or a name known only by another spelling
+                    // Overwrite never replaces a folder by a file (that would delete what the folder holds): the file
+                    // gets a free name, as in Rename or for a name known only by another spelling.
+                    default: path = FreeName(path, folder: false); break;
                 }
             }
         }
@@ -120,12 +138,30 @@ internal sealed class TargetNames
         return new(Outcome.Planned, path, replaces, !_names.Equals(path, own), null);
     }
 
+    /// <summary>What becomes of a folder of the archive where a file is already in the destination: skipped in Skip
+    /// mode, failed in Fail mode; null when it gets a free name instead (Rename, Overwrite).</summary>
+    private static Target? FileInTheWay(OverwriteMode mode) => mode switch
+    {
+        OverwriteMode.Skip => new(Outcome.Skipped, null, false, false, null),
+        OverwriteMode.Fail => new(Outcome.Failed, null, false, false, "A file of this name is in the destination where the archive has a folder."),
+        _ => null,
+    };
+
     /// <summary>"name (2).ext", "name (3).ext"… (folders: "name (2)"): the first that nothing has. The search for one
-    /// name resumes where it stopped, so many entries of one name cost one pass.</summary>
+    /// name resumes where it stopped, so many entries of one name cost one pass. A name so long that the number would
+    /// take it past 255 characters has its stem cut short (whole characters, the extension kept); names that are the
+    /// same once cut share one search.</summary>
     private string FreeName(string path, bool folder)
     {
         string dir = Path.GetDirectoryName(path)!, file = Path.GetFileName(path);
         string stem = folder ? file : Path.GetFileNameWithoutExtension(file), ext = folder ? "" : Path.GetExtension(file);
+        if (stem.Length + ext.Length + MaxNumber.Length > MaxName)
+        {
+            if (ext.Length + MaxNumber.Length >= MaxName) (stem, ext) = (file, ""); // an extension that long is no extension
+            int keep = MaxName - ext.Length - MaxNumber.Length;
+            if (char.IsHighSurrogate(stem[keep - 1])) keep--;
+            stem = stem[..keep];
+        }
         string key = Path.Combine(dir, stem) + "\0" + ext;
         for (int i = _nextFree.GetValueOrDefault(key, 2); ; i++)
         {
@@ -212,6 +248,64 @@ internal sealed class TargetNames
             return "a folder in the destination could not be checked for links";
         }
     }
+
+    /// <summary>
+    /// What identifies a file whatever path reaches it (a link or junction on the way, a mapped drive, a short name, a
+    /// hard link): the volume and file id on Windows, the device and inode on Linux. Null when it cannot be read, or
+    /// on other systems.
+    /// </summary>
+    internal static string? FileIdentity(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return FileIdentity(handle);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
+    /// <inheritdoc cref="FileIdentity(string)"/>
+    internal static string? FileIdentity(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var id = new byte[24]; // FILE_ID_INFO: the volume serial number and the 128-bit file id
+            if (GetFileInformationByHandleEx(handle, FileIdInfo, id, id.Length)) return "id:" + Convert.ToHexString(id);
+            return GetFileInformationByHandle(handle, out var info)
+                ? $"index:{info.VolumeSerialNumber:X8}:{info.FileIndexHigh:X8}{info.FileIndexLow:X8}" : null;
+        }
+        if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+        {
+            // struct stat begins with st_dev and st_ino, 8 bytes each, on every 64-bit Linux.
+            var stat = new byte[256];
+            try { return fstat((int)handle.DangerousGetHandle(), stat) == 0 ? "dev-ino:" + Convert.ToHexString(stat, 0, 16) : null; }
+            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return null; }
+        }
+        return null;
+    }
+
+    private const int FileIdInfo = 18;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, [Out] byte[] info, int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
+
+    [DllImport("libc.so.6", SetLastError = true)]
+    private static extern int fstat(int fd, [Out] byte[] stat);
+
+    /// <summary>The longest file name the systems take, and the widest number a free name gets (" (1000000)").</summary>
+    private const int MaxName = 255;
+    private const string MaxNumber = " (1000000)";
 
     private const uint NameSurrogateBit = 0x20000000;
 
