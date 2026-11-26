@@ -424,7 +424,7 @@ internal sealed class SalvageRun : IDisposable
         public string? PartPath;
         public int Remaining = entry.Segments.Count;
         public readonly long[] FileOffsets = Offsets(entry);
-        public bool Failed, Finished, Renamed;
+        public bool Failed, Finished, Renamed, Replaces;
         public string? Error;
 
         private static long[] Offsets(ArchiveEntry e)
@@ -454,53 +454,62 @@ internal sealed class SalvageRun : IDisposable
         };
         string Needs(IEnumerable<int> ks) => "needs " + string.Join("; ", ks.Distinct().Order().Select(k => Describe(Status(k))));
 
-        // Plan everything before writing anything, so that a refusal leaves the destination untouched. Every entry's own
-        // name is reserved first: a renamed file must not take the name of another entry (the archive may hold both
-        // report.txt and "report (2).txt"), and two entries must not share a name on a case-insensitive file system.
-        var names = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        var targets = new Dictionary<ArchiveEntry, string>();
-        foreach (var e in index.Entries.Where(e => !e.IsDirectory))
+        // Plan everything before writing anything, so that a refusal leaves the destination untouched, with the rules
+        // of extraction (FORMAT §7): every entry's own name is reserved first, so that a renamed file never takes the
+        // name of another entry (the archive may hold both report.txt and "report (2).txt") and two entries never share
+        // a name on a case-insensitive file system; nothing is written below a link that is already in the destination;
+        // only a file planned to be replaced is replaced.
+        var names = _o.NameComparer ?? TargetNames.DefaultComparer;
+        var own = new Dictionary<ArchiveEntry, string>();
+        foreach (var e in index.Entries)
         {
-            try { targets[e] = PathSafety.Resolve(_dest, e.Path); }
-            catch (CorruptDataException ex) { _lost.Enqueue(new(e.Path, ex.Message)); }
+            try { own[e] = PathSafety.Resolve(_dest, e.Path); }
+            catch (CorruptDataException ex) { _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, ex.Message)); }
         }
-        var reserved = new HashSet<string>(targets.Values, names);
-        var taken = new HashSet<string>(names);
+        var planner = new TargetNames(_dest, names, own.Values, null);
         var planned = new List<FileJob>();
-        foreach (var e in index.Entries.Where(e => !e.IsDirectory))
+        var folders = new List<(ArchiveEntry Entry, string Path)>();
+        foreach (var e in index.Entries) // index order: parents before children
         {
-            _filesTotal++;
-            if (!targets.TryGetValue(e, out var target)) continue;
-            // Damage anywhere loses the file; if its only obstacle is a newer version, a newer Osmium can recover it.
-            var blocked = e.Segments.Select(s => s.Frame).Distinct()
-                .Where(k => chosen[k] is not { State: SalvageFrameState.Verified }).ToList();
-            if (blocked.Any(k => Status(k).State != SalvageBlockState.NeedsNewerVersion)) { _lost.Enqueue(new(e.Path, Needs(blocked))); continue; }
-            if (blocked.Count > 0) { _newer.Enqueue(new(e.Path, Needs(blocked))); continue; }
-            if (taken.Contains(target))
-                target = FreeName(target, reserved, taken); // another entry of this archive has this name here: never replace it
-            else if (File.Exists(target))
+            if (!e.IsDirectory) _filesTotal++;
+            if (!own.TryGetValue(e, out var path)) continue;
+            if (!e.IsDirectory)
             {
-                if (_o.Overwrite == OverwriteMode.Skip) { _skipped++; continue; }
-                if (_o.Overwrite == OverwriteMode.Fail) { _lost.Enqueue(new(e.Path, "a file of this name is already in the destination")); continue; }
-                if (_o.Overwrite == OverwriteMode.Rename) target = FreeName(target, reserved, taken);
+                // Damage anywhere loses the file; if its only obstacle is a newer version, a newer Osmium can recover it.
+                var blocked = e.Segments.Select(s => s.Frame).Distinct()
+                    .Where(k => chosen[k] is not { State: SalvageFrameState.Verified }).ToList();
+                if (blocked.Any(k => Status(k).State != SalvageBlockState.NeedsNewerVersion)) { _lost.Enqueue(new(e.Path, Needs(blocked))); continue; }
+                if (blocked.Count > 0) { _newer.Enqueue(new(e.Path, Needs(blocked))); continue; }
             }
-            taken.Add(target);
-            planned.Add(new FileJob(e, target) { Renamed = !names.Equals(target, targets[e]) });
+            var t = planner.Plan(path, e.IsDirectory, _o.Overwrite);
+            switch (t.Outcome)
+            {
+                case TargetNames.Outcome.Skipped: _skipped++; break;
+                case TargetNames.Outcome.Unsafe: _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, t.Reason!)); break;
+                case TargetNames.Outcome.Failed:
+                    _lost.Enqueue(new(e.Path, t.Reason == "File exists." ? "a file of this name is already in the destination" : t.Reason!.TrimEnd('.')));
+                    break;
+                default:
+                    if (e.IsDirectory) folders.Add((e, t.Path!));
+                    else planned.Add(new FileJob(e, t.Path!) { Renamed = t.Renamed, Replaces = t.Replaces });
+                    break;
+            }
         }
         if (NoRoom(planned.Sum(j => j.Entry.Size))) return [];
 
-        Directory.CreateDirectory(_dest);
+        var created = new List<string>(); // folders this run created
+        Extractor.CreateFolder(_dest, created);
         _zone = _o.Zone ?? Extractor.ReadZoneIdentifier(_archive);
         var eo = new ExtractOptions { Overwrite = _o.Overwrite, RestoreTimes = _o.RestoreTimes, RestoreAttributes = _o.RestoreAttributes };
-        foreach (var e in index.Entries.Where(e => e.IsDirectory))
+        foreach (var (e, path) in folders)
         {
-            try { Directory.CreateDirectory(PathSafety.Resolve(_dest, e.Path)); }
+            try { Extractor.CreateFolder(path, created); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _lost.Enqueue(new(e.Path + "/", ex.Message)); }
         }
         var jobs = new List<FileJob>();
         foreach (var j in planned)
         {
-            try { Directory.CreateDirectory(Path.GetDirectoryName(j.Target)!); }
+            try { Extractor.CreateFolder(Path.GetDirectoryName(j.Target)!, created); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _lost.Enqueue(new(j.Entry.Path, ex.Message)); continue; }
             jobs.Add(j);
         }
@@ -518,6 +527,7 @@ internal sealed class SalvageRun : IDisposable
         var toDecode = Enumerable.Range(0, n).Where(k => chosen[k] is { State: SalvageFrameState.Verified }).ToList();
         long total = toDecode.Sum(k => index.Blocks[k].RawSize), done = 0;
         var gate = new MemoryGate(_o.MemoryBudget);
+        bool finished = false;
         try
         {
             foreach (var j in jobs.Where(j => j.Entry.Segments.Count == 0)) Complete(j);
@@ -539,12 +549,15 @@ internal sealed class SalvageRun : IDisposable
                 }
                 _scanner.Report("Recovering", Interlocked.Add(ref done, info.RawSize), total);
             });
+            finished = true;
         }
         finally
         {
             foreach (var j in jobs.Where(j => !j.Finished)) DeletePart(j); // cancelled: leave no partial files behind
+            if (!finished) Extractor.RemoveEmptyFolders(created);
         }
-        Extractor.ApplyDirectoryMetadata(index.Entries.Where(e => e.IsDirectory), _dest, eo);
+        // Times and attributes only on folders this run created, never System or ReadOnly (as extraction does).
+        Extractor.ApplyCreatedFolderMetadata(folders, created, names, eo);
         return [.. Enumerable.Range(0, n).Select(Status)];
 
         void Complete(FileJob j)
@@ -558,11 +571,7 @@ internal sealed class SalvageRun : IDisposable
             }
             try
             {
-                if (j.PartPath is null)
-                {
-                    j.PartPath = Extractor.PartName(j.Target);
-                    using (File.Create(j.PartPath)) { }
-                }
+                j.PartPath ??= Extractor.CreatePart(j.Target); // an empty file
                 if (Extractor.HashFile(j.PartPath) != j.Entry.Hash)
                 {
                     DeletePart(j);
@@ -572,7 +581,7 @@ internal sealed class SalvageRun : IDisposable
                 // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                 // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
                 MarkAsDownloaded(j.PartPath, j.Entry.Path);
-                FileRetry.Move(j.PartPath, j.Target, overwrite: _o.Overwrite == OverwriteMode.Overwrite);
+                FileRetry.Move(j.PartPath, j.Target, overwrite: j.Replaces);
                 j.PartPath = null;
                 Extractor.ApplyFileMetadata(j.Target, j.Entry, eo);
                 Interlocked.Increment(ref _recovered);
@@ -635,25 +644,14 @@ internal sealed class SalvageRun : IDisposable
         _ => $"block {b.Number}, which is damaged ({b.Problem})",
     };
 
-    /// <summary>"name (2).ext", "name (3).ext"…: the first that is not on disk, not another entry's own name and not
-    /// already chosen in this run.</summary>
-    private static string FreeName(string target, HashSet<string> reserved, HashSet<string> taken)
-    {
-        string dir = Path.GetDirectoryName(target)!, stem = Path.GetFileNameWithoutExtension(target), ext = Path.GetExtension(target);
-        for (int i = 2; ; i++)
-        {
-            var candidate = Path.Combine(dir, $"{stem} ({i}){ext}");
-            if (!File.Exists(candidate) && !Directory.Exists(candidate) && !reserved.Contains(candidate) && !taken.Contains(candidate)) return candidate;
-        }
-    }
-
     private static void WriteSegment(FileJob j, int seg, byte[] raw)
     {
         var s = j.Entry.Segments[seg];
         try
         {
-            j.PartPath ??= Extractor.PartName(j.Target);
-            using var h = File.OpenHandle(j.PartPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+            // The first segment creates the part file (never one that is there already).
+            j.PartPath ??= Extractor.CreatePart(j.Target);
+            using var h = File.OpenHandle(j.PartPath, FileMode.Open, FileAccess.Write, FileShare.None);
             RandomAccess.Write(h, raw.AsSpan((int)s.Offset, (int)s.Length), j.FileOffsets[seg]);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

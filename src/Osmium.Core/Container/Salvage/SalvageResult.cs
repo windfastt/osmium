@@ -31,6 +31,8 @@ public sealed record SalvageOptions
     internal string? Zone { get; init; }
     /// <summary>Writes the Mark-of-the-Web instead of <see cref="Extractor.WriteZoneIdentifier"/> (tests).</summary>
     internal Func<string, string, string?>? ZoneWriter { get; init; }
+    /// <summary>How names are compared when planning targets; null: as the file system does (tests).</summary>
+    internal StringComparer? NameComparer { get; init; }
 }
 
 public sealed record SalvageProgress(string Phase, long Done, long Total);

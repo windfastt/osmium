@@ -16,13 +16,13 @@ namespace Osmium.Core.Tests;
 public class ExtractSafetyTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
-    private static readonly DateTime When = new(2020, 2, 2, 2, 2, 2, DateTimeKind.Utc);
+    internal static readonly DateTime When = new(2020, 2, 2, 2, 2, 2, DateTimeKind.Utc);
 
     private static string P(TempDir t, params string[] parts) => Path.Combine([t.Path, .. parts]);
 
     /// <summary>Path in the archive → bytes (null: a folder). Files are laid end to end and cut into stored blocks of
     /// <paramref name="blockSize"/> bytes, so a file can span blocks.</summary>
-    private static string Write(string path, IEnumerable<(string Path, byte[]? Data)> items, int blockSize = 1 << 20,
+    internal static string Write(string path, IEnumerable<(string Path, byte[]? Data)> items, int blockSize = 1 << 20,
         FileAttributes? folderAttributes = null, FileAttributes? fileAttributes = null)
     {
         var list = items.ToList();
@@ -69,7 +69,7 @@ public class ExtractSafetyTests
         return path;
     }
 
-    private static byte[] Data(string text) => System.Text.Encoding.UTF8.GetBytes(text);
+    internal static byte[] Data(string text) => System.Text.Encoding.UTF8.GetBytes(text);
 
     private static ExtractResult Extract(string archive, string destination, ExtractOptions? options = null)
     {
@@ -228,7 +228,7 @@ public class ExtractSafetyTests
 
     // ------------------------------------------------------------------ links in the destination
 
-    private static bool TryLink(string link, string target)
+    internal static bool TryLink(string link, string target)
     {
         try
         {

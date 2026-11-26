@@ -431,7 +431,7 @@ public static class Extractor
 
     /// <summary>Creates the part file of <paramref name="target"/> under a new random name; never opens a file (or a
     /// link) that is already there.</summary>
-    private static string CreatePart(string target)
+    internal static string CreatePart(string target)
     {
         string part = PartName(target);
         using (new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
@@ -440,7 +440,7 @@ public static class Extractor
 
     /// <summary>Creates <paramref name="folder"/> and the folders above it that are missing, adding each one this call
     /// created to <paramref name="created"/>, outermost first.</summary>
-    private static void CreateFolder(string folder, List<string> created)
+    internal static void CreateFolder(string folder, List<string> created)
     {
         var missing = new List<string>();
         for (string? d = folder; d is not null && !Directory.Exists(d); d = Path.GetDirectoryName(d)) missing.Add(d);
@@ -450,7 +450,7 @@ public static class Extractor
     }
 
     /// <summary>Deletes the folders this run created that are empty, deepest first.</summary>
-    private static void RemoveEmptyFolders(List<string> created)
+    internal static void RemoveEmptyFolders(List<string> created)
     {
         foreach (var d in created.OrderByDescending(d => d.Length))
         {
@@ -464,7 +464,7 @@ public static class Extractor
     /// its own), deepest first, after their contents. Never System or ReadOnly: on Windows either makes Explorer act on
     /// a desktop.ini in the folder, which an archive should not be able to turn on.
     /// </summary>
-    private static void ApplyCreatedFolderMetadata(List<(ArchiveEntry Entry, string Path)> folders, List<string> created, StringComparer names, ExtractOptions o)
+    internal static void ApplyCreatedFolderMetadata(List<(ArchiveEntry Entry, string Path)> folders, List<string> created, StringComparer names, ExtractOptions o)
     {
         var ours = new HashSet<string>(created, names);
         foreach (var (e, path) in folders.Where(f => ours.Contains(f.Path)).OrderByDescending(f => f.Path.Length))
