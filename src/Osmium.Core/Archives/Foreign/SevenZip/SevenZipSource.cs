@@ -55,9 +55,11 @@ internal sealed class SevenZipSource : ForeignSource
     private void Load(CancellationToken ct)
     {
         using var file = new FileSlice(_handle, 0, FileLength, 4096);
+        // One guard for every level of packed headers, against the file's size and the limits the caller gave.
+        var guard = new LimitGuard(Options.Limits, FileLength, ct);
         try
         {
-            _db = SevenZipHeader.Read(file, Options.Limits, DecodeHeader);
+            _db = SevenZipHeader.Read(file, Options.Limits, ct, DecodeHeader);
         }
         catch (Exception e) when (_encryptedHeaders && (e is SevenZipHeader.HeaderCheckException || ForeignErrors.IsDecoderFailure(e)))
         {
@@ -65,6 +67,7 @@ internal sealed class SevenZipSource : ForeignSource
             throw SpendPassword();
         }
         catch (Exception e) when (ForeignErrors.IsDecoderFailure(e)) { throw ForeignErrors.Damaged(Name, e); }
+        catch (OutOfMemoryException) { throw SevenZipHeader.TooLarge(); } // a last resort: the limits above come first
         if (_encryptedHeaders) PasswordProven = true;
         if (DropChecksumsForTests is { } drop)
         {
@@ -78,7 +81,6 @@ internal sealed class SevenZipSource : ForeignSource
         byte[] DecodeHeader(SzDatabase packed, SzFolder folder, long size)
         {
             if (folder.IsEncrypted) _encryptedHeaders = true;
-            var guard = new LimitGuard(Options.Limits with { AllowLargeExpansion = true }, FileLength, ct);
             using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null), guard);
             var bytes = new byte[size];
             s.ReadExactly(bytes);

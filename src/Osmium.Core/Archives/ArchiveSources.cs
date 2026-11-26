@@ -43,6 +43,16 @@ public static class ArchiveSources
         ct.ThrowIfCancellationRequested();
         options ??= new ArchiveOpenOptions();
         var sniff = FormatSniffer.Sniff(path, options.Limits);
+        try { return OpenAs(sniff, path, options, ct); }
+        catch (OutOfMemoryException)
+        {
+            // A last resort only: every source checks its counts and memory before it allocates.
+            throw new EntryLimitException("Opening this archive needs more memory than Osmium accepts.");
+        }
+    }
+
+    private static IArchiveSource OpenAs(SniffResult? sniff, string path, ArchiveOpenOptions options, CancellationToken ct)
+    {
         return sniff?.Kind switch
         {
             ArchiveKind.Osa => OsaArchiveSource.Open(path, options, ct),

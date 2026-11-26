@@ -28,12 +28,15 @@ internal sealed class SzFolder
 
     public int TotalOut => Coders.Sum(c => c.NumOut);
     public int TotalIn => Coders.Sum(c => c.NumIn);
+    private int _mainOut = -1;
 
-    /// <summary>The output stream no bind pair consumes: the folder's result.</summary>
+    /// <summary>The output stream no bind pair consumes: the folder's result (worked out once).</summary>
     public int MainOut()
     {
-        for (int i = 0; i < TotalOut; i++)
-            if (!BindPairs.Any(b => b.Out == i)) return i;
+        if (_mainOut >= 0) return _mainOut;
+        int total = TotalOut;
+        for (int i = 0; i < total; i++)
+            if (!BindPairs.Exists(b => b.Out == i)) return _mainOut = i;
         throw SevenZipHeader.Corrupt("a folder without a result stream");
     }
 
@@ -64,20 +67,62 @@ internal sealed class SzDatabase
 
 /// <summary>
 /// Reads the 7z header (7-Zip's published format description, written here): the signature header, the next header
-/// and, when it is packed (and possibly encrypted), its folder decoded first. Every count is checked against the bytes
-/// that remain before anything is allocated for it, lists grow as items are read, and the decoded header has a size
-/// limit, so a small file cannot make the reader allocate much.
+/// and, when it is packed (and possibly encrypted), its folder decoded first. A small file must not make the reader
+/// allocate much or run long: every count is checked against <see cref="ImportLimits.MaxEntries"/> and against the
+/// bytes that remain before anything is allocated for it, every parsed object is charged to the memory budget, a
+/// packed header may decode to at most 256 times the file's size (and never past the expansion limit), and the parse
+/// observes cancellation.
 /// </summary>
 internal static class SevenZipHeader
 {
     public const ulong AesId = 0x06F10701;
     private const int MaxCoders = 64, MaxStreams = 64;
+    // Approximate managed sizes of what the parse keeps, charged before it is created.
+    private const long FolderCost = 400, CoderCost = 120, PackStreamCost = 16, SubStreamCost = 24, FileCost = 160;
 
     internal static CorruptDataException Corrupt(string why) => new($"damaged data ({why})");
 
-    /// <summary>Reads the database. <paramref name="decodeHeader"/> decodes a packed header's folder into bytes.</summary>
-    public static SzDatabase Read(FileSlice file, ImportLimits limits, Func<SzDatabase, SzFolder, long, byte[]> decodeHeader)
+    internal static EntryLimitException TooLarge() => new("The file list of this archive is larger than Osmium accepts.");
+
+    /// <summary>The limits, the memory charged so far and the cancellation of one header read.</summary>
+    internal sealed class Parse(ImportLimits limits, CancellationToken ct)
     {
+        private long _charged;
+        private int _ticks;
+
+        public ImportLimits Limits => limits;
+
+        /// <summary>Charges what is about to be allocated; past half of the memory budget the file list is refused.</summary>
+        public void Charge(long items, long bytesEach)
+        {
+            long bytes = items > long.MaxValue / Math.Max(1, bytesEach) ? long.MaxValue : items * bytesEach;
+            _charged = LimitGuard.Add(_charged, bytes);
+            if (_charged > limits.MemoryBudgetBytes / 2) throw TooLarge();
+            ct.ThrowIfCancellationRequested();
+        }
+
+        /// <summary>A count of entries (files, folders, packed streams, substreams): at most MaxEntries.</summary>
+        public void Entries(long count)
+        {
+            if (count < 0 || count > limits.MaxEntries) throw TooLarge();
+        }
+
+        /// <summary>Called once per item of the long loops.</summary>
+        public void Tick()
+        {
+            if ((++_ticks & 0xFFF) == 0) ct.ThrowIfCancellationRequested();
+        }
+    }
+
+    /// <summary>The largest decoded header accepted: 256 times the archive's size (at least 1 MiB), and never more
+    /// than a quarter of the memory budget or 1 GiB.</summary>
+    public static long MaxHeader(ImportLimits limits, long fileLength) =>
+        Math.Min(Math.Min(1L << 30, Math.Max(16L << 20, limits.MemoryBudgetBytes / 4)), Math.Max(1L << 20, LimitGuard.Add(0, fileLength) > long.MaxValue / 256 ? long.MaxValue : fileLength * 256));
+
+    /// <summary>Reads the database. <paramref name="decodeHeader"/> decodes a packed header's folder into bytes.</summary>
+    public static SzDatabase Read(FileSlice file, ImportLimits limits, CancellationToken ct, Func<SzDatabase, SzFolder, long, byte[]> decodeHeader)
+    {
+        var parse = new Parse(limits, ct);
         if (file.Length < 32) throw Corrupt("the file is too short to be a 7z archive");
         var sig = new byte[32];
         file.ReadAt(0, sig);
@@ -88,8 +133,8 @@ internal static class SevenZipHeader
         uint nextCrc = BinaryPrimitives.ReadUInt32LittleEndian(sig.AsSpan(28));
         if (nextSize == 0) return new SzDatabase(); // an empty archive
         if (nextOffset > file.Length - 32 || nextSize > file.Length - 32 - nextOffset) throw Corrupt("the archive is truncated (its header is missing)");
-        long cap = MaxHeader(limits);
-        if (nextSize > cap) throw new EntryLimitException("The file list of this archive is larger than Osmium accepts.");
+        long cap = MaxHeader(limits, file.Length);
+        if (nextSize > cap) throw TooLarge();
         var header = new byte[nextSize];
         file.ReadAt(32 + nextOffset, header);
         if (System.IO.Hashing.Crc32.HashToUInt32(header) != nextCrc) throw Corrupt("damaged header");
@@ -98,15 +143,16 @@ internal static class SevenZipHeader
         {
             var r = new Reader(header);
             ulong id = r.Number();
-            if (id == 0x01) return ReadHeader(r, limits);
+            if (id == 0x01) return ReadHeader(r, parse);
             if (id != 0x17 || level >= 4) throw Corrupt("damaged header");
             // A packed header: its streams info, then decode its folder.
             var packed = new SzDatabase();
-            ReadStreamsInfo(r, packed, limits);
+            ReadStreamsInfo(r, packed, parse);
             if (packed.Folders.Count == 0) throw Corrupt("damaged header");
             var folder = packed.Folders[0];
             long size = folder.UnpackSize;
-            if (size < 0 || size > cap) throw new EntryLimitException("The file list of this archive is larger than Osmium accepts.");
+            if (size < 0 || size > cap) throw TooLarge();
+            parse.Charge(size, 1);
             header = decodeHeader(packed, folder, size);
             if (header.Length != size) throw Corrupt("damaged header");
             if (folder.UnpackCrc is { } crc && System.IO.Hashing.Crc32.HashToUInt32(header) != crc) throw new HeaderCheckException();
@@ -116,9 +162,7 @@ internal static class SevenZipHeader
     /// <summary>The decoded header's CRC does not match: damage, or (with encrypted headers) a wrong password.</summary>
     internal sealed class HeaderCheckException() : CorruptDataException("damaged data (the header's CRC does not match)");
 
-    public static long MaxHeader(ImportLimits limits) => Math.Min(1L << 30, Math.Max(16L << 20, limits.MemoryBudgetBytes / 4));
-
-    private static SzDatabase ReadHeader(Reader r, ImportLimits limits)
+    private static SzDatabase ReadHeader(Reader r, Parse limits)
     {
         var db = new SzDatabase();
         ulong id = r.Number();
@@ -141,7 +185,7 @@ internal static class SevenZipHeader
         }
     }
 
-    private static void ReadStreamsInfo(Reader r, SzDatabase db, ImportLimits limits)
+    private static void ReadStreamsInfo(Reader r, SzDatabase db, Parse limits)
     {
         bool subStreams = false;
         while (true)
@@ -153,9 +197,9 @@ internal static class SevenZipHeader
                     if (!subStreams)
                         foreach (var f in db.Folders) DefaultSubStreams(f);
                     return;
-                case 0x06: ReadPackInfo(r, db); break;
-                case 0x07: ReadUnpackInfo(r, db); break;
-                case 0x08: ReadSubStreams(r, db); subStreams = true; break;
+                case 0x06: ReadPackInfo(r, db, limits); break;
+                case 0x07: ReadUnpackInfo(r, db, limits); break;
+                case 0x08: ReadSubStreams(r, db, limits); subStreams = true; break;
                 default: throw Corrupt("damaged header");
             }
         }
@@ -168,30 +212,37 @@ internal static class SevenZipHeader
         f.SubCrcs = [f.UnpackCrc];
     }
 
-    private static void ReadPackInfo(Reader r, SzDatabase db)
+    private static void ReadPackInfo(Reader r, SzDatabase db, Parse p)
     {
         db.PackPos = r.Long();
         int n = r.Count("packed stream");
+        p.Entries(n);
+        p.Charge(n, PackStreamCost);
         while (true)
         {
             ulong id = r.Number();
             if (id == 0x00) break;
-            if (id == 0x09) for (int i = 0; i < n; i++) db.PackSizes.Add(r.Long());
-            else if (id == 0x0A) ReadDigests(r, n);
+            if (id == 0x09) for (int i = 0; i < n; i++) { p.Tick(); db.PackSizes.Add(r.Long()); }
+            else if (id == 0x0A) ReadDigests(r, n, p);
             else throw Corrupt("damaged header");
         }
         if (db.PackSizes.Count != n) throw Corrupt("damaged header");
     }
 
-    private static void ReadUnpackInfo(Reader r, SzDatabase db)
+    private static void ReadUnpackInfo(Reader r, SzDatabase db, Parse p)
     {
         if (r.Number() != 0x0B) throw Corrupt("damaged header");
         int n = r.Count("folder");
+        // A folder takes at least two bytes (its coder count and one coder), and holds at least one file.
+        if (n > r.Remaining / 2) throw Corrupt("damaged header (folder count)");
+        p.Entries(n);
+        p.Charge(n, FolderCost);
         if (r.Byte() != 0) throw new NotSupportedException("This 7z archive keeps its folder list elsewhere, which Osmium cannot read.");
         int pack = 0;
         for (int i = 0; i < n; i++)
         {
-            var f = ReadFolder(r);
+            p.Tick();
+            var f = ReadFolder(r, p);
             f.FirstPackStream = pack;
             pack += f.PackedStreams.Count;
             db.Folders.Add(f);
@@ -204,16 +255,17 @@ internal static class SevenZipHeader
             ulong id = r.Number();
             if (id == 0x00) break;
             if (id != 0x0A) throw Corrupt("damaged header");
-            var crcs = ReadDigests(r, db.Folders.Count);
+            var crcs = ReadDigests(r, db.Folders.Count, p);
             for (int i = 0; i < db.Folders.Count; i++) db.Folders[i].UnpackCrc = crcs[i];
         }
     }
 
-    private static SzFolder ReadFolder(Reader r)
+    private static SzFolder ReadFolder(Reader r, Parse p)
     {
         var f = new SzFolder();
         int coders = r.Count("coder");
         if (coders is 0 or > MaxCoders) throw Corrupt("damaged header");
+        p.Charge(coders, CoderCost);
         for (int i = 0; i < coders; i++)
         {
             byte main = r.Byte();
@@ -225,7 +277,12 @@ internal static class SevenZipHeader
                 c.NumOut = r.Count("stream");
                 if (c.NumIn is 0 or > MaxStreams || c.NumOut is 0 or > MaxStreams) throw Corrupt("damaged header");
             }
-            if ((main & 0x20) != 0) c.Props = r.Bytes(r.Count("property"));
+            if ((main & 0x20) != 0)
+            {
+                int size = r.Count("property");
+                p.Charge(size, 1);
+                c.Props = r.Bytes(size);
+            }
             f.Coders.Add(c);
         }
         int totalOut = f.TotalOut, totalIn = f.TotalIn;
@@ -254,32 +311,42 @@ internal static class SevenZipHeader
         return f;
     }
 
-    private static void ReadSubStreams(Reader r, SzDatabase db)
+    private static void ReadSubStreams(Reader r, SzDatabase db, Parse p)
     {
         foreach (var f in db.Folders) f.NumUnpackStreams = 1;
         ulong id = r.Number();
         if (id == 0x0D)
         {
-            foreach (var f in db.Folders) f.NumUnpackStreams = r.Long();
+            foreach (var f in db.Folders)
+            {
+                p.Tick();
+                f.NumUnpackStreams = r.Long();
+                p.Entries(f.NumUnpackStreams);
+            }
             id = r.Number();
         }
+        // Every substream is a file: the total is checked, and charged, before any list grows.
         long total = db.Folders.Aggregate(0L, (s, f) => LimitGuard.Add(s, f.NumUnpackStreams));
-        if (total > int.MaxValue) throw Corrupt("damaged header");
+        p.Entries(total);
+        p.Charge(total, SubStreamCost);
         bool sizes = id == 0x09;
+        // Each size takes at least one byte.
+        if (sizes && total - db.Folders.Count(f => f.NumUnpackStreams > 0) > r.Remaining) throw Corrupt("damaged header (substream count)");
         foreach (var f in db.Folders)
         {
             if (f.NumUnpackStreams == 0) continue;
-            long sum = 0;
+            long sum = 0, unpack = f.UnpackSize;
             if (sizes)
                 for (long i = 1; i < f.NumUnpackStreams; i++)
                 {
+                    p.Tick();
                     long s = r.Long();
                     sum += s;
-                    if (sum < 0 || sum > f.UnpackSize) throw Corrupt("damaged header");
+                    if (sum < 0 || sum > unpack) throw Corrupt("damaged header");
                     f.SubSizes.Add(s);
                 }
             else if (f.NumUnpackStreams > 1) throw Corrupt("damaged header");
-            f.SubSizes.Add(f.UnpackSize - sum);
+            f.SubSizes.Add(unpack - sum);
         }
         if (sizes) id = r.Number();
         foreach (var f in db.Folders)
@@ -291,7 +358,7 @@ internal static class SevenZipHeader
         {
             if (id != 0x0A) throw Corrupt("damaged header");
             int unknown = db.Folders.Sum(f => f.NumUnpackStreams == 1 && f.UnpackCrc is not null ? 0 : f.SubSizes.Count);
-            var crcs = ReadDigests(r, unknown);
+            var crcs = ReadDigests(r, unknown, p);
             int k = 0;
             foreach (var f in db.Folders)
             {
@@ -302,24 +369,27 @@ internal static class SevenZipHeader
         }
     }
 
-    private static List<uint?> ReadDigests(Reader r, int n)
+    private static List<uint?> ReadDigests(Reader r, int n, Parse p)
     {
+        p.Charge(n, 9);
         var defined = r.AllOrBits(n);
         var list = new List<uint?>(Math.Min(n, 1 << 16));
         for (int i = 0; i < n; i++) list.Add(defined[i] ? r.UInt32() : null);
         return list;
     }
 
-    private static void ReadFiles(Reader r, SzDatabase db, ImportLimits limits)
+    private static void ReadFiles(Reader r, SzDatabase db, Parse p)
     {
+        var limits = p.Limits;
         long count = r.Long();
         LimitGuard.CheckEntryCount(count, limits);
         // Each file either has a data stream (counted in the folders) or takes at least one bit of what remains.
         long streams = db.Folders.Sum(f => (long)f.SubSizes.Count);
         if (count > streams + (long)r.Remaining * 8) throw Corrupt("damaged header (file count)");
         int n = (int)count;
+        p.Charge(n, FileCost);
         var files = new List<SzFile>(Math.Min(n, 1 << 16));
-        for (int i = 0; i < n; i++) files.Add(new SzFile());
+        for (int i = 0; i < n; i++) { p.Tick(); files.Add(new SzFile()); }
         bool[]? emptyStream = null, emptyFile = null, anti = null;
         long nameChars = 0;
         while (true)
@@ -327,35 +397,36 @@ internal static class SevenZipHeader
             ulong type = r.Number();
             if (type == 0) break;
             int size = r.Count("property");
-            var p = r.Sub(size);
+            var q = r.Sub(size);
             switch (type)
             {
-                case 0x0E: emptyStream = p.Bits(n); break;
-                case 0x0F: emptyFile = p.Bits(emptyStream?.Count(b => b) ?? 0); break;
-                case 0x10: anti = p.Bits(emptyStream?.Count(b => b) ?? 0); break;
+                case 0x0E: emptyStream = q.Bits(n); break;
+                case 0x0F: emptyFile = q.Bits(emptyStream?.Count(b => b) ?? 0); break;
+                case 0x10: anti = q.Bits(emptyStream?.Count(b => b) ?? 0); break;
                 case 0x11:
-                    if (p.Byte() != 0) throw new NotSupportedException("This 7z archive keeps its file names elsewhere, which Osmium cannot read.");
+                    if (q.Byte() != 0) throw new NotSupportedException("This 7z archive keeps its file names elsewhere, which Osmium cannot read.");
                     for (int i = 0; i < n; i++)
                     {
-                        files[i].Name = p.Utf16z();
+                        files[i].Name = q.Utf16z();
                         nameChars += files[i].Name.Length;
-                        if (nameChars * 2 > limits.MemoryBudgetBytes / 4) throw new EntryLimitException("The file list of this archive is larger than Osmium accepts.");
+                        if (nameChars * 2 > limits.MemoryBudgetBytes / 4) throw TooLarge();
+                        p.Tick();
                     }
                     break;
                 case 0x14:
                 {
-                    var defined = p.AllOrBits(n);
-                    if (p.Byte() != 0) throw Corrupt("damaged header");
+                    var defined = q.AllOrBits(n);
+                    if (q.Byte() != 0) throw Corrupt("damaged header");
                     for (int i = 0; i < n; i++)
-                        if (defined[i]) files[i].ModifiedUtc = FileTime((long)p.UInt64());
+                        if (defined[i]) files[i].ModifiedUtc = FileTime((long)q.UInt64());
                     break;
                 }
                 case 0x15:
                 {
-                    var defined = p.AllOrBits(n);
-                    if (p.Byte() != 0) throw Corrupt("damaged header");
+                    var defined = q.AllOrBits(n);
+                    if (q.Byte() != 0) throw Corrupt("damaged header");
                     for (int i = 0; i < n; i++)
-                        if (defined[i]) files[i].Attributes = p.UInt32();
+                        if (defined[i]) files[i].Attributes = q.UInt32();
                     break;
                 }
                 default: break; // times we do not restore, start positions, padding
