@@ -151,7 +151,7 @@ namespace Osmium.Cli
                 "quiet", "q", "spare-copies"]),
             [["x", "extract"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
             [["l", "list"]] = Options([.. PasswordOptions, "v", "verbose"]),
-            [["t", "test"]] = Options([.. PasswordOptions, "quiet", "q"]),
+            [["t", "test"]] = Options([.. PasswordOptions, "include", "force", "quiet", "q"]),
             [["salvage"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
             [["i", "info"]] = Options(PasswordOptions),
             [["explain"]] = Options(PasswordOptions),

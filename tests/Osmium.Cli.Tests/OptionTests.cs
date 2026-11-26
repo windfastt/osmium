@@ -36,7 +36,7 @@ public sealed class OptionTests : IDisposable
 
     [Theory]
     [InlineData("x", "--overwrit")]
-    [InlineData("t", "--force")]
+    [InlineData("t", "--overwrite")]
     [InlineData("l", "--quiet")]
     [InlineData("info", "-v")]
     [InlineData("salvage", "--include")]
@@ -48,6 +48,35 @@ public sealed class OptionTests : IDisposable
         Assert.Equal(1, r.ExitCode);
         Assert.Contains($"Unknown option '{option}' for osmium {command}", r.Error);
         Assert.False(Directory.Exists(P("dest")));
+    }
+
+    [Fact]
+    public async Task TestReadsTheSameIncludeAndForceAsExtract()
+    {
+        string zip = P("a.zip");
+        System.IO.Compression.ZipFile.CreateFromDirectory(P("in"), zip);
+        var some = await CliRunner.RunAsync(["t", zip, "--include", "*.txt"]);
+        Assert.True(some.ExitCode == 0, some.Error);
+        Assert.Contains("OK — 1 file(s) read.", some.Output);
+        var none = await CliRunner.RunAsync(["t", zip, "--include", "*.bin"]);
+        Assert.Contains("OK — 0 file(s) read.", none.Output);
+
+        // An archive that claims to expand far past 1,000 times its size: refused, and tested with --force.
+        var bytes = File.ReadAllBytes(zip);
+        for (int i = 0; i + 4 <= bytes.Length; i++)
+        {
+            uint sig = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i));
+            if (sig == 0x04034b50) System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i + 22), 0x7FFFFFFF);
+            if (sig == 0x02014b50) System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i + 24), 0x7FFFFFFF);
+        }
+        File.WriteAllBytes(zip, bytes);
+        var refused = await CliRunner.RunAsync(["t", zip]);
+        Assert.Equal(1, refused.ExitCode);
+        Assert.Contains("Use --force", refused.Error);
+        var forced = await CliRunner.RunAsync(["t", zip, "--force"]);
+        Assert.DoesNotContain("Unknown option", forced.Error);
+        Assert.Equal(2, forced.ExitCode); // read, and the file is not the size it claims
+        Assert.Contains("FAILED", forced.Output);
     }
 
     [Fact]
