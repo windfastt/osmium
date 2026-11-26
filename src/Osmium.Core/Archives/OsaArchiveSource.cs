@@ -167,10 +167,13 @@ public sealed class OsaArchiveSource : IArchiveSource
     private static List<ArchiveDetail> Describe(OsaReader r)
     {
         var details = Properties(r);
-        string? spare = r.HasSpareCopies ? "yes"
-            : r.Index.Metadata.ContainsKey(ArchiveIndex.SparesKey) ? "damaged (the archive is complete; Test says more)"
-            : r.Header.Minor == 0 ? "no (archives of Osmium 0.1 have none)"
-            : null;
+        string? spare = r.SpareCopyStatus switch
+        {
+            SpareCopyStatus.Present => "yes",
+            SpareCopyStatus.Damaged => "damaged (the archive is complete; Test says more)",
+            SpareCopyStatus.Newer => "made by a newer version of Osmium (this version does not use it)",
+            _ => r.Header.Minor == 0 ? "no (archives of Osmium 0.1 have none)" : null,
+        };
         if (spare is not null) details.Insert(1, new("Spare copy of the file list", spare));
         return details;
     }

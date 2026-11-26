@@ -28,6 +28,8 @@ public sealed class OsaReader : IDisposable
     /// <summary>The archive has spare copies of its index frame and header (container 1.1, FORMAT §4.1) and the trailer
     /// of the header copy checks out. <see cref="VerifySpareCopies"/> compares them byte for byte.</summary>
     public bool HasSpareCopies => _spares is not null;
+    /// <summary>Whether the archive has spare copies, and what state they are in (a newer writer's are not damage).</summary>
+    public SpareCopyStatus SpareCopyStatus { get; private init; }
 
     internal const string SpareDamaged = "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk.";
     internal const string SpareHeaderDamaged = "The spare copy of the header is damaged; the archive is complete. Copy it to a healthy disk.";
@@ -114,10 +116,14 @@ public sealed class OsaReader : IDisposable
                 warnings.Add(UsedSpareIndex);
                 usedSpareIndex = true;
             }
-            var spares = FindSpares(handle, index, ft, header, out bool damaged);
+            var spares = FindSpares(handle, index, ft, header, out bool damaged, out bool newer);
             if (damaged && !usedSpareIndex) warnings.Add(SpareDamaged);
             return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
-                usedSpareHeader, usedSpareIndex);
+                usedSpareHeader, usedSpareIndex)
+            {
+                SpareCopyStatus = spares is not null ? SpareCopyStatus.Present : newer ? SpareCopyStatus.Newer
+                    : damaged ? SpareCopyStatus.Damaged : SpareCopyStatus.None,
+            };
         }
         catch
         {
@@ -262,14 +268,18 @@ public sealed class OsaReader : IDisposable
     /// The spare copies the index names (<see cref="ArchiveIndex.SparesKey"/>), when H's trailer just before the index
     /// frame checks out and the offsets add up: B, then H, then the index frame. <paramref name="damaged"/> is set when
     /// the index names spare copies that are not there as it says. A trailer of a newer writer is not used and is no
-    /// damage.
+    /// damage (<paramref name="newer"/>).
     /// </summary>
-    private static Spares? FindSpares(ArchiveFile handle, ArchiveIndex index, ArchiveFooter footer, ArchiveHeader header, out bool damaged)
+    private static Spares? FindSpares(ArchiveFile handle, ArchiveIndex index, ArchiveFooter footer, ArchiveHeader header, out bool damaged, out bool newer)
     {
-        damaged = false;
+        damaged = newer = false;
         if (!index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var value)) return null;
         var trailer = ReadTrailer(handle, footer.IndexOffset);
-        if (trailer is { Newer: true }) return null;
+        if (trailer is { Newer: true })
+        {
+            newer = true;
+            return null;
+        }
         damaged = true;
         if (value.Length != 8 || trailer is not { } t) return null;
         // Unsigned: a crafted offset must not wrap around to pass the check.

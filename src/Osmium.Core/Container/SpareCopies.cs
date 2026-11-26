@@ -14,6 +14,19 @@ public enum SpareCopyPolicy
     Never,
 }
 
+/// <summary>What an opened archive's spare copies are (<see cref="OsaReader.SpareCopyStatus"/>).</summary>
+public enum SpareCopyStatus
+{
+    /// <summary>The archive has none (container 1.0, or the writer added none).</summary>
+    None,
+    /// <summary>Present, and their trailer checks out.</summary>
+    Present,
+    /// <summary>The file list names spare copies that are not there as it says.</summary>
+    Damaged,
+    /// <summary>Written by a newer version in a form this one does not use; not damage.</summary>
+    Newer,
+}
+
 /// <summary>
 /// The spare copies at the end of an archive of container version 1.1 (FORMAT §4.1):
 /// <c>… [last block frame] [B: copy of the index frame] [H: header copy] [A: index frame] [footer]</c>.

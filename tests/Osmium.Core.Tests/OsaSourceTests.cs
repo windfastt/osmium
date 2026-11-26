@@ -58,6 +58,19 @@ public class OsaSourceTests
     }
 
     [Fact]
+    public void SpareCopiesOfANewerVersionAreNotCalledDamaged()
+    {
+        using var t = new TempDir();
+        string path = SpareArchives.Write(t.Sub("a.osa"), SpareArchives.Files(2, 2000), new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Always });
+        var tail = SpareArchives.TailOf(path);
+        string newer = SpareArchives.Damage(path, t.Sub("newer.osa"), b => (tail.Trailer!.Value with { Flags = 1 }).Write(b.AsSpan((int)tail.TrailerOffset)));
+        using var s = ArchiveSources.Open(newer, ct: Ct);
+        Assert.Empty(s.Warnings);
+        Assert.StartsWith("made by a newer version", Detail(s, "Spare copy of the file list"));
+        Assert.Equal(SpareCopyStatus.Newer, ((OsaArchiveSource)s).Reader.SpareCopyStatus);
+    }
+
+    [Fact]
     public void WarningsOfTheReaderAreForwardedAndTestComparesTheSpareCopies()
     {
         using var t = new TempDir();
