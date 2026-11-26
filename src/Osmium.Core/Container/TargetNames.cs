@@ -128,11 +128,20 @@ internal sealed class TargetNames
     }
 
     /// <summary>"name (2).ext", "name (3).ext"… (folders: "name (2)"): the first that nothing has. The search for one
-    /// name resumes where it stopped, so many entries of one name cost one pass.</summary>
+    /// name resumes where it stopped, so many entries of one name cost one pass. A name so long that the number would
+    /// take it past 255 characters has its stem cut short (whole characters, the extension kept); names that are the
+    /// same once cut share one search.</summary>
     private string FreeName(string path, bool folder)
     {
         string dir = Path.GetDirectoryName(path)!, file = Path.GetFileName(path);
         string stem = folder ? file : Path.GetFileNameWithoutExtension(file), ext = folder ? "" : Path.GetExtension(file);
+        if (stem.Length + ext.Length + MaxNumber.Length > MaxName)
+        {
+            if (ext.Length + MaxNumber.Length >= MaxName) (stem, ext) = (file, ""); // an extension that long is no extension
+            int keep = MaxName - ext.Length - MaxNumber.Length;
+            if (char.IsHighSurrogate(stem[keep - 1])) keep--;
+            stem = stem[..keep];
+        }
         string key = Path.Combine(dir, stem) + "\0" + ext;
         for (int i = _nextFree.GetValueOrDefault(key, 2); ; i++)
         {
@@ -273,6 +282,10 @@ internal sealed class TargetNames
 
     [DllImport("libc.so.6", SetLastError = true)]
     private static extern int fstat(int fd, [Out] byte[] stat);
+
+    /// <summary>The longest file name the systems take, and the widest number a free name gets (" (1000000)").</summary>
+    private const int MaxName = 255;
+    private const string MaxNumber = " (1000000)";
 
     private const uint NameSurrogateBit = 0x20000000;
 

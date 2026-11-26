@@ -506,6 +506,36 @@ public class GuardedExtractorTests
     }
 
     [Fact]
+    public void LongNamesThatNeedAFreeNameGetOneWithin255Characters()
+    {
+        // Four names of 255 characters, each twice: "stem (2).txt" would pass 255, so the stem is cut short.
+        using var s = new Setup();
+        var names = Enumerable.Range(0, 4).Select(i => new string((char)('a' + i), 251) + ".txt").ToList();
+        var entries = names.SelectMany(n => new[] { MemoryEntry.File(n, "first " + n[0]), MemoryEntry.File(n, "second " + n[0]) }).ToList();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var r = s.Extract(entries);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"took {sw.Elapsed.TotalSeconds:F1} s");
+        Assert.True((r.FilesOk, r.FilesFailed, r.Renamed) == (8, 0, 4), string.Join("; ", r.Errors));
+        var files = s.FilesUnder();
+        Assert.Equal(8, files.Count);
+        Assert.All(files, f => Assert.True(f.Length <= 255 && f.EndsWith(".txt", StringComparison.Ordinal), f));
+        foreach (var n in names) Assert.Equal("first " + n[0], File.ReadAllText(s.At(n)));
+        Assert.Equal(4, files.Count(f => f.EndsWith(" (2).txt", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void AMoveToANameThatIsTooLongFailsAtOnce()
+    {
+        using var s = new Setup();
+        string source = s.T.Sub("source.txt");
+        File.WriteAllText(source, "x");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Throws<PathTooLongException>(() => Osmium.Core.IO.FileRetry.Move(source, s.T.Sub(new string('n', 300)), overwrite: false));
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"took {sw.Elapsed.TotalSeconds:F1} s");
+        Assert.True(File.Exists(source));
+    }
+
+    [Fact]
     public void APartFileNameStaysWithin255CharactersAndHoldsWholeCharacters()
     {
         string dir = Path.GetFullPath("d");

@@ -15,7 +15,8 @@ public static class FileRetry
                 File.Move(source, destination, overwrite);
                 return;
             }
-            catch (IOException) when (attempt < 30 && File.Exists(source) && !(File.Exists(destination) && !overwrite))
+            // A name too long stays too long: that fails at once.
+            catch (IOException e) when (e is not PathTooLongException && attempt < 30 && File.Exists(source) && !(File.Exists(destination) && !overwrite))
             {
                 Thread.Sleep(100);
             }
