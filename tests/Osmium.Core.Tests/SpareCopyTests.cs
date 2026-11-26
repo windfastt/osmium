@@ -71,11 +71,12 @@ internal static class SpareArchives
     /// An unencrypted archive written byte by byte, so that its index can say anything about spare copies:
     /// <paramref name="sparesValue"/> gets B's offset and returns the value of the spares key (null: no key), and
     /// <paramref name="tail"/> says whether B and H are written at all, and <paramref name="lastBlockLonger"/> makes the
-    /// index say that the last block's frame is that many bytes longer than it is.
+    /// index say that the last block's frame is that many bytes longer than it is. <paramref name="frameDescriptor"/> and
+    /// <paramref name="indexDescriptor"/> change the descriptor a block's frame and the index's copy of it hold.
     /// </summary>
     public static string Craft(string path, IReadOnlyDictionary<string, byte[]> files, Func<long, byte[]?> sparesValue, bool tail = true,
         bool newerIndex = false, string framePipeline = "store", Func<BlockDescriptor, BlockDescriptor>? indexDescriptor = null,
-        long lastBlockLonger = 0)
+        long lastBlockLonger = 0, Func<BlockDescriptor, BlockDescriptor>? frameDescriptor = null)
     {
         var header = new ArchiveHeader { Creator = "test" };
         var headerBytes = header.Serialize();
@@ -86,7 +87,7 @@ internal static class SpareArchives
         {
             var (desc, payload) = PipelineExecutor.Encode(PipelineSpec.Parse(framePipeline, Reg), data, CodecContext.None);
             long offset = fs.Position;
-            var frame = Frame((ulong)index.Blocks.Count, 0, [.. new BlockBody(desc, BlockBody.Hash128(data), payload).SerializePrefix(), .. payload]);
+            var frame = Frame((ulong)index.Blocks.Count, 0, [.. new BlockBody(frameDescriptor?.Invoke(desc) ?? desc, BlockBody.Hash128(data), payload).SerializePrefix(), .. payload]);
             fs.Write(frame);
             index.Entries.Add(new ArchiveEntry { Path = name, Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(index.Blocks.Count, 0, data.Length)], Hash = XxHash128.HashToUInt128(data) });
             long claimed = frame.Length + (index.Blocks.Count == files.Count - 1 ? lastBlockLonger : 0);

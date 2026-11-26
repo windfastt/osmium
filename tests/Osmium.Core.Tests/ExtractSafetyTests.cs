@@ -317,6 +317,77 @@ public class ExtractSafetyTests
         TestContext.Current.TestOutputHelper?.WriteLine($"{names.Count:N0} names planned and written in {sw.ElapsedMilliseconds:N0} ms");
     }
 
+    private static async Task<string> Build(TempDir t, string input)
+    {
+        var plan = await new Planner(new PlanOptions { Profile = Profile.ByName("fast"), MemoryBudget = 1L << 30 }).BuildAsync(Scanner.Scan([input], ct: Ct), Ct);
+        return (await ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = P(t, "built.osa"), KdfIterations = 1000, MemoryBudget = 1L << 30 }, Ct)).Path;
+    }
+
+    [Fact]
+    public async Task ARenamedFileSkipsTheNameAnEntryPlannedBeforeItTook()
+    {
+        // "a (2).txt" sorts before "a.txt": it has taken its own name when "a.txt" needs a free one.
+        using var t = new TempDir();
+        string input = P(t, "in");
+        Directory.CreateDirectory(input);
+        File.WriteAllText(Path.Combine(input, "a.txt"), "the first file " + new string('a', 5000));
+        File.WriteAllText(Path.Combine(input, "a (2).txt"), "the second file " + new string('b', 300));
+        string archive = await Build(t, input);
+        string dest = P(t, "out");
+        Directory.CreateDirectory(Path.Combine(dest, "in"));
+        File.WriteAllText(Path.Combine(dest, "in", "a.txt"), "already there");
+
+        var res = Extract(archive, dest);
+        Assert.Empty(res.Errors);
+        Assert.Equal((2, 0, 1), (res.FilesOk, res.FilesFailed, res.Renamed));
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["in/a.txt"] = "already there",
+            ["in/a (2).txt"] = File.ReadAllText(Path.Combine(input, "a (2).txt")),
+            ["in/a (3).txt"] = File.ReadAllText(Path.Combine(input, "a.txt")),
+        }, Tree(dest));
+        var renamed = Assert.Single(res.Renames);
+        Assert.Equal("in/a.txt", renamed.ArchivePath);
+        Assert.Equal(Path.GetFullPath(Path.Combine(dest, "in", "a (3).txt")), Path.GetFullPath(renamed.WrittenPath));
+    }
+
+    [Theory]
+    [InlineData(OverwriteMode.Rename)]
+    [InlineData(OverwriteMode.Overwrite)]
+    [InlineData(OverwriteMode.Skip)]
+    [InlineData(OverwriteMode.Fail)]
+    public void TwoEntriesMappedToOneNameAreBothKeptWhateverTheMode(OverwriteMode mode)
+    {
+        using var t = new TempDir();
+        string archive = Write(P(t, "a.osa"), [("x/a.txt", Data("from x")), ("y/a.txt", Data("from y"))]);
+        var replaced = new List<string>();
+        var res = Extract(archive, P(t, "out"), new ExtractOptions { Overwrite = mode, MapPath = _ => "a.txt", BeforeReplace = replaced.Add });
+        Assert.Empty(res.Errors);
+        Assert.Empty(replaced);
+        Assert.Equal((2, 0, 0, 1), (res.FilesOk, res.FilesFailed, res.FilesSkipped, res.Renamed));
+        Assert.Equal(new Dictionary<string, string> { ["a.txt"] = "from x", ["a (2).txt"] = "from y" }, Tree(P(t, "out")));
+        Assert.Equal("y/a.txt", Assert.Single(res.Renames).ArchivePath);
+    }
+
+    [Fact]
+    public void UnderOverwriteNamesThatDifferOnlyInCaseAreBothKeptWhereTheFileSystemIgnoresCase()
+    {
+        using var t = new TempDir();
+        string archive = Write(P(t, "a.osa"), [("Report.txt", Data("upper")), ("report.txt", Data("lower"))]);
+        var replaced = new List<string>();
+        // No comparer given: the system's. Before, on a file system that ignores case, the second silently replaced the first.
+        var res = Extract(archive, P(t, "out"), new ExtractOptions { Overwrite = OverwriteMode.Overwrite, BeforeReplace = replaced.Add });
+        Assert.Empty(res.Errors);
+        Assert.Empty(replaced);
+        Assert.Equal((2, 0), (res.FilesOk, res.FilesFailed));
+        bool ignoresCase = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+        Assert.Equal(ignoresCase
+            ? new Dictionary<string, string> { ["Report.txt"] = "upper", ["report (2).txt"] = "lower" }
+            : new Dictionary<string, string> { ["Report.txt"] = "upper", ["report.txt"] = "lower" }, Tree(P(t, "out")));
+        string[] renamed = ignoresCase ? ["report.txt"] : [];
+        Assert.Equal(renamed, res.Renames.Select(r => r.ArchivePath));
+    }
+
     // ------------------------------------------------------------------ replacing
 
     [Fact]
@@ -657,6 +728,56 @@ public class ExtractSafetyTests
         var small = new ConcurrentDictionary<int, long>();
         Extract(path, P(t, "out2"), new ExtractOptions { MemoryBudget = 60_000, OnReserve = (f, n) => small[f] = n });
         Assert.Equal(60_000, small[0]);
+    }
+
+    /// <summary>What a 16-byte block can claim: its zstd stage produces 1 GiB for the text filter, and zstd allocates
+    /// that before it decodes.</summary>
+    private static BlockDescriptor ClaimsOneGiB() => new(PipelineSpec.Parse("text+zstd", MethodRegistry.Default), [16, 1 << 30]);
+
+    [Fact]
+    public void AOneGibibyteStageOfASixteenByteBlockIsReservedBeforeItIsDecoded()
+    {
+        using var t = new TempDir();
+        var data = "sixteen bytes!!\n"u8.ToArray();
+        var claim = ClaimsOneGiB();
+        string path = P(t, "a.osa");
+        using (var w = new OsaWriter(path, new OsaWriterOptions { SpareThreshold = long.MaxValue }))
+        {
+            // The index declares what a writer would for a 16-byte block: a few megabytes.
+            int frame = w.WriteBlock(claim, BlockBody.Hash128(data), new byte[16], decodeMemory: claim.Spec.DecodeMemory(16));
+            w.Finish([new ArchiveEntry { Path = "x.txt", Kind = EntryKind.File, Size = 16, Segments = [new Segment(frame, 0, 16)], Hash = XxHash128.HashToUInt128(data) }]);
+            w.Commit(overwrite: false);
+        }
+        using (var r = OsaReader.Open(path)) Assert.True(r.Blocks[0].DecodeMemory + 2 * r.Blocks[0].RawSize < 64L << 20);
+        long reserved = 0;
+        // Stopped once the reservation is known: decoding would allocate the gibibyte.
+        Assert.ThrowsAny<Exception>(() => Extract(path, P(t, "out"), new ExtractOptions
+        {
+            MemoryBudget = 8L << 30,
+            OnReserve = (_, n) => { reserved = n; throw new InvalidOperationException("stopped before decoding"); },
+        }));
+        Assert.True(reserved >= 2L << 30, $"reserved {reserved:N0} bytes for a 1 GiB stage");
+        Assert.Empty(Parts(P(t, "out")));
+    }
+
+    [Fact]
+    public void AFrameClaimingAGibibyteBehindAnHonestFileListCopyIsNeverDecoded()
+    {
+        using var t = new TempDir();
+        var files = new Dictionary<string, byte[]> { ["x.txt"] = "sixteen bytes!!\n"u8.ToArray() };
+        string honest = SpareArchives.Craft(t.Sub("honest.osa"), files, _ => null, tail: false, framePipeline: "text+zstd");
+        var good = Extract(honest, P(t, "good"));
+        Assert.Equal((1, 0), (good.FilesOk, good.FilesFailed));
+        Assert.Equal(files["x.txt"], File.ReadAllBytes(P(t, "good", "x.txt")));
+
+        // Memory is reserved from the file list's copy of the descriptor: the frame's own must be that copy.
+        string lying = SpareArchives.Craft(t.Sub("lying.osa"), files, _ => null, tail: false, framePipeline: "text+zstd", frameDescriptor: _ => ClaimsOneGiB());
+        long reserved = 0;
+        var bad = Extract(lying, P(t, "bad"), new ExtractOptions { OnReserve = (_, n) => reserved = n });
+        Assert.Equal((0, 1), (bad.FilesOk, bad.FilesFailed));
+        Assert.Contains(bad.Errors, e => e.Contains("does not match the file list", StringComparison.Ordinal));
+        Assert.True(reserved < 64L << 20, $"reserved {reserved:N0} bytes");
+        Assert.Empty(Directory.GetFiles(P(t, "bad"), "*", SearchOption.AllDirectories));
     }
 
     [Fact]
