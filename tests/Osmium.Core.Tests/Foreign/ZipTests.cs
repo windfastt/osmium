@@ -341,6 +341,32 @@ public class ZipTests
     }
 
     [Fact]
+    public void AStoredZipCryptoFileCatchesAWrongPasswordByItsCrc()
+    {
+        // Stored data decrypts to the right length under any password: once a wrong one passes the one-byte check,
+        // only the CRC can refuse it.
+        using var t = new TempDir();
+        var data = ForeignData.Text(5000);
+        uint crc = System.IO.Hashing.Crc32.HashToUInt32(data);
+        var right = Encoding.UTF8.GetBytes("right password");
+        var z = new ZipCraft();
+        var item = new ZipCraft.Item { Name = "stored.txt"u8.ToArray(), Method = 0, Flags = 0x801, Crc = crc, Size = data.Length, Stored = ZipCraft.ZipCryptoEncrypt(right, data, crc) };
+        z.Items.Add(item);
+        string path = ForeignData.Write(t, "stored-zipcrypto.zip", z.Build());
+        string wrong = Enumerable.Range(0, 100_000).Select(i => "wrong " + i).First(p => ZipCraft.PassesCheckByte(Encoding.UTF8.GetBytes(p), item.Stored, crc));
+        int asked = 0;
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return wrong; } }))
+        {
+            Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out")));
+            Assert.False(Directory.Exists(t.Sub("out")));
+            Assert.Throws<WrongPasswordException>(() => s.Test(null, null, Ct));
+            Assert.Equal(1, asked);
+        }
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => "right password" }))
+            Assert.Equal((1, 0), (Extract(s, t.Sub("right")).FilesOk, Extract(s, t.Sub("right2")).FilesFailed));
+    }
+
+    [Fact]
     public void TheZipCryptoCheckIsBoundedByTheLimits()
     {
         using var t = new TempDir();
