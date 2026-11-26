@@ -54,6 +54,11 @@ internal interface IEntrySink
     void Accept(ForeignEntry entry, string relativePath, Func<EntryContent>? open);
     /// <summary>The entry could not be read at all (an earlier entry of a solid block was damaged…).</summary>
     void Fail(ForeignEntry entry, string message);
+    /// <summary>The archive is damaged where no single entry can be named (a TAR header, the end of a compressed
+    /// stream): reported, and counted as one failed file so the result never reads as complete.</summary>
+    void Damaged(string message);
+    /// <summary>A note for the result (Test: "these files have no stored checksum").</summary>
+    void Warn(string message);
     ArchiveExtractResult Result();
 }
 

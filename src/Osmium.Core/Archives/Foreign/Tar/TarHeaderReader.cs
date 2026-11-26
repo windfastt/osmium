@@ -275,7 +275,7 @@ internal sealed class TarHeaderReader(Stream input)
     }
 
     private static DateTime? Time(long seconds) =>
-        seconds is > 0 and < 253402300799 ? DateTime.UnixEpoch.AddSeconds(seconds) : null;
+        seconds is >= 0 and < 253402300799 ? DateTime.UnixEpoch.AddSeconds(seconds) : null;
 
     private static DateTime? PaxTime(string value)
     {

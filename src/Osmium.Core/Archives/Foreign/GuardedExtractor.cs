@@ -109,6 +109,14 @@ internal sealed class GuardedExtractor : IEntrySink
         _errors.Add($"{Esc(entry.Path)}: {message}");
     }
 
+    public void Damaged(string message)
+    {
+        _failed++;
+        _errors.Add(message);
+    }
+
+    public void Warn(string message) => _warnings.Add(message);
+
     private void Refuse(ref int counter, ForeignEntry e, string why)
     {
         counter++;

@@ -46,6 +46,8 @@ public static class ArchiveSources
         return sniff?.Kind switch
         {
             ArchiveKind.Osa => OsaArchiveSource.Open(path, options, ct),
+            ArchiveKind.Tar => Foreign.Tar.TarSource.Open(path, sniff.Value.Compression, options, ct),
+            ArchiveKind.GZip or ArchiveKind.BZip2 or ArchiveKind.Xz or ArchiveKind.Zstd => SingleStreamSource.Open(path, sniff.Value.Compression, options, ct),
             _ => throw new NotSupportedException("This file is not an archive Osmium can read."),
         };
     }

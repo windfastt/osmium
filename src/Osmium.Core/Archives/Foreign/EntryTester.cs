@@ -66,6 +66,12 @@ internal sealed class EntryTester(ProgressReporter progress) : IEntrySink
 
     public void Warn(string warning) => _warnings.Add(warning);
 
+    public void Damaged(string message)
+    {
+        _failed++;
+        _errors.Add(message);
+    }
+
     public ArchiveExtractResult Result() => new()
     {
         FilesOk = _ok,
