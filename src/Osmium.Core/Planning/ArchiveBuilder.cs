@@ -41,6 +41,14 @@ public sealed record BuildOptions
     public bool StorePlanLog { get; init; } = true;
     public PauseGate? Gate { get; init; }
     public Action<BuildProgress>? Progress { get; init; }
+    /// <summary>Tests only: see <see cref="OsaWriterOptions.SpareThreshold"/>.</summary>
+    internal long SpareThreshold { get; init; } = SpareCopies.Threshold;
+    /// <summary>Tests only: see <see cref="OsaWriterOptions.TestFixedArchiveId"/>.</summary>
+    internal byte[]? TestFixedArchiveId { get; init; }
+    /// <summary>Tests only, never anywhere else: see <see cref="OsaWriterOptions.TestFixedSalt"/>.</summary>
+    internal byte[]? TestFixedSalt { get; init; }
+    /// <summary>Tests only: see <see cref="OsaWriterOptions.TestFixedSaltAcknowledged"/>.</summary>
+    internal bool TestFixedSaltAcknowledged { get; init; }
 }
 
 public sealed record BuildProgress(string Phase, long BytesIn, long BytesInTotal, long BytesOut, int BlocksDone, int BlocksTotal, string? Detail);
@@ -66,6 +74,10 @@ public static class ArchiveBuilder
             KdfIterations = o.KdfIterations,
             Experimental = plan.UsesExperimental,
             IndexPipeline = plan.Profile.Level >= ProfileLevel.Ultra ? "lzma(dict=16M)" : "zstd(level=19)",
+            SpareThreshold = o.SpareThreshold,
+            TestFixedArchiveId = o.TestFixedArchiveId,
+            TestFixedSalt = o.TestFixedSalt,
+            TestFixedSaltAcknowledged = o.TestFixedSaltAcknowledged,
         });
 
         var gate = new MemoryGate(o.MemoryBudget);
@@ -250,7 +262,8 @@ public static class ArchiveBuilder
         Report("Writing index");
         writer.Finish(entries, meta);
 
-        // Structural re-read of the written file (CRCs, payload hashes, index) before it replaces anything.
+        // Structural re-read of the written file (CRCs, payload hashes, index, spare copies) before it replaces
+        // anything. A fresh archive must be perfect: any warning fails the build.
         Report("Checking archive");
         double decodeSec;
         long maxMem;
@@ -258,6 +271,10 @@ public static class ArchiveBuilder
         {
             for (int i = 0; i < check.Blocks.Count; i++) check.ReadBody(i);
             if (check.Entries.Count != entries.Count) throw new InvalidOperationException("Index re-read mismatch.");
+            if (check.HasSpareCopies != writer.HasSpareCopies)
+                throw new InvalidOperationException("The spare copies of the file list and header did not check out. The archive was not written.");
+            if (check.Warnings.Concat(check.VerifySpareCopies()).FirstOrDefault() is { } problem)
+                throw new InvalidOperationException($"The written archive did not check out: {problem} The archive was not written.");
             decodeSec = check.EstimatedDecodeSeconds;
             maxMem = check.MaxBlockDecodeMemory;
         }

@@ -674,6 +674,45 @@ public class SpareCopyTests
         Assert.Equal(files.Count, Extractor.Test(r, null, Ct).FilesOk);
     }
 
+    // ------------------------------------------------------------------ the builder
+
+    private static async Task<(string Path, Dictionary<string, byte[]> Files)> Build(TempDir t, string name, Planning.BuildOptions options)
+    {
+        string input = t.Sub("in-" + name);
+        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        Directory.CreateDirectory(input);
+        var rnd = new Random(3);
+        for (int i = 0; i < 4; i++)
+        {
+            var data = new byte[20_000];
+            rnd.NextBytes(data);
+            File.WriteAllBytes(Path.Combine(input, $"r{i}.bin"), data);
+            files[$"in-{name}/r{i}.bin"] = data;
+        }
+        var plan = await new Planning.Planner(new Planning.PlanOptions { Profile = Planning.Profile.ByName("fast"), MemoryBudget = 1L << 30 })
+            .BuildAsync(Planning.Scanner.Scan([input], ct: Ct), Ct);
+        var r = await Planning.ArchiveBuilder.BuildAsync(plan, options with { OutputPath = t.Sub(name + ".osa"), KdfIterations = 1000, MemoryBudget = 1L << 30 }, Ct);
+        return (r.Path, files);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheBuilderWritesSpareCopiesThatPassItsOwnCheck(bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var (path, files) = await Build(t, "low", new Planning.BuildOptions { OutputPath = "", Password = pw, SpareThreshold = 0, TestFixedArchiveId = new byte[16] });
+        var (open, test, spares) = Check(path, files, pw);
+        Assert.True(spares);
+        Assert.Empty(open);
+        Assert.Empty(test);
+        using (var r = OsaReader.Open(path, () => pw)) Assert.Equal(new byte[16], r.Header.ArchiveId);
+
+        var small = await Build(t, "default", new Planning.BuildOptions { OutputPath = "", Password = pw });
+        Assert.False(Check(small.Path, small.Files, pw).Spares); // 80 KB of blocks: under the 1 MiB threshold
+    }
+
     [Fact]
     public void ArchivesWrittenAsByOsmium01HaveMinor0()
     {
