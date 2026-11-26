@@ -1,15 +1,17 @@
-# `.osa` container format — version 1.0
+# `.osa` container format — version 1.1
 
-Merged design (engine architect proposal + lead synthesis; see IMPROVISATION.md for what changed and why).
+This document specifies the .osa archive format: what a writer must produce and what a reader must check.
 
 Conventions: fixed-width integers are **little-endian**; `varint` = unsigned LEB128 (readers reject > 10 bytes or
 overflow); `svarint` = zig-zag + LEB128; `bytes` = varint length + raw; `str` = `bytes` holding UTF-8.
 
 ```
 [Header] [Frame 0] [Frame 1] … [Frame n-1] [Index frame] [Footer 32 B]
+[Header] [Frame 0] [Frame 1] … [Frame n-1] [Spare index frame] [Header copy] [Index frame] [Footer 32 B]   (§4.1)
 ```
 Frames are written in completion order (parallel compression finishes out of order); a block's **frame number** is
-its position in the file. Segments in the index refer to frame numbers.
+its position in the file. Segments in the index refer to frame numbers. Archives whose block frames total 1 MiB or more
+carry spare copies of the index frame and the header (second line, §4.1); smaller archives do not.
 
 ## 1. Header
 
@@ -17,7 +19,7 @@ its position in the file. Segments in the index refer to frame numbers.
 |---|---|---|
 | 0 | 8 | magic `4F 53 4D 41 1A 0D 0A 00` (`"OSMA" ^Z CR LF NUL`; catches text-mode mangling) |
 | 8 | 2 | major = 1 (readers refuse other majors) |
-| 10 | 2 | minor = 0 (additive changes only) |
+| 10 | 2 | minor = 1 (0 in archives of Osmium 0.1.x). Minor versions only add what older readers can ignore: readers accept every minor of major 1 |
 | 12 | 4 | flags. Bits 0–15 are **critical** (refuse if an unknown one is set), bits 16–31 informational. bit0 = encrypted · bit16 = experimental features used |
 | 16 | 16 | archive id (random) |
 | 32 | 4 | `extLen` |
@@ -27,13 +29,14 @@ its position in the file. Segments in the index refer to frame numbers.
 Extension records:
 - **1 EncryptionInfo** (critical): `u8 kdf (1 = PBKDF2-HMAC-SHA512) · varint iterations · u8[32] salt · u8 aead (1 = AES-256-GCM) · u8[16] verifier`
 - **2 Creator** (ignorable): `str`, e.g. `Osmium 0.1.0`
+- Types 3 and 5 (critical) and 4 and 6 (ignorable) are reserved (§9).
 
 ## 2. Frame
 
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | magic `"OBLK"` |
-| 4 | 4 | frame flags: bit0 encrypted (must equal header bit0) · bit1 index frame · others must be 0 |
+| 4 | 4 | frame flags: bit0 encrypted (must equal header bit0) · bit1 index frame · bit2 reserved (§9) · others must be 0 |
 | 8 | 8 | frame number (blocks `0..n-1` in file order; the index frame uses `2^64-1`) |
 | 16 | 8 | body length |
 | 24 | 4 | CRC-32 of bytes 0..23 |
@@ -111,7 +114,8 @@ varint entryCount                     sorted by ordinal byte order of path (pare
           varint present (bit0 mtime · bit1 ctime · bit2 attributes)
           [u64 mtime FILETIME UTC] [u64 ctime FILETIME UTC] [varint attributes & 0x2027]
           file: varint size · varint segmentCount · (varint frame · varint offset · varint length)* · u8[16] XxHash128
-varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", "plan" (JSON explain log), "rules" (JSON)
+varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", "plan" (JSON explain log), "rules" (JSON),
+                                                   "spares" (u64 offset of the spare index frame, §4.1)
 ```
 - Length-prefixed records let a newer minor version append fields that older readers skip.
 - Frame offsets are implicit: `offset(frame k) = headerLength + Σ_{j<k} (gapBefore_j + frameLength_j) + gapBefore_k`.
@@ -119,6 +123,7 @@ varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", 
   segments; every directory (including empty ones) is stored so attributes and times can be restored.
 - Reader invariants: no duplicate paths; Σ segment lengths = size; offset + length ≤ rawSize of the frame; rawSize ≤ 2^30;
   path ≤ 32 KiB; stageCount ≤ 8; decodeMemKiB ≤ the configured limit (otherwise ask before decoding).
+- Unknown metadata keys are ignored.
 
 ## 4. Footer (last 32 bytes)
 
@@ -130,6 +135,69 @@ varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", 
 | 24 | 4 | CRC-32 of bytes 0..23 |
 | 28 | 4 | magic `"OSAE"` |
 
+The index frame ends where the footer starts: `indexOffset + indexLength + 32 = file length`. Readers check this and
+that every block ends at or before `indexOffset`; nothing reads the bytes between the last block and the index frame
+unless the index points there (§4.1).
+
+### 4.1 Spare copies (container 1.1)
+
+A writer gives an archive spare copies of its index frame and its header when its block frames (header and body)
+total at least 1 MiB (2^20 bytes):
+
+```
+… [last block frame] [B: copy of the index frame] [H: header copy] [A: index frame] [footer 32 B]
+```
+
+- **A** is the index frame as in §3; the footer points to it. Its metadata holds the key `spares` with B's offset (u64
+  little-endian). B is written first, so the writer takes B's offset (the end of the last block), serializes the
+  index with that key, compresses and (in an encrypted archive) seals it **once**, and writes the same bytes as B and
+  as A.
+- **B** is a byte-identical copy of A's whole frame, header and body: frame number 2^64−1 and the index flag, like A.
+- **H** is the header bytes exactly as at offset 0, then zero padding, then a 32-byte trailer. The padding makes H at
+  least 4096 bytes long, so that B ends at least 4 KiB before A starts and one burst of damage does not take both.
+
+  | Offset | Size | Field |
+  |---|---|---|
+  | 0 | 4 | magic `"OHDR"` |
+  | 4 | 4 | flags = 0 |
+  | 8 | 8 | header length |
+  | 16 | 8 | padding length |
+  | 24 | 4 | reserved = 0 |
+  | 28 | 4 | CRC-32 of bytes 0..27 |
+
+  So `spares + indexLength + headerLength + paddingLength + 32 = indexOffset`.
+
+The spare copies cost a copy of the index frame plus at least 4 KiB. Archives under the threshold have no spare copies
+and no `spares` key, and still have minor 1.
+
+Readers:
+1. **Every open** with an intact A that holds `spares` checks H's trailer (magic, CRC, flags and reserved 0, lengths a
+   header can have) and that the offsets add up as above, with B after the last block. If not, the archive opens with
+   the warning "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk." A
+   trailer whose CRC checks out but which has a flag or reserved bit set was written by a newer version: the reader
+   does not use H and gives no warning.
+2. **Test** and **salvage** compare B with A byte for byte and H's header bytes with the header at offset 0, and check
+   that the padding is zero; a difference is a warning, the archive is complete. This is not done on every open: it
+   reads the index twice.
+3. **A fails** (frame CRC, GCM tag, payload hash, decompression, raw hash or index structure): the reader reads B, found
+   through H's trailer or, when that is damaged too, as the frame header with the index flag, the index frame number and
+   the footer's index length that is nearest before A within `indexLength + 1 MiB + 8 KiB` of `indexOffset`. B gets
+   every check A gets, and its index must name B's own offset in `spares`. The archive then opens with the warning "The
+   file list of this archive was damaged; Osmium used its spare copy. Every file can be checked with Test." Test
+   reports it too. A wrong password, a missing password and a feature of a newer version are not damage and never lead
+   to B. When B fails as well, the error is A's.
+4. **The header fails** for any reason (magic, major version, CRC, lengths) while the footer checks out, places the index
+   frame at the end of the file, and H's trailer checks out: the reader takes the header copy from H and checks it the
+   same way; its archive id must match the footer's. An encrypted archive's index is then authenticated with H's
+   header bytes, which are the original header bytes. Warning: "The header of this archive was damaged; Osmium used its
+   spare copy." An intact header with a feature of a newer version is never replaced by its copy.
+5. **The footer fails**: the archive does not open, and the error says "The end of this archive is damaged. Try Recover
+   files in the app or osmium salvage." Salvage scans for frames and finds A or B (§8).
+
+A reader of container 1.0 checks the header without looking at the minor version, follows the footer to A and ignores
+metadata keys it does not know; it never reads B or H. Archives with spare copies therefore open in Osmium 0.1.x as
+any other archive does (§10).
+
 ## 5. Encryption
 - `master = PBKDF2-HMAC-SHA512(UTF-8(NFC(password)), salt[32], iterations, 32 bytes)`; default 600 000 iterations
   (stored, so tunable per archive).
@@ -137,20 +205,43 @@ varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", 
   `verifier = HKDF-Expand(SHA-256, master, 16, "osmium/v1/verify")` compared in constant time → instant
   "wrong password" without touching data.
 - Salt is random per archive ⇒ `Kenc` is unique per archive ⇒ (frameNumber, 0) nonces never repeat.
-- Plaintext metadata that remains: header, frame headers (block count and sizes), footer. File names, methods and
-  content are encrypted.
+- The spare copy of the index frame (§4.1) is a byte copy of the sealed index frame: the index is sealed once and the
+  same ciphertext is written twice, so no nonce is ever used for two different plaintexts.
+- Plaintext metadata that remains: header (and its copy, §4.1), frame headers (block count and sizes), footer. File
+  names, methods and content are encrypted.
 
 ## 6. Integrity checks
 1. Header CRC, footer CRC + magic + archive id match.
 2. Frame header CRC; body CRC (plain) or GCM tag (encrypted); payloadHash.
 3. After decoding: every stage size, then rawHash (XxHash128).
 4. Per file: XxHash128 of the reconstructed content.
+5. With spare copies: H's trailer on every open; B against A and H against the header in Test and salvage (§4.1).
 
 ## 7. Extraction safety
 Rejected paths: absolute, drive letters, UNC, empty / `.` / `..` components, `\`, `:` (ADS), NUL and control
 characters, Windows reserved device names (`CON PRN AUX NUL COM1-9 LPT1-9`, with or without extension), and anything
-whose resolved full path escapes the destination. Files are written to `name.osmium-part`, verified, then renamed;
-directory times and attributes are applied deepest-first after their contents; ReadOnly is applied last.
+whose resolved full path escapes the destination.
+
+Every target is planned before anything is written:
+- Every entry's own resolved name is reserved first. Names compare as the file system does: case-insensitively on
+  Windows and macOS, exactly elsewhere.
+- In index order (parents before children), a name that another entry of the same extraction already took, or a file
+  where another entry needs a folder (or the other way round), gets a free name — `name (2).ext`, `name (3).ext`, … — in
+  every overwrite mode: an entry never replaces another entry of the same archive. A free name exists nowhere in the
+  destination, is no entry's own name and was not chosen before.
+- A name that exists in the destination follows the overwrite mode: skip, fail, a free name, or replace. Only a file
+  planned to be replaced is replaced, never a folder, and never a file the system finds only under another spelling
+  (such as a short 8.3 name).
+- Nothing is created or written below a folder that already exists in the destination and is a symbolic link, a
+  junction or another reparse point that stands for another name; such entries are refused and counted as unsafe.
+  Other reparse points (cloud placeholders) are ordinary folders. The destination itself may be a link.
+
+Each file is written to a new part file, `name.osmium-part-<random>`, and verified against its hash; then the
+Mark-of-the-Web of a downloaded archive goes on the part file, the part file is renamed to the file's name, and then
+the file's times and attributes are set. Folder times and attributes are set at the end, deepest first, only on
+folders the extraction created (never System or ReadOnly, which would make Windows act on a desktop.ini); a folder
+that was already there keeps its own. Memory is reserved for the largest stage of each block's pipeline. A cancelled or
+failed extraction deletes its own part files and the folders it created that are still empty; finished files stay.
 
 ## 8. Salvage
 `osmium salvage <archive> <dest>` reads a damaged archive through its frames, never through the footer's or the
@@ -174,10 +265,35 @@ index's offsets:
    giving its pipeline, sizes and hashes; file names, folders and times are lost. A frame that may belong to another
    archive is written as `block-<frame number>-at-<offset>.bin` and never stands for this archive's block. An
    unencrypted frame does not name its archive, so where the frames stop following one another the report says so.
-6. Encryption: the salt, iterations and archive id exist only in the header (the footer keeps the first 8 bytes of the
-   id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so when the header is damaged elsewhere
-   its key fields, read from their fixed places, still yield the blocks once they authenticate a frame. The index frame
-   also binds the exact header bytes: salvage rebuilds the header from those fields as a writer makes it, and a rebuild
-   that authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
+6. Encryption: the salt, iterations and archive id are kept in the header and, in archives with spare copies, in the
+   header copy H (§4.1), which opening uses when the header fails; salvage reads them from offset 0 (the footer keeps the
+   first 8 bytes of the id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so when the header is
+   damaged elsewhere its key fields, read from their fixed places, still yield the blocks once they authenticate a
+   frame. The index frame also binds the exact header bytes: salvage rebuilds the header from those fields as a writer
+   makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x), and a rebuild that
+   authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
    (`--force` lifts both in the CLI).
+8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, so it is not reported
+   as unrecognised data, and the spare index frame B, which the index names in `spares`, is a copy of the index frame,
+   not damage: an intact archive with spare copies salvages as complete. When A is destroyed, B is the index salvage
+   uses, and every file comes back with its name.
+
+## 9. Reserved identifiers
+So that later versions can add them without clashing, these are reserved; this version never writes them:
+- Frame flag bit 2: an explicit nonce, for archives that can be appended to later. A reader that does not know it says
+  the archive needs a newer version (§2.2).
+- Header extension types 4 and 6 (ignorable) and 3 and 5 (critical, §1).
+- Frame magics `ORDR` and `ORPR` (recovery records) and `OCHK` (checkpoints). Readers skip bytes that no index
+  references, so such frames never disturb an older reader.
+
+## 10. Compatibility
+
+| Archive | Osmium 0.1.x | Osmium 0.2.0 and later |
+|---|---|---|
+| 1.0 (written by 0.1.x) | opens, tests, extracts | opens, tests, extracts; no spare copies |
+| 1.1 whose blocks use only methods 0.1.x knows, with or without spare copies | opens, tests, extracts: the spare copies and the minor version never stop it | opens, tests, extracts; uses the spare copies when the index frame or header is damaged |
+| 1.1 with a block made with a method new in 0.2.0 (such as `cm2` or `x86v2`, §2.2) | refuses the whole archive while reading the index, saying it was made by a newer version; nothing is extracted | opens it; only blocks that a reader does not know fail, and the other files extract |
+
+The index carries a copy of every block's pipeline, so 0.1.x meets a method it does not know while reading the index;
+readers from 0.2.0 on give such a block a stand-in and fail only that block (§2.2).
