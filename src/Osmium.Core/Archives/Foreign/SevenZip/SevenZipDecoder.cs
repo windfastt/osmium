@@ -266,7 +266,9 @@ internal sealed class SevenZipAesStream : ReadOnlyStream
     public bool OnDataPath { get; init; }
 
     /// <summary>Whether this stream's decrypted bytes reached the folder's result, so that a CRC over the result
-    /// checks the key.</summary>
+    /// checks the key. Requiring the coder's whole declared output to be read instead is not stricter but wrong: LZMA2
+    /// never reads the last byte of its stream, so every ordinary encrypted 7z would be refused, while 5 bytes on BCJ2's
+    /// range-coder input are read whole and still never reach the result.</summary>
     public bool Proves => OnDataPath && Delivered > 0;
 
     public SevenZipAesStream(Stream inner, byte[] key, byte[] iv)
