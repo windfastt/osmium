@@ -181,7 +181,7 @@ internal abstract class ForeignSource : IArchiveSource
         }
         if (destination is not null) FreeSpace.CheckBefore(destination, declared, limits);
 
-        var reserved = chosen?.Where(e => e.HasData).Select(e => Selected(e)!);
+        var reserved = chosen?.Where(e => e.Type is EntryType.File or EntryType.Directory or EntryType.HardLink).Select(e => Selected(e)!);
         var sink = makeSink(op, reserved);
         op.Sink = sink;
         try

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Osmium.Core.Container;
 using Osmium.Core.IO;
 using Osmium.Core.Text;
@@ -8,9 +7,12 @@ namespace Osmium.Core.Archives.Foreign;
 /// <summary>
 /// The only way an entry of a foreign archive reaches the disk. For each entry, in archive order: normalise and
 /// refuse unsafe names, map the characters Windows does not allow, never create or follow a link (a TAR hard link
-/// to a file this run wrote becomes a copy), refuse devices and other special entries, never write through a link
-/// that is already in the destination, rename collisions inside the run (case-insensitively, also against the paths
-/// of an earlier pass) and handle existing files by the overwrite mode, write to a part file through the limit
+/// to a file this run wrote becomes a copy), refuse devices and other special entries, then plan the target with the
+/// same rules as .osa extraction (<see cref="TargetNames"/>, here always case-insensitive): never through a link already
+/// in the destination, a free name that nothing else uses for a collision inside the run, with an earlier pass, or with
+/// a file the system finds under another spelling (a short 8.3 name), and the overwrite mode for files that were
+/// already there. The link check runs again just before the part file is made and before it is moved. Write to a part
+/// file through the limit
 /// counters and the format's checks, then give it the Mark-of-the-Web, move it into place and set its time and only
 /// its ReadOnly and Hidden attributes. A cancellation or failure removes this run's part files and the empty folders
 /// it created; finished files stay.
@@ -29,13 +31,8 @@ internal sealed class GuardedExtractor : IEntrySink
     private readonly Func<string, string, string?> _writeZone;
     private readonly CancellationToken _ct;
 
-    // Paths this run (or the earlier pass) wrote, full and compared case-insensitively on every system: true = folder.
-    private readonly Dictionary<string, bool> _written = new(StringComparer.OrdinalIgnoreCase);
-    // Every selected file's own target, so a free name never takes another entry's name.
-    private readonly HashSet<string> _reserved = new(StringComparer.OrdinalIgnoreCase);
-    // Folder prefixes renamed because a file of the same name was there: original relative path → new one.
-    private readonly Dictionary<string, string> _dirRenames = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, bool> _throughLink = new(StringComparer.Ordinal);
+    // Where each entry goes: names compared case-insensitively on every system (foreign archives come from anywhere).
+    private readonly TargetNames _plan;
     private readonly List<string> _createdDirs = [];
     private readonly HashSet<string> _createdDirSet = new(StringComparer.Ordinal);
     private readonly List<(ForeignEntry Entry, string Path)> _dirEntries = [];
@@ -47,7 +44,7 @@ internal sealed class GuardedExtractor : IEntrySink
     private int _ok, _failed, _existing, _unsafe, _links, _unsupported, _renamed, _unverified;
 
     /// <param name="reservedTargets">Relative paths (as the archive names them, after the prefix) of every selected
-    /// file, when the listing is complete.</param>
+    /// file and folder, when the listing is complete: their own names, which a free name never takes.</param>
     public GuardedExtractor(string destination, ArchiveExtractRequest request, ImportLimits limits, LimitGuard guard,
         ProgressReporter progress, string archivePath, IEnumerable<string>? reservedTargets, CancellationToken ct)
     {
@@ -59,15 +56,14 @@ internal sealed class GuardedExtractor : IEntrySink
         _ct = ct;
         _zone = ZoneOverride ?? Extractor.ReadZoneIdentifier(archivePath);
         _writeZone = ZoneWriterOverride ?? Extractor.WriteZoneIdentifier;
-        foreach (var p in request.WrittenEarlier ?? [])
-            _written[Path.GetFullPath(p)] = false;
-        if (reservedTargets is not null)
-            foreach (var rel in reservedTargets)
-                if (EntryNames.Normalize(rel, int.MaxValue, out var n) is null && n is not null)
-                {
-                    EntryNames.MapForWindows(n, out var mapped);
-                    if (PathSafety.Validate(mapped) is null) _reserved.Add(Full(mapped));
-                }
+        var own = new List<string>();
+        foreach (var rel in reservedTargets ?? [])
+            if (EntryNames.Normalize(rel, int.MaxValue, out var n) is null && n is not null)
+            {
+                EntryNames.MapForWindows(n, out var mapped);
+                if (PathSafety.Validate(mapped) is null) own.Add(Full(mapped));
+            }
+        _plan = new TargetNames(_root, StringComparer.OrdinalIgnoreCase, own, request.WrittenEarlier);
         CreateRoot();
     }
 
@@ -100,6 +96,16 @@ internal sealed class GuardedExtractor : IEntrySink
     {
         Directory.CreateDirectory(full);
         if (_createdDirSet.Add(full)) _createdDirs.Add(full);
+    }
+
+    /// <summary>Creates the missing folders from the destination down to <paramref name="dir"/>, one level at a time,
+    /// recording each as made by this run.</summary>
+    private void EnsureFolder(string dir)
+    {
+        var missing = new Stack<string>();
+        string root = _root.TrimEnd(Path.DirectorySeparatorChar);
+        for (string? d = dir; d is not null && d.Length > root.Length && !Directory.Exists(d); d = Path.GetDirectoryName(d)) missing.Push(d);
+        while (missing.TryPop(out var d)) CreateDir(d);
     }
 
     public void Fail(ForeignEntry entry, string message)
@@ -158,9 +164,32 @@ internal sealed class GuardedExtractor : IEntrySink
 
         try
         {
-            if (!PrepareParents(e, ref mapped, ref renamed)) return;
-            if (e.Type == EntryType.Directory) { MakeDirectory(e, mapped, renamed); return; }
-            if (!ChooseTarget(e, mapped, ref renamed, out string target, out bool replace)) return;
+            string full = Full(mapped);
+            var plan = _plan.Plan(full, e.Type == EntryType.Directory, _request.Overwrite, TargetNames.SpelledOtherwise(_root, mapped, full));
+            switch (plan.Outcome)
+            {
+                case TargetNames.Outcome.Unsafe:
+                    Refuse(ref _unsafe, e, plan.Reason ?? TargetNames.LinkRefused);
+                    return;
+                case TargetNames.Outcome.Skipped:
+                    _existing++;
+                    return;
+                case TargetNames.Outcome.Failed:
+                    _failed++;
+                    _errors.Add($"{Esc(e.Path)}: {Esc(plan.Reason ?? "it could not be written")}");
+                    return;
+            }
+            string target = plan.Path!;
+            bool replace = plan.Replaces;
+            renamed |= plan.Renamed;
+            if (e.Type == EntryType.Directory)
+            {
+                EnsureFolder(target);
+                if (renamed) _warnings.Add($"'{Esc(e.Path)}' was saved as '{Esc(Relative(target))}'");
+                if (_createdDirSet.Contains(target)) _dirEntries.Add((e, target));
+                return;
+            }
+            EnsureFolder(Path.GetDirectoryName(target)!);
             if (hardLinkSource is not null)
             {
                 using var copy = new CountingStream(new FileStream(hardLinkSource, FileMode.Open, FileAccess.Read, FileShare.Read, CopyBuffer), _guard);
@@ -197,107 +226,14 @@ internal sealed class GuardedExtractor : IEntrySink
         }
     }
 
-    /// <summary>Rule 7 and the folder half of rule 8: every folder between the root and the entry exists, is not a
-    /// link, and is not a file (a prefix that names a file is renamed, for this and every later entry below it).</summary>
-    private bool PrepareParents(ForeignEntry e, ref string mapped, ref bool renamed)
-    {
-        mapped = ApplyDirRenames(mapped, ref renamed);
-        int folders = mapped.Split('/').Length - (e.Type == EntryType.Directory ? 0 : 1);
-        for (int i = 0; i < folders;)
-        {
-            string rel = string.Join('/', mapped.Split('/'), 0, i + 1);
-            string full = Full(rel);
-            bool fileThere = _written.TryGetValue(full, out bool isDir) ? !isDir : IsFileOrFileLink(full);
-            if (fileThere)
-            {
-                string free = Relative(UniqueName(full));
-                _dirRenames[rel] = free;
-                _warnings.Add($"'{Esc(rel)}' is also the name of a file; the folder was saved as '{Esc(free)}'");
-                mapped = free + mapped[rel.Length..];
-                renamed = true;
-                continue; // the same level again, under its new name
-            }
-            if (Directory.Exists(full))
-            {
-                if (ThroughLink(full))
-                {
-                    Refuse(ref _unsafe, e, "it would be written through a link that is already in the destination");
-                    return false;
-                }
-                _written.TryAdd(full, true);
-            }
-            else
-            {
-                CreateDir(full);
-                _written[full] = true;
-            }
-            i++;
-        }
-        return true;
-    }
-
-    /// <summary>Applies the folder renames of earlier entries (repeatedly, for renamed folders inside renamed ones).</summary>
-    private string ApplyDirRenames(string mapped, ref bool renamed)
-    {
-        for (int round = 0; round < 1024 && _dirRenames.Count > 0; round++)
-        {
-            var parts = mapped.Split('/');
-            string? hit = null;
-            for (int i = parts.Length; i >= 1 && hit is null; i--)
-            {
-                string prefix = string.Join('/', parts, 0, i);
-                if (_dirRenames.TryGetValue(prefix, out var to) && !string.Equals(to, prefix, StringComparison.OrdinalIgnoreCase))
-                    hit = to + mapped[prefix.Length..];
-            }
-            if (hit is null) break;
-            mapped = hit;
-            renamed = true;
-        }
-        return mapped;
-    }
-
-    private void MakeDirectory(ForeignEntry e, string mapped, bool renamed)
-    {
-        string full = Full(mapped);
-        if (renamed) _warnings.Add($"'{Esc(e.Path)}' was saved as '{Esc(mapped)}'");
-        if (_createdDirSet.Contains(full)) _dirEntries.Add((e, full));
-    }
-
-    /// <summary>Rules 8 and 9 for a file: the target, renamed when this run or the earlier pass wrote that name (in
-    /// every mode), else by the overwrite mode when a file or folder was already there. False: nothing to write.</summary>
-    private bool ChooseTarget(ForeignEntry e, string mapped, ref bool renamed, out string target, out bool replace)
-    {
-        target = Full(mapped);
-        replace = false;
-        if (_written.ContainsKey(target))
-        {
-            target = UniqueName(target);
-            renamed = true;
-            return true;
-        }
-        bool isFile = IsFileOrFileLink(target), isDir = !isFile && Directory.Exists(target);
-        if (!isFile && !isDir) return true;
-        switch (_request.Overwrite)
-        {
-            case OverwriteMode.Skip:
-                _existing++;
-                return false;
-            case OverwriteMode.Fail:
-                _failed++;
-                _errors.Add($"{Esc(e.Path)}: a {(isDir ? "folder" : "file")} of this name already exists");
-                return false;
-            case OverwriteMode.Overwrite when isFile:
-                replace = true;
-                return true;
-            default:
-                target = UniqueName(target);
-                renamed = true;
-                return true;
-        }
-    }
-
     private void Write(ForeignEntry e, string target, bool replace, bool renamed, EntryContent content)
     {
+        // Checked again here, without the plan's answers: a folder on the way may have become a link since.
+        if (TargetNames.LinkOnTheWay(_root, target) is { } link)
+        {
+            Refuse(ref _unsafe, e, link);
+            return;
+        }
         string part = Extractor.PartName(target);
         _currentPart = part;
         _progress.Current(e.Path);
@@ -334,10 +270,14 @@ internal sealed class GuardedExtractor : IEntrySink
                     return;
                 }
             }
+            if (TargetNames.LinkOnTheWay(_root, target) is { } moved)
+            {
+                Refuse(ref _unsafe, e, moved);
+                return;
+            }
             FileRetry.Move(part, target, overwrite: replace);
             _currentPart = null;
             SetFileMetadata(target, e);
-            _written[target] = false;
             _ok++;
             if (!content.Verified) _unverified++;
             if (renamed)
@@ -374,48 +314,6 @@ internal sealed class GuardedExtractor : IEntrySink
     {
         try { return s.Read(buf, 0, buf.Length); }
         catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { throw new EntryDataException(ex); }
-    }
-
-    /// <summary>A free "name (n).ext" next to <paramref name="full"/>: not on disk, not written in this run, and not
-    /// another selected entry's own name.</summary>
-    private string UniqueName(string full)
-    {
-        string dir = Path.GetDirectoryName(full)!, stem = Path.GetFileNameWithoutExtension(full), ext = Path.GetExtension(full);
-        for (int i = 2; i < 10_000_000; i++)
-        {
-            string candidate = Path.Combine(dir, $"{stem} ({i}){ext}");
-            if (!_written.ContainsKey(candidate) && !_reserved.Contains(candidate) && !Exists(candidate)) return candidate;
-        }
-        throw new IOException("No free name was found.");
-    }
-
-    private static bool Exists(string full) => IsFileOrFileLink(full) || Directory.Exists(full);
-
-    /// <summary>A file, or a link of any kind that is not a folder we may write into (dangling links included).</summary>
-    private static bool IsFileOrFileLink(string full)
-    {
-        var fi = new FileInfo(full);
-        if (fi.Exists) return true;
-        try { return fi.LinkTarget is not null && !Directory.Exists(full); }
-        catch (IOException) { return false; }
-    }
-
-    /// <summary>Rule 7: a folder that is a symbolic link, junction or mount point (a name-surrogate reparse point);
-    /// cloud placeholders and other reparse points are allowed.</summary>
-    private bool ThroughLink(string dir)
-    {
-        if (_throughLink.TryGetValue(dir, out bool cached)) return cached;
-        bool link;
-        try
-        {
-            var info = new DirectoryInfo(dir);
-            link = info.LinkTarget is not null
-                || (OperatingSystem.IsWindows() && info.Attributes.HasFlag(FileAttributes.ReparsePoint) && (ReparseTag(dir) & 0x20000000) != 0);
-        }
-        catch (IOException) { link = true; }
-        catch (UnauthorizedAccessException) { link = true; }
-        _throughLink[dir] = link;
-        return link;
     }
 
     private void SetFileMetadata(string path, ForeignEntry e)
@@ -493,28 +391,4 @@ internal sealed class GuardedExtractor : IEntrySink
         try { File.Delete(path); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
-
-    private static uint ReparseTag(string path)
-    {
-        var h = FindFirstFileW(path, out var data);
-        if (h == -1) return 0;
-        FindClose(h);
-        return (data.dwFileAttributes & 0x400) != 0 ? data.dwReserved0 : 0;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct Win32FindData
-    {
-        public uint dwFileAttributes;
-        public uint ftCreationLow, ftCreationHigh, ftLastAccessLow, ftLastAccessHigh, ftLastWriteLow, ftLastWriteHigh;
-        public uint nFileSizeHigh, nFileSizeLow, dwReserved0, dwReserved1;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string cFileName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string cAlternateFileName;
-    }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern nint FindFirstFileW(string fileName, out Win32FindData data);
-
-    [DllImport("kernel32.dll")]
-    private static extern bool FindClose(nint handle);
 }

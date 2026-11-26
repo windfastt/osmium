@@ -195,7 +195,7 @@ public class GuardedExtractorTests
         var r = s.Extract([MemoryEntry.File("linked/evil.txt", "evil"), MemoryEntry.File("linked/sub/evil.txt", "evil"), MemoryEntry.File("fine.txt", "fine")]);
         Assert.Equal(2, r.SkippedUnsafe);
         Assert.Equal(1, r.FilesOk);
-        Assert.Contains(r.Errors, e => e.Contains("through a link", StringComparison.Ordinal));
+        Assert.Contains(r.Errors, e => e.Contains("a link in the destination points elsewhere", StringComparison.Ordinal));
         s.AssertNothingOutside();
     }
 
@@ -251,6 +251,28 @@ public class GuardedExtractorTests
         Assert.Equal(["Report (3).txt", "report (2).txt", "report.txt"], s.FilesUnder());
         Assert.Equal("3", File.ReadAllText(s.At("report (2).txt")));
         Assert.Equal(1, r.Renamed);
+    }
+
+    [Fact]
+    public void ManyCopiesOfOneNameTakeNoLongerThanAsManyDifferentNames()
+    {
+        // Each copy gets the next free name without trying the names before it again, so 10,000 copies of one name
+        // cost about what 10,000 different names cost; a search from "a (2)" for every copy takes several times as long.
+        const int n = 10_000;
+        static List<MemoryEntry> Entries(Func<int, string> name) => [.. Enumerable.Range(0, n).Select(i => new MemoryEntry(name(i), []))];
+        using var distinct = new Setup();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var d = distinct.Extract(Entries(i => $"f{i}.txt"));
+        var distinctTime = sw.Elapsed;
+        using var same = new Setup();
+        sw.Restart();
+        var r = same.Extract(Entries(_ => "a.txt"));
+        var sameTime = sw.Elapsed;
+        Assert.Equal(n, d.FilesOk);
+        Assert.Equal((n, n - 1), (r.FilesOk, r.Renamed));
+        Assert.True(File.Exists(same.At($"a ({n}).txt")));
+        Assert.True(sameTime < distinctTime * 2 + TimeSpan.FromSeconds(1),
+            $"{n:N0} copies of one name took {sameTime.TotalSeconds:F1} s, {n:N0} different names {distinctTime.TotalSeconds:F1} s");
     }
 
     [Theory]
