@@ -79,7 +79,8 @@ internal sealed class TargetNames
     {
         string path = own;
         // Folders above it, outermost first: one that a file of this run took moves to a free name, with everything
-        // below it; one that exists already must not be a link.
+        // below it, and so does one where a file is already in the destination (in Skip mode the folder is skipped,
+        // in Fail mode it fails: a file is never replaced by a folder); one that exists already must not be a link.
         var parts = Path.GetRelativePath(_root, own).Split(Path.DirectorySeparatorChar);
         string current = _root;
         for (int i = 0; i < parts.Length - 1; i++)
@@ -87,6 +88,11 @@ internal sealed class TargetNames
             string next = Path.Combine(current, parts[i]);
             if (_dirRenames.TryGetValue(next, out var moved)) next = moved;
             else if (_files.Contains(next)) next = _dirRenames[next] = FreeName(next, folder: true);
+            else if (!_dirs.Contains(next) && OnDisk(next) == OnDiskKind.File)
+            {
+                if (FileInTheWay(mode) is { } refused) return refused;
+                next = _dirRenames[next] = FreeName(next, folder: true);
+            }
             _dirs.Add(next);
             if (LinkAt(next) is { } why) return new(Outcome.Unsafe, null, false, false, why);
             current = next;
@@ -97,6 +103,11 @@ internal sealed class TargetNames
         {
             if (_dirRenames.TryGetValue(path, out var moved)) path = moved;
             else if (_files.Contains(path)) path = _dirRenames[path] = FreeName(path, folder: true);
+            else if (!_dirs.Contains(path) && OnDisk(path) == OnDiskKind.File)
+            {
+                if (FileInTheWay(mode) is { } refused) return refused;
+                path = _dirRenames[path] = FreeName(path, folder: true);
+            }
             if (LinkAt(path) is { } why) return new(Outcome.Unsafe, null, false, false, why);
             _dirs.Add(path);
             return new(Outcome.Planned, path, false, !_names.Equals(path, own), null);
@@ -117,15 +128,24 @@ internal sealed class TargetNames
                     case OverwriteMode.Skip: return new(Outcome.Skipped, null, false, false, null);
                     case OverwriteMode.Fail: return new(Outcome.Failed, null, false, false, kind == OnDiskKind.Directory ? "A folder of this name exists." : "File exists.");
                     case OverwriteMode.Overwrite when kind == OnDiskKind.File && !otherSpelling: replaces = true; break;
-                    case OverwriteMode.Overwrite when kind == OnDiskKind.Directory:
-                        return new(Outcome.Failed, null, false, false, "A folder of this name is in the destination; it is not replaced by a file.");
-                    default: path = FreeName(path, folder: false); break; // Rename, or a name known only by another spelling
+                    // Overwrite never replaces a folder by a file (that would delete what the folder holds): the file
+                    // gets a free name, as in Rename or for a name known only by another spelling.
+                    default: path = FreeName(path, folder: false); break;
                 }
             }
         }
         _files.Add(path);
         return new(Outcome.Planned, path, replaces, !_names.Equals(path, own), null);
     }
+
+    /// <summary>What becomes of a folder of the archive where a file is already in the destination: skipped in Skip
+    /// mode, failed in Fail mode; null when it gets a free name instead (Rename, Overwrite).</summary>
+    private static Target? FileInTheWay(OverwriteMode mode) => mode switch
+    {
+        OverwriteMode.Skip => new(Outcome.Skipped, null, false, false, null),
+        OverwriteMode.Fail => new(Outcome.Failed, null, false, false, "A file of this name is in the destination where the archive has a folder."),
+        _ => null,
+    };
 
     /// <summary>"name (2).ext", "name (3).ext"… (folders: "name (2)"): the first that nothing has. The search for one
     /// name resumes where it stopped, so many entries of one name cost one pass. A name so long that the number would

@@ -174,16 +174,29 @@ public sealed class ForeignFormatTests : IDisposable
     [Fact]
     public async Task AFolderThatCannotBeMadeEndsTheRunWithTwo()
     {
-        // A file in the destination stands where the archive has a folder: the folder cannot be made, and although
-        // no file of the archive fails, the error makes the run fail.
-        string path = Zip("folder.zip", [("ok.txt", "fine"), ("x/sub/", "")]);
-        Directory.CreateDirectory(P("out"));
-        File.WriteAllText(P("out", "x"), "a file where the archive has a folder");
+        // A folder 22 levels of 200 characters deep is past what Linux takes in one path: it cannot be made, and
+        // although no file of the archive fails, the error makes the run fail.
+        if (OperatingSystem.IsWindows()) Assert.Skip("Windows makes folders of any length (long paths), so this folder can be made there.");
+        string deep = string.Join('/', Enumerable.Repeat(new string('d', 200), 22)) + "/";
+        string path = Zip("folder.zip", [("ok.txt", "fine"), (deep, "")]);
         var r = await CliRunner.RunAsync(["x", path, P("out")]);
-        Assert.Contains("error: x/sub", r.Error);
+        Assert.Contains("error: ddd", r.Error);
         Assert.Equal(2, r.ExitCode);
         Assert.Contains("1 error(s) above", r.Output);
         Assert.Equal("fine", File.ReadAllText(P("out", "ok.txt")));
+    }
+
+    [Fact]
+    public async Task AFileInTheDestinationWhereTheArchiveHasAFolderGivesTheFolderAFreeName()
+    {
+        string path = Zip("folder.zip", [("ok.txt", "fine"), ("x/sub/f.txt", "below")]);
+        Directory.CreateDirectory(P("out"));
+        File.WriteAllText(P("out", "x"), "a file where the archive has a folder");
+        var r = await CliRunner.RunAsync(["x", path, P("out")]);
+        Assert.True(r.ExitCode == 0, r.Error);
+        Assert.Contains("was saved as 'x (2)/sub/f.txt'", r.Error);
+        Assert.Equal("below", File.ReadAllText(P("out", "x (2)", "sub", "f.txt")));
+        Assert.Equal("a file where the archive has a folder", File.ReadAllText(P("out", "x")));
     }
 
     [Fact]
