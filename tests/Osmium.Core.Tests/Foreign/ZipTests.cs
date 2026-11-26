@@ -1,0 +1,498 @@
+using System.IO.Compression;
+using System.IO.Hashing;
+using System.Security.Cryptography;
+using System.Text;
+using Osmium.Core.Archives;
+using Osmium.Core.Archives.Foreign;
+using Osmium.Core.Archives.Foreign.Zip;
+using Osmium.Core.Container;
+using static Osmium.Core.Tests.Foreign.TarAndStreamTests;
+
+namespace Osmium.Core.Tests.Foreign;
+
+/// <summary>ZIP: methods, names, encryption and the password rule, integrity, links, and the bomb shapes.</summary>
+public class ZipTests
+{
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private static IArchiveSource Open(string path, ArchiveOpenOptions? options = null) => ArchiveSources.Open(path, options, Ct);
+
+    private static ArchiveExtractResult Extract(IArchiveSource s, string dest, ArchiveExtractRequest? request = null) =>
+        s.Extract(dest, request ?? new ArchiveExtractRequest(), null, Ct);
+
+    private static List<string> FilesUnder(string root) => !Directory.Exists(root) ? []
+        : Directory.GetFiles(root, "*", SearchOption.AllDirectories).Select(f => Path.GetRelativePath(root, f).Replace('\\', '/')).Order(StringComparer.Ordinal).ToList();
+
+    private static void AssertFixtureTree(string root)
+    {
+        foreach (var (name, data) in ForeignData.FixtureTree)
+            Assert.Equal(data, File.ReadAllBytes(Path.Combine([root, .. name.Split('/')])));
+        Assert.True(Directory.Exists(Path.Combine(root, "in", "sub", "empty")));
+    }
+
+    [Fact]
+    public void RoundTripsAGeneratedZip()
+    {
+        using var t = new TempDir();
+        (string, byte[])[] entries =
+        [
+            ("top/", []), ("top/empty/", []), ("top/zero.bin", []), ("top/ünïcödé — файл.txt", ForeignData.Text(3000)),
+            ("top/sub/big.txt", ForeignData.Text(200_000, 2)), ("top/sub/stored.bin", RandomNumberGenerator.GetBytes(5000)),
+        ];
+        string path = ForeignData.Write(t, "gen.zip", ForeignData.Zip(entries));
+        using var s = Open(path);
+        Assert.Equal("ZIP", s.FormatName);
+        Assert.False(s.IsEncrypted);
+        Assert.Equal(entries.Select(e => e.Item1.TrimEnd('/')), s.Items.Select(i => i.Path));
+        Assert.Equal("Deflate", s.Items.Single(i => i.Path == "top/sub/big.txt").Method);
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((4, 0, 0), (r.FilesOk, r.Unverified, r.LeftOut));
+        foreach (var (name, data) in entries.Where(e => !e.Item1.EndsWith('/')))
+            Assert.Equal(data, File.ReadAllBytes(Path.Combine([t.Sub("out"), .. name.Split('/')])));
+        Assert.True(Directory.Exists(Path.Combine(t.Sub("out"), "top", "empty")));
+        Assert.Equal(new DateTime(2024, 5, 6, 7, 8, 10, DateTimeKind.Utc), File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "top", "sub", "big.txt")));
+        var test = s.Test(null, null, Ct);
+        Assert.Equal((4, 0, 0), (test.FilesOk, test.Unverified, test.LeftOut));
+    }
+
+    [Theory]
+    [InlineData("deflate64.zip", "Deflate (64 KiB window)")]
+    [InlineData("lzma.zip", "LZMA")]
+    [InlineData("ppmd.zip", "PPMd")]
+    [InlineData("bzip2.zip", "BZip2")]
+    [InlineData("infozip.zip", "Deflate")]
+    public void ReadsEveryMethodItSupports(string fixture, string method)
+    {
+        using var t = new TempDir();
+        using var s = Open(ForeignData.Fixture("zip", fixture));
+        Assert.Contains(method, s.Items.Where(i => i.Size > 0).Select(i => i.Method));
+        Assert.Contains(s.Details, d => d.Label == "Methods" && d.Value.Contains(method, StringComparison.Ordinal));
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((3, 0), (r.FilesOk, r.LeftOut));
+        AssertFixtureTree(t.Sub("out"));
+        Assert.Equal(3, s.Test(null, null, Ct).FilesOk);
+    }
+
+    [Theory]
+    [InlineData("aes128.zip", "secret", "AES-128")]
+    [InlineData("aes192.zip", "secret", "AES-192")]
+    [InlineData("aes256.zip", "secret", "AES-256")]
+    [InlineData("zipcrypto.zip", "secret", "ZipCrypto")]
+    [InlineData("zipcrypto-nonascii.zip", "Pässwörd ü", "ZipCrypto")]
+    public void EncryptedFixturesOpenWithTheRightPassword(string fixture, string password, string kind)
+    {
+        using var t = new TempDir();
+        int asked = 0;
+        using var s = Open(ForeignData.Fixture("zip", fixture), new ArchiveOpenOptions { Password = () => { asked++; return password; } });
+        Assert.Equal(0, asked); // entry encryption: never asked in Open
+        Assert.True(s.IsEncrypted);
+        Assert.Contains(s.Details, d => d.Label == "Encrypted" && d.Value == $"yes ({kind})");
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((3, 0, 0), (r.FilesOk, r.Unverified, r.LeftOut));
+        AssertFixtureTree(t.Sub("out"));
+        Assert.Equal(3, s.Test(null, null, Ct).FilesOk);
+        Assert.Equal(1, asked);
+    }
+
+    [Theory]
+    [InlineData("aes256.zip")]
+    [InlineData("zipcrypto.zip")]
+    [InlineData("zipcrypto-nonascii.zip")]
+    public void AWrongPasswordWritesNothingAndStaysSpent(string fixture)
+    {
+        using var t = new TempDir();
+        int asked = 0;
+        using var s = Open(ForeignData.Fixture("zip", fixture), new ArchiveOpenOptions { Password = () => { asked++; return "not it"; } });
+        Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out")));
+        Assert.False(Directory.Exists(t.Sub("out")));
+        Assert.Throws<WrongPasswordException>(() => s.Test(null, null, Ct));
+        Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out")));
+        Assert.Equal(1, asked);
+        // The source stays usable: its listing and the folders, which hold no encrypted data.
+        Assert.NotEmpty(s.Items);
+        var folders = Extract(s, t.Sub("folders"), new ArchiveExtractRequest { Select = i => i.IsDirectory });
+        Assert.Equal(0, folders.LeftOut);
+        Assert.True(Directory.Exists(Path.Combine(t.Sub("folders"), "in", "sub", "empty")));
+    }
+
+    [Fact]
+    public void ARefusedPasswordStaysRefused()
+    {
+        using var t = new TempDir();
+        int asked = 0;
+        using var s = Open(ForeignData.Fixture("zip", "aes256.zip"), new ArchiveOpenOptions { Password = () => { asked++; return null; } });
+        Assert.Throws<PasswordRequiredException>(() => Extract(s, t.Sub("out")));
+        Assert.Throws<PasswordRequiredException>(() => s.Test(null, null, Ct));
+        Assert.Equal(1, asked);
+        Assert.False(Directory.Exists(t.Sub("out")));
+    }
+
+    private static string Mixed(TempDir t, string password)
+    {
+        var z = new ZipCraft();
+        z.Add("plain.txt", ForeignData.Text(5000));
+        z.AddAes("secret.txt", ForeignData.Text(7000, 2), password);
+        z.AddZipCrypto("old.txt", ForeignData.Text(6000, 3), Encoding.UTF8.GetBytes(password));
+        return ForeignData.Write(t, "mixed.zip", z.Build());
+    }
+
+    [Fact]
+    public void ThePasswordIsAskedLazilyAndOnce()
+    {
+        using var t = new TempDir();
+        string path = Mixed(t, "right");
+        int asked = 0;
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "wrong"; } }))
+        {
+            Assert.Equal(0, asked);
+            Assert.Equal(1, Extract(s, t.Sub("plain"), new ArchiveExtractRequest { Indices = new HashSet<int> { 0 } }).FilesOk);
+            Assert.Equal(1, s.Test(i => i.Index == 0, null, Ct).FilesOk);
+            Assert.Equal(0, asked);
+            Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("all")));
+            Assert.Equal(1, asked);
+            Assert.False(Directory.Exists(t.Sub("all")));
+            // Unencrypted entries still extract; encrypted ones fail again without asking.
+            Assert.Equal(1, Extract(s, t.Sub("plain2"), new ArchiveExtractRequest { Indices = new HashSet<int> { 0 } }).FilesOk);
+            Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("all"), new ArchiveExtractRequest { Indices = new HashSet<int> { 1 } }));
+            Assert.Equal(1, asked);
+        }
+        asked = 0;
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => { asked++; return "right"; } }))
+        {
+            Assert.Equal(3, Extract(s, t.Sub("all")).FilesOk);
+            Assert.Equal(3, Extract(s, t.Sub("again")).FilesOk);
+            Assert.Equal(1, asked);
+        }
+        Assert.Equal(ForeignData.Text(7000, 2), File.ReadAllBytes(Path.Combine(t.Sub("all"), "secret.txt")));
+    }
+
+    [Fact]
+    public void TamperedAesCiphertextIsRefusedAndNoFileIsKept()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.AddAes("first.txt", ForeignData.Text(4000), "pw");
+        var bad = z.AddAes("second.txt", ForeignData.Text(4000, 2), "pw");
+        bad.Stored[40] ^= 1; // a ciphertext byte: decrypts to wrong data, and the authentication code no longer matches
+        using var s = Open(ForeignData.Write(t, "t.zip", z.Build()), new ArchiveOpenOptions { Password = () => "pw" });
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1), (r.FilesOk, r.FilesFailed));
+        Assert.Contains(r.Errors, e => e.StartsWith("second.txt: wrong password or damaged file", StringComparison.Ordinal));
+        Assert.Equal(["first.txt"], FilesUnder(t.Sub("out")));
+        Assert.Equal(1, s.Test(null, null, Ct).FilesFailed);
+    }
+
+    [Fact]
+    public void AnAesPasswordThatPassesTheVerifierIsStillCheckedAgainstTheAuthenticationCode()
+    {
+        using var t = new TempDir();
+        var bytes = File.ReadAllBytes(ForeignData.Fixture("zip", "aes256.zip"));
+        // Make the first file's stored verifier the one a wrong password derives.
+        using (var slice = OpenSlice(ForeignData.Fixture("zip", "aes256.zip")))
+        {
+            var dir = ZipDirectory.Read(slice, ImportLimits.Default, 437);
+            var first = dir.Records.First(r => r.Encrypted && r.CompressedSize > 0);
+            var salt = bytes.AsSpan((int)first.DataStart, 16).ToArray();
+            var (_, _, verifier) = WinZipAes.Derive("wrong", salt, 3);
+            verifier.CopyTo(bytes, (int)first.DataStart + 16);
+            int index = first.Index;
+            string path = ForeignData.Write(t, "patched.zip", bytes);
+            using var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+            Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out"), new ArchiveExtractRequest { Indices = new HashSet<int> { index } }));
+            Assert.False(Directory.Exists(t.Sub("out")));
+        }
+    }
+
+    private static FileSlice OpenSlice(string path)
+    {
+        var h = File.OpenHandle(path);
+        return new FileSlice(h, 0, RandomAccess.GetLength(h));
+    }
+
+    [Fact]
+    public void Ae1EntriesCheckBothTheCodeAndTheCrc()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.AddAes("good.txt", ForeignData.Text(3000), "pw", version: 1);
+        var bad = z.AddAes("bad-crc.txt", ForeignData.Text(3000, 2), "pw", version: 1);
+        bad.Crc ^= 1;
+        bad.LocalCrc = bad.Crc;
+        using var s = Open(ForeignData.Write(t, "ae1.zip", z.Build()), new ArchiveOpenOptions { Password = () => "pw" });
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1), (r.FilesOk, r.FilesFailed));
+        Assert.Contains(r.Errors, e => e.Contains("CRC mismatch", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AZipCryptoPasswordThatPassesTheCheckByteIsCaughtByTheCrcWithoutBufferingTheEntry()
+    {
+        using var t = new TempDir();
+        var data = new byte[64 << 20];
+        var line = Encoding.ASCII.GetBytes("a line of very compressible text for the password check\n");
+        for (int i = 0; i < data.Length; i++) data[i] = line[i % line.Length];
+        var right = Encoding.UTF8.GetBytes("right password");
+        var z = new ZipCraft();
+        var item = z.AddZipCrypto("big.txt", data, right);
+        string path = ForeignData.Write(t, "big.zip", z.Build());
+        // Find a wrong password that passes the one-byte check (about 1 in 256).
+        string wrong = Enumerable.Range(0, 100_000).Select(i => "wrong " + i).First(p => ZipCraft.PassesCheckByte(Encoding.UTF8.GetBytes(p), item.Stored, item.Crc));
+        data = [];
+
+        var reports = new List<ExtractProgress>();
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => wrong }))
+        {
+            GC.Collect();
+            long allocated = GC.GetTotalAllocatedBytes(precise: true);
+            long before = GC.GetTotalMemory(forceFullCollection: true);
+            Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("out"), new ArchiveExtractRequest(), new SyncProgress<ExtractProgress>(reports.Add), Ct));
+            long after = GC.GetTotalMemory(forceFullCollection: true);
+            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - allocated < 16 << 20, "the check buffered the entry");
+            Assert.True(after - before < 16 << 20);
+        }
+        Assert.False(Directory.Exists(t.Sub("out")));
+        Assert.Contains(reports, p => p.Current == "Checking the password");
+
+    }
+
+    [Fact]
+    public void TheZipCryptoCheckIsBoundedByTheLimits()
+    {
+        using var t = new TempDir();
+        var data = new byte[8 << 20];
+        var z = new ZipCraft();
+        var item = z.AddZipCrypto("zeros.bin", data, "pw"u8.ToArray());
+        item.Size = 1000; // a lie only the counters see
+        item.LocalSize = 1000;
+        var limits = ImportLimits.Default with { ExpansionFloorBytes = 1 << 20, MaxExpansionRatio = 10 };
+        using var s = Open(ForeignData.Write(t, "bomb.zip", z.Build()), new ArchiveOpenOptions { Password = () => "pw", Limits = limits });
+        // The check never decodes more than one byte past the declared size, so the lie makes it fail; an honest
+        // size past the limits is refused before the check decodes anything.
+        Assert.Throws<WrongPasswordException>(() => Extract(s, t.Sub("out")));
+        var honest = new ZipCraft();
+        honest.AddZipCrypto("zeros.bin", data, "pw"u8.ToArray());
+        using var h = Open(ForeignData.Write(t, "honest.zip", honest.Build()), new ArchiveOpenOptions { Password = () => "pw", Limits = limits with { ExpansionFloorBytes = 1 << 20 } });
+        Assert.Throws<ExpansionLimitException>(() => Extract(h, t.Sub("out")));
+        Assert.False(Directory.Exists(t.Sub("out")));
+    }
+
+    [Fact]
+    public void OverlappingEntriesAreRefused()
+    {
+        using var t = new TempDir();
+        var kernel = new byte[1 << 20];
+        var z = new ZipCraft();
+        z.Add("kernel.bin", kernel);
+        for (int i = 0; i < 50; i++)
+        {
+            var copy = z.Add($"copy{i}.bin", kernel);
+            copy.SameDataAs = 0;
+            copy.Name = Encoding.UTF8.GetBytes("kernel.bin"); // the shared local header names it so
+        }
+        string path = ForeignData.Write(t, "overlap.zip", z.Build());
+        using var s = Open(path);
+        Assert.Contains(s.Details, d => d.Label == "Overlapping entries" && d.Value.StartsWith("51", StringComparison.Ordinal));
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((0, 51), (r.FilesOk, r.SkippedUnsafe));
+        Assert.Contains("overlaps another entry", r.Errors[0]);
+        Assert.Empty(FilesUnder(t.Sub("out")));
+        Assert.Equal(51, s.Test(null, null, Ct).SkippedUnsafe);
+    }
+
+    [Fact]
+    public void LocalAndCentralSizesThatDisagreeAreDamage()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        var small = z.Add("declares-small.bin", new byte[1 << 20]);
+        small.LocalSize = 1024; // local header: 1 KB; central directory: 1 MB
+        var big = z.Add("inflates-more.bin", new byte[1 << 20]);
+        big.Size = 1024; // both headers say 1 KB, the data inflates to 1 MB
+        big.LocalSize = 1024;
+        z.Add("fine.txt", "fine"u8.ToArray());
+        using var s = Open(ForeignData.Write(t, "lies.zip", z.Build()));
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 2), (r.FilesOk, r.FilesFailed));
+        Assert.Contains(r.Errors, e => e.Contains("disagrees with the central directory", StringComparison.Ordinal));
+        Assert.Contains(r.Errors, e => e.Contains("more data than the archive says", StringComparison.Ordinal));
+        Assert.Equal(["fine.txt"], FilesUnder(t.Sub("out")));
+    }
+
+    [Fact]
+    public void TheEntryCountIsCheckedBeforeEntriesAreRead()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.Add("a.txt", "a"u8.ToArray());
+        z.DeclaredCount = 1_000_001; // in the ZIP64 end record; the central directory holds one entry
+        var e = Assert.Throws<EntryLimitException>(() => Open(ForeignData.Write(t, "count.zip", z.Build())));
+        Assert.Contains("1,000,001 entries", e.Message);
+        var limits = ImportLimits.Default with { MaxEntries = 1000 };
+        var real = new ZipCraft();
+        for (int i = 0; i < 1001; i++) real.Add($"f{i}", [], deflate: false);
+        Assert.Throws<EntryLimitException>(() => Open(ForeignData.Write(t, "many.zip", real.Build()), new ArchiveOpenOptions { Limits = limits }));
+        Assert.Equal(1001, Open(ForeignData.Write(t, "many2.zip", real.Build())).Items.Count);
+    }
+
+    [Fact]
+    public void TheDeclaredOutputIsCheckedBeforeWriting()
+    {
+        using var t = new TempDir();
+        string path = ForeignData.Write(t, "zeros.zip", ForeignData.Zip([("zeros.bin", new byte[8 << 20])]));
+        var limits = ImportLimits.Default with { ExpansionFloorBytes = 1 << 20, MaxExpansionRatio = 10 };
+        using var s = Open(path, new ArchiveOpenOptions { Limits = limits });
+        var e = Assert.Throws<ExpansionLimitException>(() => Extract(s, t.Sub("out")));
+        Assert.Equal(8 << 20, e.OutputBytes);
+        Assert.False(Directory.Exists(t.Sub("out")));
+        Assert.Equal(1, Extract(s, t.Sub("out"), new ArchiveExtractRequest { Limits = limits with { AllowLargeExpansion = true } }).FilesOk);
+    }
+
+    [Fact]
+    public void HugeDeclaredDecoderMemoryIsRefusedOrNeverAllocated()
+    {
+        using var t = new TempDir();
+        var budget = ImportLimits.Default with { MemoryBudgetBytes = 64 << 20 };
+        // PPMd declaring 256 MB: refused per entry before the model is allocated.
+        var ppmd = File.ReadAllBytes(ForeignData.Fixture("zip", "ppmd.zip"));
+        using (var slice = OpenSlice(ForeignData.Fixture("zip", "ppmd.zip")))
+            foreach (var r in ZipDirectory.Read(slice, ImportLimits.Default, 437).Records.Where(r => r.CompressedSize > 0))
+                ppmd[r.DataStart + 1] |= 0x0F; // memory field: (props >> 4) & 0xFF = 0xFF → 256 MB
+        using (var s = Open(ForeignData.Write(t, "ppmd-big.zip", ppmd), new ArchiveOpenOptions { Limits = budget }))
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            var r = Extract(s, t.Sub("ppmd"));
+            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+            Assert.Equal(2, r.SkippedUnsupported);
+            Assert.Contains(r.Errors, e => e.Contains("needs more memory than allowed", StringComparison.Ordinal));
+        }
+        // LZMA declaring a 4 GiB dictionary for a small file: the file's size is enough, so it decodes in little memory.
+        var lzma = File.ReadAllBytes(ForeignData.Fixture("zip", "lzma.zip"));
+        using (var slice = OpenSlice(ForeignData.Fixture("zip", "lzma.zip")))
+            foreach (var r in ZipDirectory.Read(slice, ImportLimits.Default, 437).Records.Where(r => r.CompressedSize > 0))
+                BitConverter.GetBytes(0xFFFFFFFFu).CopyTo(lzma, r.DataStart + 5);
+        using (var s = Open(ForeignData.Write(t, "lzma-big.zip", lzma), new ArchiveOpenOptions { Limits = budget }))
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            Assert.Equal(3, Extract(s, t.Sub("lzma")).FilesOk);
+            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+        }
+    }
+
+    [Fact]
+    public void LinksDevicesAndUnknownMethodsAreRefused()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        var link = z.Add("link", "/etc"u8.ToArray(), deflate: false);
+        link.MadeBy = 3 << 8; link.External = 0xA1FFu << 16;
+        var fifo = z.Add("fifo", [], deflate: false);
+        fifo.MadeBy = 3 << 8; fifo.External = 0x11A4u << 16;
+        var imploded = z.Add("old.txt", "x"u8.ToArray(), deflate: false);
+        imploded.Method = 6;
+        var strong = z.Add("strong.txt", "x"u8.ToArray(), deflate: false, flags: 0x41);
+        var reparse = z.Add("junction", [], deflate: false);
+        reparse.External = 0x410;
+        z.Add("ok.txt", "ok"u8.ToArray());
+        using var s = Open(ForeignData.Write(t, "odd.zip", z.Build()));
+        Assert.True(s.Items[0].IsLink);
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal(1, r.FilesOk);
+        Assert.Equal(2, r.SkippedLinks);
+        Assert.Equal(3, r.SkippedUnsupported);
+        Assert.Contains(r.Errors, e => e.Contains("compression method 6 (Implode), which Osmium cannot read", StringComparison.Ordinal));
+        Assert.Contains(r.Errors, e => e.Contains("PKWARE strong encryption, which Osmium cannot read", StringComparison.Ordinal));
+        Assert.Equal(["ok.txt"], FilesUnder(t.Sub("out")));
+    }
+
+    [Fact]
+    public void CentralDirectoryEncryptionAndMultipleDisksAreNotSupported()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.Add("a.txt", "a"u8.ToArray(), flags: 0x2000);
+        Assert.Contains("PKWARE strong encryption", Assert.Throws<NotSupportedException>(() => Open(ForeignData.Write(t, "cd.zip", z.Build()))).Message);
+        var d = new ZipCraft { Disk = 1 };
+        d.Add("a.txt", "a"u8.ToArray());
+        Assert.Equal("Multi-volume ZIP archives are not supported.", Assert.Throws<NotSupportedException>(() => Open(ForeignData.Write(t, "disk.zip", d.Build()))).Message);
+    }
+
+    [Fact]
+    public void NamesWithoutTheUtf8FlagUseTheOemCodePage()
+    {
+        using var t = new TempDir();
+        ArchiveSources.EnsureCodePages();
+        var z = new ZipCraft();
+        z.Add("über.txt", "1"u8.ToArray(), encoding: Encoding.GetEncoding(437));
+        z.Add("dir\\file.txt", "2"u8.ToArray(), encoding: Encoding.ASCII);
+        var unicode = z.Add("ignored.txt", "3"u8.ToArray(), encoding: Encoding.ASCII);
+        var name = Encoding.UTF8.GetBytes("ünïcödé.txt");
+        unicode.Extra = [0x75, 0x70, (byte)(5 + name.Length), 0, 1, .. BitConverter.GetBytes(Crc32.HashToUInt32(unicode.Name)), .. name];
+        var stale = z.Add("stale.txt", "4"u8.ToArray(), encoding: Encoding.ASCII);
+        stale.Extra = [0x75, 0x70, (byte)(5 + name.Length), 0, 1, 0, 0, 0, 0, .. name];
+        string path = ForeignData.Write(t, "oem.zip", z.Build());
+        ZipSource.OemCodePageOverride = 437;
+        try
+        {
+            using var s = Open(path);
+            Assert.Equal(["über.txt", "dir/file.txt", "ünïcödé.txt", "stale.txt"], s.Items.Select(i => i.Path));
+            Assert.Equal(4, Extract(s, t.Sub("oem")).FilesOk);
+            Assert.Equal(["dir/file.txt", "stale.txt", "über.txt", "ünïcödé.txt"], FilesUnder(t.Sub("oem")));
+        }
+        finally { ZipSource.OemCodePageOverride = null; }
+        var sjis = new ZipCraft();
+        sjis.Add("日本語.txt", "5"u8.ToArray(), encoding: Encoding.GetEncoding(932));
+        string jp = ForeignData.Write(t, "sjis.zip", sjis.Build());
+        ZipSource.OemCodePageOverride = 932;
+        try
+        {
+            using var s = Open(jp);
+            Assert.Equal("日本語.txt", s.Items.Single().Path);
+            Assert.Equal(1, Extract(s, t.Sub("out")).FilesOk);
+            Assert.True(File.Exists(Path.Combine(t.Sub("out"), "日本語.txt")));
+        }
+        finally { ZipSource.OemCodePageOverride = null; }
+    }
+
+    [Fact]
+    public void AFlippedCrcFailsTheFile()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        var bad = z.Add("bad.txt", ForeignData.Text(1000));
+        bad.Crc ^= 0x10;
+        bad.LocalCrc = bad.Crc;
+        z.Add("good.txt", ForeignData.Text(1000, 2));
+        using var s = Open(ForeignData.Write(t, "crc.zip", z.Build()));
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1), (r.FilesOk, r.FilesFailed));
+        Assert.Contains(r.Errors, e => e.StartsWith("bad.txt: damaged data (the file: CRC mismatch)", StringComparison.Ordinal));
+        Assert.Equal(["good.txt"], FilesUnder(t.Sub("out")));
+        Assert.Empty(Directory.GetFiles(t.Sub("out"), "*.osmium-part-*"));
+    }
+
+    [Fact]
+    public void TheCommentIsShownEscaped()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft { Comment = Encoding.ASCII.GetBytes("made \u001b[31mred\u001b[0m " + new string('x', 600)) };
+        z.Add("a.txt", "a"u8.ToArray());
+        using var s = Open(ForeignData.Write(t, "c.zip", z.Build()));
+        var comment = s.Details.Single(d => d.Label == "Comment").Value;
+        Assert.StartsWith("made \\u001b[31mred", comment);
+        Assert.DoesNotContain('\u001b', comment);
+        Assert.True(comment.Length < 560);
+    }
+
+    [Fact]
+    public void Zip64EndRecordsAreRead()
+    {
+        using var t = new TempDir();
+        // More than 65,535 entries make System.IO.Compression write the ZIP64 end records.
+        var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+            for (int i = 0; i < 70_000; i++) zip.CreateEntry($"d/{i}", CompressionLevel.NoCompression);
+        using var s = Open(ForeignData.Write(t, "z64.zip", ms.ToArray()));
+        Assert.Equal(70_000, s.Items.Count);
+        Assert.Equal(70_000, s.Test(null, null, Ct).FilesOk);
+    }
+}

@@ -84,6 +84,18 @@ internal sealed class ProgressReporter(IProgress<ExtractProgress>? progress, lon
         Maybe(force: true);
     }
 
+    /// <summary>The password check: bytes decoded of the entry being checked.</summary>
+    public void Checking(long done, long total)
+    {
+        if (progress is null) return;
+        long now = Environment.TickCount64;
+        if (now - _lastTick < 100) return;
+        _lastTick = now;
+        progress.Report(KnownTotal
+            ? new ExtractProgress(Math.Min(done, Math.Max(total, 0)), Math.Max(total, 0), 0, filesTotal, "Checking the password")
+            : new ExtractProgress(archiveBytesRead(), 0, 0, 0, "Checking the password"));
+    }
+
     public void FileDone()
     {
         _files++;

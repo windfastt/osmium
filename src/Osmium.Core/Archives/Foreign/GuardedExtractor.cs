@@ -176,6 +176,13 @@ internal sealed class GuardedExtractor : IEntrySink
                     _errors.Add(ex.Message.StartsWith(Esc(e.Path), StringComparison.Ordinal) ? ex.Message : $"{Esc(e.Path)}: {Esc(ex.Message)}");
                     return;
                 }
+                catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex))
+                {
+                    // Damaged before the first byte (a wrong verifier, a damaged header of the data): the same as later.
+                    _failed++;
+                    _errors.Add($"{Esc(e.Path)}: {(e.Encrypted ? "wrong password or damaged file" : "damaged data")} ({Esc(ForeignErrors.Reason(ex))})");
+                    throw new EntryDataException(ex);
+                }
                 Write(e, target, replace, renamed, content);
             }
             // A later hard link may name this file by its archive path.

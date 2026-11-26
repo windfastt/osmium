@@ -46,6 +46,8 @@ internal sealed class FileSlice : Stream
         _buffer = new byte[(int)Math.Min(bufferSize, Math.Max(16, Length))];
     }
 
+    public SafeFileHandle Handle => _handle;
+
     /// <summary>Called with the number of file bytes each underlying read returned (progress by archive bytes).</summary>
     public Action<long>? OnRead { get; set; }
     public long BytesRead { get; private set; }

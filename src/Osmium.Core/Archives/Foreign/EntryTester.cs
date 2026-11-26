@@ -37,6 +37,12 @@ internal sealed class EntryTester(ProgressReporter progress) : IEntrySink
             _errors.Add(ex.Message);
             return;
         }
+        catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex))
+        {
+            _failed++;
+            _errors.Add($"{Esc(e.Path)}: {(e.Encrypted ? "wrong password or damaged file" : "damaged data")} ({Esc(ForeignErrors.Reason(ex))})");
+            throw new EntryDataException(ex);
+        }
         try
         {
             while (true)
