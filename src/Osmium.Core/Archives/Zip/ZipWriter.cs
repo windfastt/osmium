@@ -67,7 +67,8 @@ internal static class ZipWriter
         if (!o.Overwrite && File.Exists(output)) throw new IOException($"'{output}' already exists.");
 
         string partialPrefix = output + ".partial-";
-        var items = Items(scan, output, partialPrefix);
+        var nameWarnings = new List<string>();
+        var items = Items(scan, output, partialPrefix, nameWarnings, out int namesLeftOut);
         var unreadable = new List<(string Path, string Reason)>();
         var changed = new List<string>();
         var leftOut = new HashSet<string>(IgnoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -112,11 +113,11 @@ internal static class ZipWriter
                     FilesWritten = written.Count,
                     FilesStored = written.Count(w => w.Stored),
                     FilesDeflated = written.Count(w => !w.Stored),
-                    LeftOutUnreadable = unreadable.Count,
+                    LeftOutUnreadable = unreadable.Count + namesLeftOut,
                     LeftOutChanged = changed.Count,
                     BytesIn = bytes,
                     BytesOut = length,
-                    Warnings = [.. unreadable.Select(u => $"{u.Path}: {u.Reason.TrimEnd('.')}"),
+                    Warnings = [.. nameWarnings, .. unreadable.Select(u => $"{u.Path}: {u.Reason.TrimEnd('.')}"),
                         .. changed.Select(c => $"{c}: it changed while it was being read, so it was left out")],
                 };
             }
@@ -131,19 +132,45 @@ internal static class ZipWriter
         }
     }
 
-    /// <summary>Folders and files in name order ("dir/" before what it holds), without the output and partial files.</summary>
-    private static List<Item> Items(ScanResult scan, string output, string partialPrefix)
+    /// <summary>
+    /// Folders and files in name order ("dir/" before what it holds), without the output and partial files, and
+    /// without those whose name a ZIP file cannot hold safely (<see cref="ZipSources.CheckName"/>): one warning for
+    /// each such name, which covers everything in a folder left out; <paramref name="filesLeftOut"/> counts the files.
+    /// </summary>
+    private static List<Item> Items(ScanResult scan, string output, string partialPrefix, List<string> warnings, out int filesLeftOut)
     {
         var items = new List<Item>(scan.Files.Count + scan.Dirs.Count);
-        foreach (var d in scan.Dirs) items.Add(new Item(d.RelPath.TrimEnd('/') + "/", null, d));
+        var refused = new HashSet<string>(StringComparer.Ordinal);
+        int left = 0;
+        foreach (var d in scan.Dirs.OrderBy(d => d.RelPath, StringComparer.Ordinal))
+        {
+            string name = d.RelPath.TrimEnd('/');
+            if (!Refused(name, d.FullPath, folder: true)) items.Add(new Item(name + "/", null, d));
+        }
         foreach (var f in scan.Files)
         {
             string full = Path.GetFullPath(f.FullPath);
             if (string.Equals(full, output, PathComparison) || full.StartsWith(partialPrefix, PathComparison)) continue;
-            items.Add(new Item(f.RelPath, f, null));
+            if (Refused(f.RelPath, f.FullPath, folder: false)) left++;
+            else items.Add(new Item(f.RelPath, f, null));
         }
         items.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+        filesLeftOut = left;
         return items;
+
+        bool Refused(string name, string fullPath, bool folder)
+        {
+            if (ZipSources.CheckName(name, folder) is not { } problem) return false;
+            string at = name[..problem.Length];
+            if (!refused.Add(at)) return true;
+            // Name the file or folder whose name is at fault: fullPath, or the folder above it that the part names.
+            string path = fullPath;
+            for (int i = problem.Length; i < name.Length; i++)
+                if (name[i] == '/') path = Path.GetDirectoryName(path) ?? path;
+            bool all = folder || problem.Length < name.Length;
+            warnings.Add($"{path}: its name cannot go into a ZIP file safely ({problem.Reason}), so it was left out{(all ? " with everything in it" : "")}");
+            return true;
+        }
     }
 
     /// <summary>
@@ -173,12 +200,18 @@ internal static class ZipWriter
                 }
                 var src = item.File!;
                 progress.Report(bytesDone, bytesTotal, written.Count, filesTotal, item.Name, force: false);
-                FileStream input;
+                FileStream? input;
                 long lengthBefore;
                 DateTime timeBefore;
                 try
                 {
-                    input = new FileStream(src.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan);
+                    // Never through a link that has taken the file's place since the scan, and never a pipe or a device.
+                    input = ZipSources.Open(src.FullPath, item.Name, out string? refusal);
+                    if (input is null)
+                    {
+                        unreadable.Add((src.FullPath, refusal!));
+                        continue;
+                    }
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
@@ -220,6 +253,8 @@ internal static class ZipWriter
                             es.Write(buffer, 0, n);
                             read += n;
                             bytesDone += n;
+                            // Longer than it was when opened: it changed, and need not be read to its end to know it.
+                            if (read > lengthBefore) break;
                             o.Gate?.WaitIfPaused(ct);
                             ct.ThrowIfCancellationRequested();
                             progress.Report(bytesDone, bytesTotal, written.Count, filesTotal, item.Name, force: false);

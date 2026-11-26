@@ -391,6 +391,114 @@ public class ZipCreatorTests
     }
 
     [Fact]
+    public async Task NamesThatWouldExtractSomewhereElseOrCannotBeStoredAreLeftOutAndReported()
+    {
+        // Names like these are legal on Linux; extracted on Windows, '\' and ':' lead out of the destination or to a
+        // drive or a stream. The scan is made up, so that the test runs the same everywhere.
+        using var t = new TempDir();
+        string input = P(t, "in");
+        Directory.CreateDirectory(Path.Combine(input, "sub"));
+        var when = new DateTime(2024, 5, 6, 7, 8, 10, DateTimeKind.Utc);
+        SourceFile Source(string name, string relPath)
+        {
+            string full = Path.Combine(input, name);
+            if (!File.Exists(full)) File.WriteAllText(full, "the bytes of " + name);
+            return new SourceFile(full, relPath, new FileInfo(full).Length, when, when, FileAttributes.Normal);
+        }
+        var bad = new (string RelPath, string Reason)[]
+        {
+            (@"in/a\..\..\evil.txt", @"it contains '\'"),
+            ("in/C:evil.txt", "it contains ':'"),
+            ("in/bell\u0007.txt", "it contains a control character"),
+            ("in/..", "a part of it is '..'"),
+            ("in/.", "a part of it is '.'"),
+            ("in/half\uD800.txt", "it is not valid Unicode"),
+            ("in/" + new string('n', 70_000), "it is too long for a ZIP file"),
+        };
+        var files = bad.Select((b, i) => Source($"source{i}.txt", b.RelPath)).ToList();
+        files.Add(Source("ok.txt", "in/ok.txt"));
+        string inBadFolder = Path.Combine(input, "sub", "f.txt");
+        File.WriteAllText(inBadFolder, "in a folder whose name is left out");
+        files.Add(new SourceFile(inBadFolder, "in/sub:folder/f.txt", 34, when, when, FileAttributes.Normal));
+        var dirs = new List<SourceDir>
+        {
+            new(input, "in", when, when, FileAttributes.Directory),
+            new(Path.Combine(input, "sub"), "in/sub:folder", when, when, FileAttributes.Directory),
+        };
+        var scan = new ScanResult([.. files.OrderBy(f => f.RelPath, StringComparer.Ordinal)], dirs, []);
+        string output = P(t, "out.zip");
+
+        var r = await ZipCreator.CreateAsync(scan, new ZipOptions { OutputPath = output }, Ct);
+
+        var expected = new Dictionary<string, byte[]?> { ["in/"] = null, ["in/ok.txt"] = "the bytes of ok.txt"u8.ToArray() };
+        AssertSameContent(expected, ReadWithBcl(output));
+        AssertSameContent(expected, ReadWithSharpCompress(output));
+        Assert.Equal(1, r.FilesWritten);
+        Assert.Equal(bad.Length + 1, r.LeftOutUnreadable); // the file in the folder too, which has no line of its own
+        Assert.Equal(bad.Length + 1, r.Warnings.Count);
+        for (int i = 0; i < bad.Length; i++)
+            Assert.Contains($"{Path.Combine(input, $"source{i}.txt")}: its name cannot go into a ZIP file safely ({bad[i].Reason}), so it was left out", r.Warnings);
+        Assert.Contains($"{Path.Combine(input, "sub")}: its name cannot go into a ZIP file safely (it contains ':'), so it was left out with everything in it", r.Warnings);
+    }
+
+    [Fact]
+    public async Task AFileOrFolderReplacedByALinkAfterTheScanIsNotReadThroughIt()
+    {
+        using var t = new TempDir();
+        string input = P(t, "in");
+        MakeTree(input);
+        string secrets = P(t, "secrets");
+        Directory.CreateDirectory(secrets);
+        File.WriteAllText(Path.Combine(secrets, "readme.txt"), "a secret");
+        File.WriteAllText(Path.Combine(secrets, "key.txt"), "another secret");
+        var scan = Scanner.Scan([input], ct: Ct);
+        // After the scan, a file and a folder become links to files the user never chose.
+        string file = Path.Combine(input, "random.bin"), folder = Path.Combine(input, "docs");
+        File.Delete(file);
+        try { File.CreateSymbolicLink(file, Path.Combine(secrets, "key.txt")); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip("Symbolic links cannot be created here (Windows needs Developer Mode or administrator rights).");
+        }
+        Directory.Move(folder, P(t, "docs-moved"));
+        Directory.CreateSymbolicLink(folder, secrets);
+        string output = P(t, "out.zip");
+
+        var r = await ZipCreator.CreateAsync(scan, new ZipOptions { OutputPath = output }, Ct);
+
+        var zipped = ReadWithBcl(output);
+        Assert.DoesNotContain(zipped.Values, v => v is not null && (v.SequenceEqual("a secret"u8.ToArray()) || v.SequenceEqual("another secret"u8.ToArray())));
+        Assert.DoesNotContain("in/random.bin", zipped.Keys);
+        Assert.DoesNotContain("in/docs/readme.txt", zipped.Keys);
+        Assert.Contains("in/ünïcödé — файл.txt", zipped.Keys);
+        Assert.Equal(4, r.LeftOutUnreadable); // random.bin, and the three files the scan saw in docs
+        Assert.Contains($"{file}: it is a link now, so it was left out (links are not followed)", r.Warnings);
+        Assert.Contains($"{Path.Combine(folder, "readme.txt")}: a folder above it is a link now, so it was left out (links are not followed)", r.Warnings);
+    }
+
+    [Fact]
+    public async Task APipeIsLeftOutWithoutWaitingForAWriter()
+    {
+        if (OperatingSystem.IsWindows()) Assert.Skip("A named pipe is not a file in a folder on Windows; this checks Linux and macOS.");
+        using var t = new TempDir();
+        string input = P(t, "in");
+        MakeTree(input);
+        var scan = Scanner.Scan([input], ct: Ct);
+        string pipe = Path.Combine(input, "random.bin");
+        File.Delete(pipe);
+        using (var mk = Process.Start(new ProcessStartInfo("mkfifo", [pipe]) { UseShellExecute = false })!) mk.WaitForExit();
+        string output = P(t, "out.zip");
+
+        var task = ZipCreator.CreateAsync(scan, new ZipOptions { OutputPath = output }, Ct);
+        Assert.Same(task, await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(30), Ct)));
+        var r = await task;
+
+        Assert.Equal(1, r.LeftOutUnreadable);
+        Assert.Equal($"{pipe}: it is not a regular file, so it was left out", Assert.Single(r.Warnings));
+        Assert.DoesNotContain("in/random.bin", ReadWithBcl(output).Keys);
+    }
+
+    [Fact]
     public async Task AFileChangedWhileItIsReadIsLeftOutWithoutATornCopy()
     {
         using var t = new TempDir();

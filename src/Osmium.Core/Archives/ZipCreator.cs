@@ -27,7 +27,8 @@ public sealed record ZipResult
     public int FilesStored { get; init; }
     /// <summary>Of <see cref="FilesWritten"/>, compressed with Deflate.</summary>
     public int FilesDeflated { get; init; }
-    /// <summary>Files that could not be read and are not in the ZIP.</summary>
+    /// <summary>Files that are not in the ZIP because they could not be read, were links, pipes or devices when opened,
+    /// or have a name a ZIP file cannot hold safely.</summary>
     public int LeftOutUnreadable { get; init; }
     /// <summary>Files that changed while they were read and are not in the ZIP.</summary>
     public int LeftOutChanged { get; init; }
@@ -46,7 +47,11 @@ public static class ZipCreator
     /// and checked entry by entry (<see cref="ZipOptions.Verify"/>), and only then moved into place; a cancellation or
     /// any failure deletes the partial file and touches nothing else. Every folder of the scan is an entry ("dir/"), so
     /// empty folders survive. ZIP files are never encrypted.</para>
-    /// <para>A file that cannot be read is left out (<see cref="ZipResult.LeftOutUnreadable"/>). A file whose size or
+    /// <para>A file that cannot be read is left out (<see cref="ZipResult.LeftOutUnreadable"/>), and so is one that is a
+    /// link, a pipe or a device when it is opened (links are never followed), and every file and folder whose name
+    /// would extract somewhere else on some system or cannot be stored: a part that is "." or "..", or that holds a
+    /// control character, '\' or ':', text that is not valid Unicode, or more than 65,535 bytes of name. Each such
+    /// file or folder has a line in <see cref="ZipResult.Warnings"/>. A file whose size or
     /// last-write time changes while it is read is left out too (<see cref="ZipResult.LeftOutChanged"/>): the ZIP is
     /// written again without it, never with a torn copy. The third time files change, the operation fails with
     /// <see cref="Osmium.Core.Planning.SourceChangedException"/>.</para>
