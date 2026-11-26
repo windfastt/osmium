@@ -34,7 +34,8 @@ public sealed class OsaArchiveSource : IArchiveSource
 
     public string Path => Reader.Path;
     public ArchiveKind Kind => ArchiveKind.Osa;
-    public string FormatName => $".osa {Osa.Major}.{Osa.Minor}";
+    /// <summary>The archive's own container version, ".osa 1.0" or ".osa 1.1".</summary>
+    public string FormatName => $".osa {Osa.Major}.{Reader.Header.Minor}";
     public bool IsEncrypted => Reader.Header.Encrypted;
     public long FileLength => Reader.FileLength;
     public long? TotalSize => Reader.TotalUnpacked;
@@ -173,10 +174,22 @@ public sealed class OsaArchiveSource : IArchiveSource
             throw new FreeSpaceException($"Not enough free space: the files need {Bytes(output)} and {Bytes(reserve >= long.MaxValue ? long.MaxValue : (long)reserve)} must stay free, but the drive has {Bytes(free)} free.");
     }
 
-    /// <summary>The archive's properties, as the Archives page shows them.</summary>
-    private static List<ArchiveDetail> Describe(OsaReader r) =>
+    /// <summary>The archive's properties, as the Archives page shows them. "Spare copy of the file list" is there for
+    /// archives that have one (from 1 MiB of blocks on) and for archives of container 1.0, which never have one.</summary>
+    private static List<ArchiveDetail> Describe(OsaReader r)
+    {
+        var details = Properties(r);
+        string? spare = r.HasSpareCopies ? "yes"
+            : r.Index.Metadata.ContainsKey(ArchiveIndex.SparesKey) ? "damaged (the archive is complete; Test says more)"
+            : r.Header.Minor == 0 ? "no (archives of Osmium 0.1 have none)"
+            : null;
+        if (spare is not null) details.Insert(1, new("Spare copy of the file list", spare));
+        return details;
+    }
+
+    private static List<ArchiveDetail> Properties(OsaReader r) =>
     [
-        new("Format", $".osa {Osa.Major}.{Osa.Minor}"),
+        new("Format", $".osa {Osa.Major}.{r.Header.Minor}"),
         new("Created by", r.Header.Creator ?? "?"),
         new("Profile", r.Index.MetaString("profile") ?? "?"),
         new("Files", $"{r.Entries.Count(e => !e.IsDirectory):N0}"),
