@@ -19,7 +19,9 @@ namespace Osmium.Cli
         {
             "overwrite", "skip", "rename", "no-verify", "explain", "experimental", "verbose", "v", "json", "force",
             "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery", "ship-symmetric",
+            "encrypt",
         };
+        private readonly HashSet<string> _withoutValue = new(StringComparer.OrdinalIgnoreCase);
 
         public Args(IEnumerable<string> argv)
         {
@@ -34,6 +36,7 @@ namespace Osmium.Cli
                     int eq = name.IndexOf('=');
                     if (eq > 0) { value = name[(eq + 1)..]; name = name[..eq]; }
                     else if (!Flags.Contains(name) && i + 1 < list.Count) value = list[++i];
+                    else if (!Flags.Contains(name)) _withoutValue.Add(name);
                     _opts[name] = value ?? "true";
                 }
                 else Positional.Add(a);
@@ -41,6 +44,11 @@ namespace Osmium.Cli
         }
 
         public bool Has(string n) => _opts.ContainsKey(n);
+        /// <summary>An option that takes a value was given last, with nothing after it.</summary>
+        public bool MissingValue(string n) => _withoutValue.Contains(n);
+        /// <summary>The password of this run, once read (standard input can be read only once).</summary>
+        internal string? CachedPassword { get; set; }
+        internal bool PasswordRead { get; set; }
         public string? Get(string n) => _opts.GetValueOrDefault(n);
         public string Get(string n, string d) => _opts.GetValueOrDefault(n) ?? d;
         public long Size(string n, long d) => Has(n) ? ParamValues.ParseNumber(Get(n)!) : d;
@@ -109,14 +117,14 @@ namespace Osmium.Cli
                   --rules rules.json   per-file rules / patches      --exclude "*.tmp,build/**"
                   --dedup off|files|chunks   --block 256M   --threads N   --mem 8G
                   --decode-speed 0|1|2  (penalise slow-to-decode codecs)   --experimental
-                  --password <pw> | --password-stdin   --kdf-iterations N
+                  --password-stdin | --password <pw>   --encrypt (ask for the password)   --kdf-iterations N
                   --workers host:port,…  --cluster-key OSM1-…   (distribute work)
                   --no-verify   --overwrite   --explain   --no-plan-log
               x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob)
               l <archive> [-v]       List contents        t <archive>    Test (full decode + hashes)
               info <archive>         Archive details      explain <archive>  Show planner decisions
               salvage <archive> <dest>   Recover every file that verifies from a damaged archive; list what was lost
-                  --password <pw> | --password-stdin   --overwrite | --skip | --rename   --force
+                  --password-stdin | --password <pw>   --overwrite | --skip | --rename   --force
               analyze <files…>       Detect type / class / statistics
               lab <file> [--profile p] [--sample 4M] [--candidates "spec;spec"]   Benchmark candidates
               tune <file> [--profile insane] [--export-rule rules.json]   Search the best pipeline for a file
@@ -153,10 +161,48 @@ namespace Osmium.Cli
 
         // ------------------------------------------------------------ compress
 
-        private static string? Password(Args a)
+        /// <summary>Standard input as bytes, for tests (the console's own stream otherwise).</summary>
+        internal static Func<Stream>? StandardInputOverride { get; set; }
+
+        /// <summary>
+        /// The password given with --password-stdin or --password, read once per run; null when neither was given.
+        /// A --password without a value and an empty password are refused (an empty password would write an archive
+        /// without encryption). Standard input is read as UTF-8, one line, with one trailing CR/LF removed.
+        /// </summary>
+        internal static string? Password(Args a)
         {
-            if (a.Has("password-stdin")) return Console.In.ReadLine();
-            return a.Get("password");
+            if (a.PasswordRead) return a.CachedPassword;
+            string? pw;
+            if (a.Has("password-stdin")) pw = ReadPasswordLine();
+            else if (a.Has("password"))
+            {
+                if (a.MissingValue("password"))
+                    throw new ArgumentException("--password needs a value: --password-stdin reads it from standard input, or give --password <password>.");
+                pw = a.Get("password");
+                Console.Error.WriteLine("warning: a password given with --password can be seen by other programs on this computer; --password-stdin keeps it private.");
+            }
+            else return null;
+            if (string.IsNullOrEmpty(pw)) throw new ArgumentException("An empty password cannot protect an archive.");
+            a.CachedPassword = pw;
+            a.PasswordRead = true;
+            return pw;
+        }
+
+        /// <summary>One line of standard input as UTF-8 (not the console's code page), without its CR/LF.</summary>
+        private static string ReadPasswordLine()
+        {
+            var stdin = StandardInputOverride?.Invoke() ?? Console.OpenStandardInput();
+            var bytes = new List<byte>();
+            while (true)
+            {
+                int b = stdin.ReadByte();
+                if (b < 0 || b == '\n') break;
+                bytes.Add((byte)b);
+                if (bytes.Count > 1 << 16) throw new ArgumentException("The password on standard input is too long.");
+            }
+            if (bytes.Count > 0 && bytes[^1] == '\r') bytes.RemoveAt(bytes.Count - 1);
+            try { return new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes.ToArray()); }
+            catch (System.Text.DecoderFallbackException) { throw new ArgumentException("The password on standard input is not UTF-8 text."); }
         }
 
         internal static PlanOptions PlanOptionsFrom(Args a, Profile profile, Action<string> log, Action<string, double>? progress = null)
@@ -189,6 +235,15 @@ namespace Osmium.Cli
             if (a.Positional.Count < 2) return Fail("usage: osmium a <archive.osa> <inputs…>");
             string output = a.Positional[0];
             if (!output.EndsWith(Osa.Extension, StringComparison.OrdinalIgnoreCase)) output += Osa.Extension;
+            // The password first: a refused one must stop the run before anything is planned or written.
+            string? password = Password(a);
+            if (password is null && a.Has("encrypt"))
+            {
+                if (Console.IsInputRedirected) return Fail("--encrypt needs a password: give it with --password-stdin.");
+                password = PromptPassword("Password: ");
+                if (string.IsNullOrEmpty(password)) return Fail("An empty password cannot protect an archive.");
+                if (PromptPassword("Repeat the password: ") != password) return Fail("The passwords do not match; nothing was written.");
+            }
             var profile = Profile.ByName(a.Get("profile", "balanced"));
             if (profile.Experimental && !a.Has("experimental"))
                 Console.Error.WriteLine($"note: profile '{profile.Name}' is experimental.");
@@ -217,7 +272,7 @@ namespace Osmium.Cli
             var result = await ArchiveBuilder.BuildAsync(plan, new BuildOptions
             {
                 OutputPath = output,
-                Password = Password(a),
+                Password = password,
                 KdfIterations = a.Int("kdf-iterations", ArchiveKey.DefaultIterations),
                 VerifyBlocks = !a.Has("no-verify"),
                 Overwrite = a.Has("overwrite"),
@@ -242,10 +297,12 @@ namespace Osmium.Cli
 
         private static OsaReader Open(Args a, string path) => OsaReader.Open(path, () => Password(a) ?? PromptPassword());
 
-        private static string? PromptPassword()
+        private static string? PromptPassword() => PromptPassword("Password: ");
+
+        private static string? PromptPassword(string label)
         {
             if (Console.IsInputRedirected) return null;
-            Console.Error.Write("Password: ");
+            Console.Error.Write(label);
             var sb = new System.Text.StringBuilder();
             // Read Ctrl+C as a key so it can end the prompt (otherwise ReadKey keeps waiting after the cancel handler).
             bool treatCtrlC = Console.TreatControlCAsInput;
