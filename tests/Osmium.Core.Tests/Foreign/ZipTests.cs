@@ -454,6 +454,26 @@ public class ZipTests
     }
 
     [Fact]
+    public void NamesFromUnixWithoutTheFlagAreUtf8WhenTheyAreValidUtf8()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        var unix = z.Add("ünïcödé.txt", "1"u8.ToArray(), encoding: Encoding.UTF8);
+        unix.Flags = 0; // Info-ZIP on Linux: UTF-8 bytes, no flag, no Unicode path field
+        unix.MadeBy = 3 << 8 | 30;
+        var dos = z.Add("ünïcödé.txt", "2"u8.ToArray(), encoding: Encoding.UTF8);
+        dos.Flags = 0; // the same bytes from a DOS or Windows tool are read in the OEM code page
+        ZipSource.OemCodePageOverride = 437;
+        try
+        {
+            using var s = Open(ForeignData.Write(t, "unix.zip", z.Build()));
+            Assert.Equal("ünïcödé.txt", s.Items[0].Path);
+            Assert.NotEqual("ünïcödé.txt", s.Items[1].Path);
+        }
+        finally { ZipSource.OemCodePageOverride = null; }
+    }
+
+    [Fact]
     public void AFlippedCrcFailsTheFile()
     {
         using var t = new TempDir();

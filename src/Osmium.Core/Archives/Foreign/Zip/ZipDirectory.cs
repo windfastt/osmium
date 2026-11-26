@@ -167,7 +167,10 @@ internal static class ZipDirectory
                 }
             }
             if (diskStart != 0) throw new NotSupportedException("Multi-volume ZIP archives are not supported.");
-            rec.Name = (rec.Flags & 0x800) != 0 ? Lenient(rec.NameBytes) : unicodeName ?? Oem(rec.NameBytes, oemCodePage);
+            // Without the UTF-8 flag or a matching Unicode path field: archives made on Unix and macOS store their
+            // names in the system's charset, nowadays UTF-8 (Info-ZIP on Linux sets neither), others an OEM code page.
+            rec.Name = (rec.Flags & 0x800) != 0 ? Lenient(rec.NameBytes)
+                : unicodeName ?? (rec.Host is 3 or 19 && Strict(rec.NameBytes) is { } utf8 ? utf8 : Oem(rec.NameBytes, oemCodePage));
             rec.Name = rec.Name.Replace('\\', '/');
             nameChars += rec.Name.Length;
             if (nameChars * 2 > limits.MemoryBudgetBytes / 4) throw new EntryLimitException("The file list of this archive is larger than Osmium accepts.");
