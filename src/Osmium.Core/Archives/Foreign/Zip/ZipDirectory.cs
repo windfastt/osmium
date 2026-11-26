@@ -285,13 +285,18 @@ internal static class ZipDirectory
         return cp is 0 or 1 or 65001 ? 437 : cp;
     }
 
+    private static readonly AsyncLocal<TimeZoneInfo?> TimeZoneSeam = new();
+
+    /// <summary>For tests (this async flow only): the zone DOS times are read in instead of the computer's own.</summary>
+    internal static TimeZoneInfo? TimeZoneOverride { get => TimeZoneSeam.Value; set => TimeZoneSeam.Value = value; }
+
     private static DateTime? DosTime(ushort date, ushort time)
     {
         int year = 1980 + (date >> 9), month = (date >> 5) & 15, day = date & 31;
         int hour = time >> 11, minute = (time >> 5) & 63, second = (time & 31) * 2;
         if (month is < 1 or > 12 || day < 1 || day > DateTime.DaysInMonth(year, month) || hour > 23 || minute > 59 || second > 59) return null;
         var local = new DateTime(year, month, day, hour, minute, second, DateTimeKind.Unspecified);
-        try { return TimeZoneInfo.ConvertTimeToUtc(local, TimeZoneInfo.Local); }
+        try { return TimeZoneInfo.ConvertTimeToUtc(local, TimeZoneOverride ?? TimeZoneInfo.Local); }
         catch (ArgumentException) { return DateTime.SpecifyKind(local, DateTimeKind.Utc); }
     }
 

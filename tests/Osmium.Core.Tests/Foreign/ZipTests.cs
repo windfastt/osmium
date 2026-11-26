@@ -627,6 +627,24 @@ public class ZipTests
         finally { ZipSource.OemCodePageOverride = null; }
     }
 
+    [Theory]
+    [InlineData(-4.0, 16, 0)]
+    [InlineData(5.5, 6, 30)]
+    public void DosTimesAreTheComputersLocalTimeInAnyZone(double offsetHours, int utcHour, int utcMinute)
+    {
+        // The test runners keep UTC, where local time and UTC are the same; a fixed zone tells them apart everywhere.
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.Add("dos.txt", "1"u8.ToArray()); // DOS fields only: 2024-05-06 12:00:00 on the writer's clock
+        ZipDirectory.TimeZoneOverride = TimeZoneInfo.CreateCustomTimeZone("fixed", TimeSpan.FromHours(offsetHours), "fixed", "fixed");
+        try
+        {
+            using var s = Open(ForeignData.Write(t, "dos.zip", z.Build()));
+            Assert.Equal(new DateTime(2024, 5, 6, utcHour, utcMinute, 0, DateTimeKind.Utc), s.Items[0].ModifiedUtc);
+        }
+        finally { ZipDirectory.TimeZoneOverride = null; }
+    }
+
     [Fact]
     public void TimesAreUtcFromTheExtraFieldsAndLocalFromTheDosFields()
     {
