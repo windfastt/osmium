@@ -46,6 +46,24 @@ public sealed class OsaOutputTests : IDisposable
         return (path, r.Header.Creator ?? "", $"{length} B ({(double)length / 38:P2})");
     }
 
+    [Theory]
+    [InlineData("...osa", "...osa files")]
+    [InlineData("..osa", "..osa files")]
+    [InlineData("CON.osa", "_CON.osa files")]
+    [InlineData("photos.osa", "photos")]
+    public async Task TheDefaultFolderIsAlwaysInsideTheArchivesFolder(string name, string folder)
+    {
+        string box = Path.Combine(_dir, "box");
+        Directory.CreateDirectory(box);
+        File.Copy(Deterministic(_dir), Path.Combine(box, name));
+        var r = await CliRunner.RunAsync(["x", Path.Combine(box, name), "-q"]);
+        Assert.True(r.ExitCode == 0, r.Error);
+        Assert.True(File.Exists(Path.Combine(box, folder, "docs", "a.txt")));
+        // Nothing next to the folder holding the archive, and nothing else beside the archive.
+        Assert.Equal(["box", "fixed.osa"], Directory.GetFileSystemEntries(_dir).Select(Path.GetFileName).Order(StringComparer.Ordinal));
+        Assert.Equal(new[] { folder, name }.Order(StringComparer.Ordinal), Directory.GetFileSystemEntries(box).Select(Path.GetFileName).Order(StringComparer.Ordinal));
+    }
+
     [Fact]
     public async Task ListingIsUnchanged()
     {

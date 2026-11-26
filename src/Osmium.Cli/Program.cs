@@ -446,7 +446,9 @@ namespace Osmium.Cli
         {
             if (a.Positional.Count < 1) return Fail("usage: osmium x <archive> [destination]");
             using var r = Open(a, a.Positional[0]);
-            string dest = a.Positional.Count > 1 ? a.Positional[1] : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a.Positional[0]))!, Path.GetFileNameWithoutExtension(a.Positional[0]));
+            // The default folder is named as for every other format: "...osa" gives "...osa files", never "..".
+            string dest = a.Positional.Count > 1 ? a.Positional[1]
+                : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a.Positional[0]))!, Osmium.Core.Archives.ArchiveSources.StemOf(a.Positional[0]));
             var mode = a.Has("overwrite") ? OverwriteMode.Overwrite : a.Has("skip") ? OverwriteMode.Skip : OverwriteMode.Rename;
             if (r.ExpansionFactor > 200 && !a.Has("force"))
                 return Fail($"archive expands {r.ExpansionFactor:F0}× (heavy dedup or a decompression bomb); re-run with --force to continue.");
