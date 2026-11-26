@@ -435,6 +435,53 @@ public class ZipCreatorTests
         Assert.Skip($"'{tool}' is not installed; the compatibility workflow installs it.");
     }
 
+    private static bool IsAscii(string s) => s.All(char.IsAscii);
+
+    /// <summary>The files (not folders) of a tree as ZIP names, in name order, optionally only some of them.</summary>
+    private static List<KeyValuePair<string, byte[]?>> FilesOf(string root, Func<string, bool>? which = null) =>
+        [.. Expected(root).Where(kv => kv.Value is not null && (which?.Invoke(kv.Key) ?? true)).OrderBy(kv => kv.Key, StringComparer.Ordinal)];
+
+    /// <summary>Each entry's name as stored and its general-purpose flags in the local header and in the central
+    /// directory, read from the ZIP's bytes (a small ZIP without ZIP64 records).</summary>
+    private static List<(string Name, ushort LocalFlags, ushort CentralFlags)> Headers(string zip)
+    {
+        var b = File.ReadAllBytes(zip);
+        int eocd = b.AsSpan().LastIndexOf([(byte)0x50, (byte)0x4B, (byte)0x05, (byte)0x06]);
+        Assert.True(eocd >= 0, "no end of central directory record");
+        int count = BitConverter.ToUInt16(b, eocd + 10), at = (int)BitConverter.ToUInt32(b, eocd + 16);
+        var list = new List<(string, ushort, ushort)>();
+        for (int i = 0; i < count; i++)
+        {
+            Assert.Equal(0x02014B50u, BitConverter.ToUInt32(b, at));
+            ushort central = BitConverter.ToUInt16(b, at + 8);
+            int nameLength = BitConverter.ToUInt16(b, at + 28), extra = BitConverter.ToUInt16(b, at + 30), comment = BitConverter.ToUInt16(b, at + 32);
+            int local = (int)BitConverter.ToUInt32(b, at + 42);
+            var name = b.AsSpan(at + 46, nameLength);
+            Assert.Equal(0x04034B50u, BitConverter.ToUInt32(b, local));
+            Assert.True(name.SequenceEqual(b.AsSpan(local + 30, BitConverter.ToUInt16(b, local + 26))), "local and central names differ");
+            list.Add((System.Text.Encoding.UTF8.GetString(name), BitConverter.ToUInt16(b, local + 6), central));
+            at += 46 + nameLength + extra + comment;
+        }
+        return list;
+    }
+
+    [Fact]
+    public async Task NamesThatAreNotAsciiAreStoredAsUtf8AndMarkedSo()
+    {
+        using var t = new TempDir();
+        string input = P(t, "in");
+        MakeTree(input);
+        string output = P(t, "out.zip");
+        await Zip(input, output);
+
+        var headers = Headers(output);
+        Assert.Equal(Expected(input).Keys.Order(StringComparer.Ordinal), headers.Select(h => h.Name).Order(StringComparer.Ordinal));
+        const ushort Utf8 = 1 << 11; // general-purpose flag bit 11: the name is UTF-8
+        var unicode = headers.Where(h => !IsAscii(h.Name)).ToList();
+        Assert.Equal(2, unicode.Count);
+        Assert.All(unicode, h => Assert.True((h.LocalFlags & Utf8) != 0 && (h.CentralFlags & Utf8) != 0, $"{h.Name} is not marked as UTF-8"));
+    }
+
     [Fact]
     [Trait("Category", "ZipInterop")]
     public async Task UnzipTestsAndExtractsTheZipExactly()
@@ -450,9 +497,32 @@ public class ZipCreatorTests
         Assert.True(test.Code == 0, test.Output);
         var x = Run("unzip", "-q", output, "-d", P(t, "x"))!.Value;
         Assert.True(x.Code == 0, x.Output);
-        Assert.Equal(Expected(input).Where(kv => kv.Value is not null).OrderBy(kv => kv.Key, StringComparer.Ordinal),
-            Expected(P(t, "x", "in")).Where(kv => kv.Value is not null).OrderBy(kv => kv.Key, StringComparer.Ordinal));
         Assert.True(Directory.Exists(P(t, "x", "in", "empty-dir")));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(FilesOf(input), FilesOf(P(t, "x", "in")));
+            return;
+        }
+
+        // The unzip on Windows runners is the MSYS build of Info-ZIP: it ignores the UTF-8 flag (bit 11, checked in
+        // NamesThatAreNotAsciiAreStoredAsUtf8AndMarkedSo) and writes the raw bytes through the ANSI API. Its ASCII
+        // names are compared exactly; the others go through Windows' own tar, which reads the flag.
+        TestContext.Current.TestOutputHelper?.WriteLine("unzip here ignores the UTF-8 name flag: names that are not ASCII are compared through Windows' tar.exe.");
+        var unzipped = FilesOf(P(t, "x", "in")).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+        Assert.Equal(FilesOf(input).Count, unzipped.Count); // every file came out, under some name
+        foreach (var (name, data) in FilesOf(input, IsAscii)) Assert.Equal(data, unzipped[name]);
+        string tar = Path.Combine(Environment.SystemDirectory, "tar.exe");
+        if (!File.Exists(tar))
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine("Windows' tar.exe (Windows 10 1803 and later) is missing: the names that are not ASCII were not compared here.");
+            return;
+        }
+        Directory.CreateDirectory(P(t, "tar"));
+        var tx = Run(tar, "-xf", output, "-C", P(t, "tar"))!.Value;
+        Assert.True(tx.Code == 0, tx.Output);
+        var unicode = FilesOf(input, n => !IsAscii(n));
+        Assert.Equal(2, unicode.Count);
+        Assert.Equal(unicode, FilesOf(P(t, "tar", "in"), n => !IsAscii(n)));
     }
 
     [Fact]
