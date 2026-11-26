@@ -63,6 +63,8 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 - **Memory when extracting:** Osmium reserved memory only for the first step of a block's decoding, so some archives
   could make it use more memory than its limit; it now reserves for the largest step, and a block whose stored sizes
   or pipeline differ from the file list's is refused before it is decoded.
+- **Passwords on the command line:** a password option without a value, or an empty password, no longer writes an
+  archive without encryption, and `--password-stdin` reads UTF-8 (a byte order mark is ignored).
 
 ### Added
 - **Spare copy of the file list and header.** Archives of 1 MiB and more whose file list is small next to their data
@@ -71,6 +73,22 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   spare and tells you so; *Test* also checks the spare. The .osa container is now version 1.1: Osmium 0.1.x opens,
   tests and extracts 1.1 archives made with the methods it knows. Archives that contain blocks compressed with the
   methods new in 0.2.0 need 0.2.0; 0.1.x does not open them and says they were made by a newer version.
+- **Open other archive types from the command line.** `osmium l`, `x`, `t` and `info` work with ZIP, 7z, TAR (also
+  .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz and .tar.zst) and single compressed files (.gz, .bz2, .xz, .zst).
+  Password-protected ZIP (ZipCrypto and AES) and 7z archives are supported. Archives are recognised by their content,
+  so a renamed file still opens. RAR archives are not supported. The app's Archives page and Explorer menu gain these
+  formats with the new interface.
+- **Safe extraction for every format.** Osmium writes only inside the folder you chose, never creates or follows
+  links, refuses reserved device names, and renames files whose names Windows does not allow, saying so. It checks
+  each file against the checksum the format stores: CRC-32 for ZIP and 7z, the authentication code of AES-encrypted
+  ZIP entries, and the gzip, bzip2, xz and Zstandard checks. TAR stores none, and `osmium t` says so. An archive that
+  would expand to more than 1,000 times its size and more than 1 GiB stops unless `--force` is given. Files from
+  downloaded archives keep the mark that they came from the internet. A password counts as right only when data it
+  decrypted passes a checksum; a wrong password writes nothing, and it is reported after a few small checks rather than
+  after decrypting the whole archive.
+- **Writing ZIP files:** `osmium a name.zip` writes a ZIP file other tools open. The finished ZIP is read back and
+  checked before it appears, and a file that changes while it is read is left out, never stored torn. ZIP files are
+  not encrypted; for a password, use an encrypted .osa archive.
 - **Verifiable downloads:** every release file carries a build provenance attestation, so
   `gh attestation verify <file> --repo windfastt/osmium` shows that it was built by the repository's own workflow from
   the published source; a modified copy fails the check. CI builds drop machine-specific paths, so a commit builds to
@@ -137,6 +155,18 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   copies do not check out; such an archive is never kept.
 - **CI:** a compatibility check builds Osmium 0.1.1 from its tag and has it test and extract archives made by this
   version.
+- **`osmium a`** writes a ZIP file when the name ends in .zip (before, it wrote `name.zip.osa`). Names of types Osmium
+  cannot write are refused with a reason.
+- **Single compressed files** extract next to the archive. One without a compression extension extracts as
+  "name (decompressed)", so it never replaces itself.
+- **Stricter command line:** an unknown option is refused (and shown only by its first characters, so a mistyped
+  password is never printed), `--` ends the options, and each command accepts only the options it uses. `osmium t`
+  exits with 3 when every file verified but there were warnings, and with 2 after an error. More than 1,000 files of
+  the same name in an archive of another format are refused.
+- **Extraction, also of .osa archives:** the archive being read is never replaced, even when the destination reaches
+  it through another path. A file already in the destination where the archive has a folder gives the folder a free
+  name; a folder there is never replaced by a file. A long name that needs a free name is shortened to stay within
+  255 characters, and a name that cannot be created fails at once instead of being retried.
 
 ## [0.1.1] — 2026-11-24 — patch release
 

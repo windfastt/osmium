@@ -141,6 +141,12 @@ osmium help                                        # every command and option
 
 `--skip` makes `x` skip files that already exist, and `--overwrite` replaces them. To encrypt on the command line,
 pipe the password to `--password-stdin`; `x`, `t` and `l` ask for it when needed.
+
+**Other formats.** Osmium opens, tests and extracts ZIP (also AES-encrypted), 7z, TAR (also .tar.gz/.tgz, .tar.bz2,
+.tar.xz, .tar.zst) and single .gz, .bz2, .xz and .zst files, recognised by their content. Extraction never writes
+outside the folder you chose and never creates or follows links. It checks every checksum the format stores: CRC-32
+for ZIP and 7z, the authentication code of AES-encrypted ZIP, and the gzip, bzip2, xz and Zstandard checks. TAR
+stores none, and `osmium t` says so. RAR archives are not supported. `osmium a photos.zip Photos` writes a ZIP file.
 A rules file looks like this. The app keeps its rules in `%APPDATA%\Osmium\rules.json` (portable: `data\rules.json`);
 the command-line tool reads only the file given with `--rules`. Check one with `osmium rules check rules.json`.
 
@@ -236,13 +242,17 @@ pin the bytes Osmium CM and every filter produce for fixed inputs. A `v*` tag pu
 ## Status
 
 The latest release is **0.1.1** (24 November 2026). **0.2.0** is in progress on `main` and not in any download yet;
-builds from `main` still report 0.1.1. The work includes license texts in every download and `osmium license`, the UDP
-firewall rule, app fixes and better handling of archives from newer versions; still being built are a context-mixing
-codec for x86/x64 code, a cheaper parameter search and `osmium salvage` for damaged archives. See the
+builds from `main` still report 0.1.1. The work so far includes license texts in every download and `osmium license`,
+the UDP firewall rule, app fixes, better handling of archives from newer versions, the CM2 context-mixing codec for
+x86/x64 code, `osmium salvage` for damaged archives, spare copies of the file list and header, the Recycle Bin option,
+and ZIP, 7z, TAR and single compressed files on the command line; still being built are the new interface and
+Argon2id password protection. See the
 [roadmap](ROADMAP.md) and the unreleased section of the [changelog](CHANGELOG.md).
 
 Limitations today:
-- Osmium reads and writes only its own `.osa` format.
+- Osmium writes `.osa` archives and ZIP files. It opens, tests and extracts ZIP, 7z, TAR and single compressed files
+  from the command line (see *Other formats* above); the app shows them once the new interface ships. RAR archives
+  are not supported.
 - Already-compressed files (JPEG, PNG, MP4, ZIP, 7z and similar) are stored as they are; recompressing them is planned.
 - Archives that use context mixing (possible from Ultra up) extract slowly.
 
@@ -268,8 +278,9 @@ PAQ/lpaq family of compressors.
 
 **Trademarks.** Microsoft, Windows, SmartScreen, PowerShell and .NET are trademarks of the Microsoft group of
 companies. GitHub is a trademark of GitHub, Inc. Intel and Xeon are trademarks of Intel Corporation or its
-subsidiaries. Arm is a trademark of Arm Limited (or its subsidiaries). Linux, 7-Zip, ZPAQ, xz, Zstandard, Brotli,
-bzip2, lrzip, Info-ZIP, Inno Setup, Chocolatey and the other product, project and format names here are the property
+subsidiaries. Arm is a trademark of Arm Limited (or its subsidiaries). Linux, 7-Zip, RAR, WinRAR, WinZip, ZPAQ, xz,
+Zstandard, Brotli, bzip2, lrzip, Info-ZIP, Inno Setup, Chocolatey and the other product, project and format names
+here are the property
 of their respective owners and are used only to identify them. Osmium is an independent project, not affiliated with,
 sponsored or endorsed by any of them, or by other projects named Osmium.
 

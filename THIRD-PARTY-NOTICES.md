@@ -11,7 +11,7 @@ ZIP, command-line executable) carries this file as `THIRD-PARTY-NOTICES.txt`, an
 | Component | Version | Used for | License |
 |---|---|---|---|
 | ZstdSharp.Port | 0.8.8 | Zstandard codec | MIT; includes code ported from Zstandard (BSD-3-Clause) |
-| SharpCompress | 1.0.0 | BZip2 and PPMd codecs | MIT; includes a Bouncy Castle notice and code under Ms-PL, Apache-2.0, BSD, zlib, Info-ZIP, UnRAR and MIT licenses (see its section) |
+| SharpCompress | 1.0.0 | BZip2 and PPMd codecs; LZMA, LZMA2 and Deflate64 decoders for ZIP, 7z and xz | MIT; includes a Bouncy Castle notice and code under Ms-PL, Apache-2.0, BSD, zlib, Info-ZIP, UnRAR and MIT licenses (see its section) |
 | LZMA-SDK (NuGet package) | 22.1.1 | LZMA codec | MIT (packaging); the LZMA SDK itself is public domain |
 | System.IO.Hashing | 10.0.15 | XXH3, XXH128 and CRC-32 checksums | MIT |
 | .NET runtime (Microsoft.NETCore.App) | 10.0.15 | Runtime, Brotli, Deflate, AES-GCM, ECDH, HKDF | MIT, plus the notices in `dotnet-THIRD-PARTY-NOTICES.txt` |
@@ -129,7 +129,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The SharpCompress DLL contains code that SharpCompress took from other projects, with the notices and licenses below.
 The paths are in the SharpCompress source at the commit the 1.0.0 package was built from (b6cc95a), under
-`src/SharpCompress/`. Osmium itself calls only the BZip2 and PPMd codecs, but the whole library ships.
+`src/SharpCompress/`. Osmium itself calls only the BZip2 and PPMd codecs and the LZMA, LZMA2 and Deflate64
+decoders, but the whole library ships.
 
 ### SharpCompress: Zstandard (`Compressors/ZStandard/`)
 
@@ -829,6 +830,10 @@ https://jrsoftware.org/
 ```
 
 ---
+
+Formats and trademarks: ZIP, 7z, RAR, TAR, gzip, bzip2, xz and Zstandard are names of file formats. WinZip, WinRAR,
+RAR and 7-Zip are trademarks of their respective owners; Deflate64 and ZIP64 are trademarks of PKWARE, Inc.; Osmium
+is not affiliated with or endorsed by them. Osmium cannot create RAR archives.
 
 The fonts used on the project website (Anybody, Instrument Sans, Martian Mono) are not part of the downloads; they
 are licensed under the SIL Open Font License 1.1, with their license files next to them in `docs/fonts/`.
