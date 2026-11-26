@@ -13,7 +13,9 @@ public static class Osa
     public static ReadOnlySpan<byte> Magic => [0x4F, 0x53, 0x4D, 0x41, 0x1A, 0x0D, 0x0A, 0x00];
     public static ReadOnlySpan<byte> FrameMagic => "OBLK"u8;
     public static ReadOnlySpan<byte> FooterMagic => "OSAE"u8;
-    public const ushort Major = 1, Minor = 0;
+    /// <summary>The container version this reader understands and this writer writes. Readers accept every minor of
+    /// <see cref="Major"/>: minor versions only add what older readers can ignore.</summary>
+    public const ushort Major = 1, Minor = 1;
     public const int FrameHeaderSize = 28;
     public const int FooterSize = 32;
     public const ulong IndexFrameNumber = ulong.MaxValue;
@@ -37,6 +39,8 @@ public sealed class ArchiveHeader
     public const int MaxKdfIterations = 20_000_000;
     /// <summary>The exact serialized header bytes (bound into the index's AEAD data).</summary>
     public byte[] Raw { get; private set; } = [];
+    /// <summary>The archive's own minor version (offset 10): 0 for archives of Osmium 0.1.x, 1 since 0.2.0.</summary>
+    public ushort Minor { get; init; } = Osa.Minor;
     public uint Flags { get; init; }
     public byte[] ArchiveId { get; init; } = RandomNumberGenerator.GetBytes(16);
     public EncryptionInfo? Encryption { get; init; }
@@ -59,7 +63,7 @@ public sealed class ArchiveHeader
         var buf = new byte[36 + extBytes.Length + 4];
         Osa.Magic.CopyTo(buf);
         BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(8), Osa.Major);
-        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(10), Osa.Minor);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(10), Minor);
         BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(12), Flags);
         ArchiveId.CopyTo(buf, 16);
         BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(32), (uint)extBytes.Length);
@@ -78,6 +82,7 @@ public sealed class ArchiveHeader
         if (!fixedPart.AsSpan(0, 8).SequenceEqual(Osa.Magic)) throw new CorruptDataException("Not an Osmium archive (bad magic).");
         ushort major = BinaryPrimitives.ReadUInt16LittleEndian(fixedPart.AsSpan(8));
         if (major != Osa.Major) throw new CorruptDataException($"Unsupported archive format version {major}.x.");
+        ushort minor = BinaryPrimitives.ReadUInt16LittleEndian(fixedPart.AsSpan(10));
         uint flags = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(12));
         uint extLen = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(32));
         if (extLen > 1 << 20) throw new CorruptDataException("Header extension area too large.");
@@ -123,7 +128,7 @@ public sealed class ArchiveHeader
         var raw = new byte[36 + extLen + 4];
         all.CopyTo(raw, 0);
         rest.AsSpan((int)extLen).CopyTo(raw.AsSpan(36 + (int)extLen));
-        return new ArchiveHeader { Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length, Raw = raw };
+        return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length, Raw = raw };
     }
 }
 

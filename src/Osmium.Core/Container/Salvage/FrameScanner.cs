@@ -83,15 +83,18 @@ internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, in
     /// <summary>
     /// The header as a writer makes it from these fields, with the creator text found where it lies when the header
     /// ends at <paramref name="headerEnd"/> (where the first frame starts): candidates for the bytes the index binds.
+    /// The minor version is the one stored in the damaged header, this version's, or 0 (archives of Osmium 0.1.x).
     /// </summary>
     public IEnumerable<byte[]> Rebuilds(byte[] archiveId, long headerEnd)
     {
         long creatorAt = EncryptionRecordEnd + 2, creatorLength = headerEnd - 4 - creatorAt;
         string? creator = creatorLength >= 0 && creatorLength < 128 && headerEnd <= Head.Length
             ? System.Text.Encoding.UTF8.GetString(Head, (int)creatorAt, (int)creatorLength) : null;
-        foreach (string? c in creator is null ? new string?[] { null } : [creator, null])
-            foreach (uint flags in new[] { Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental })
-                yield return new ArchiveHeader { Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
+        var minors = new[] { BinaryPrimitives.ReadUInt16LittleEndian(Head.AsSpan(10)), Osa.Minor, (ushort)0 }.Distinct();
+        foreach (ushort minor in minors)
+            foreach (string? c in creator is null ? new string?[] { null } : [creator, null])
+                foreach (uint flags in new[] { Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental })
+                    yield return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
     }
 }
 
