@@ -33,6 +33,8 @@ public sealed record BlockInfo(int Frame, long Offset, long FrameLength, long Ra
 public sealed class ArchiveIndex
 {
     public const int Version = 1;
+    /// <summary>Metadata key of container 1.1: the offset of the spare copy of the index frame (<see cref="SpareCopies"/>).</summary>
+    public const string SparesKey = "spares";
     public const FileAttributes StoredAttributes = (FileAttributes)0x2027;
 
     public List<BlockInfo> Blocks { get; } = [];

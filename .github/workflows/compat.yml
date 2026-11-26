@@ -1,0 +1,149 @@
+name: Compatibility
+
+# Osmium 0.1.1, built from its own tag, must open, test and extract bit for bit every archive this version writes with
+# the methods 0.1.1 knows, spare copies of the file list included; it must refuse, and say why, an archive with blocks
+# made with a method that is new since. ZIP files this version writes must pass unzip and 7-Zip.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  compat:
+    name: Osmium 0.1.1 reads what this version writes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Not a secret: the password of the test archives. It goes in on standard input, never on a command line.
+      COMPAT_PASSWORD: compat-test-archives-only
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          ref: v0.1.1
+          path: old
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Publish this version's command line and 0.1.1's
+        run: |
+          set -euo pipefail
+          dotnet publish src/Osmium.Cli -c Release -o "$RUNNER_TEMP/new"
+          (cd old && dotnet publish src/Osmium.Cli -c Release -o "$RUNNER_TEMP/old")
+          "$RUNNER_TEMP/new/osmium" version
+          "$RUNNER_TEMP/old/osmium" version | grep -q '^osmium 0\.1\.1$' || { echo "::error::the old command line is not Osmium 0.1.1"; exit 1; }
+
+      - name: Archives of this version, opened, tested and extracted by 0.1.1
+        run: |
+          set -euo pipefail
+          NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/positive"
+          fail() { echo "::error::$1"; exit 1; }
+          mkdir -p "$W/in/mixed/sub/deeper" "$W/in/empty" "$W/in/many" "$W/in/dedup" "$W/in/small-random"
+          head -c 3M /dev/urandom > "$W/in/mixed/random.bin"            # 3 MiB that do not compress: spare copies
+          for i in $(seq 1 200); do echo "line $i of a text file"; done > "$W/in/mixed/notes.txt"
+          printf 'short\n' > "$W/in/mixed/sub/short.txt"
+          : > "$W/in/mixed/sub/zero.bin"
+          seq 1 50000 > "$W/in/mixed/sub/deeper/numbers.txt"
+          for i in $(seq 1 5000); do echo "small file $i" > "$W/in/many/f$i.txt"; done
+          head -c 1M /dev/urandom > "$W/in/dedup/one.bin"
+          cp "$W/in/dedup/one.bin" "$W/in/dedup/two.bin"
+          cp "$W/in/dedup/one.bin" "$W/in/dedup/three.bin"
+          # 10,000 files of 200 bytes that do not compress: 2 MB of blocks, but a file list well over 2 % of them.
+          python3 -I -c 'import os, sys; [open(os.path.join(sys.argv[1], f"r{i:05d}.bin"), "wb").write(os.urandom(200)) for i in range(10000)]' "$W/in/small-random"
+
+          # name, input folder, pipeline (methods 0.1.1 knows), encrypted, spare copies expected (yes, no, rule)
+          cases="mixed-zstd mixed zstd(level=3) no yes
+          mixed-lzma mixed lzma(dict=16M) no yes
+          mixed-encrypted mixed zstd(level=3) yes yes
+          empty empty zstd(level=3) no rule
+          many many zstd(level=3) no rule
+          dedup dedup zstd(level=3) no yes
+          small-random small-random zstd(level=3) no no"
+
+          while read -r name folder pipeline encrypted expected; do
+            archive="$W/$name.osa"
+            if [ "$encrypted" = yes ]; then
+              printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --password-stdin --kdf-iterations 1000 --quiet \
+                || fail "$name.osa: this version could not write it"
+            else
+              "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --quiet || fail "$name.osa: this version could not write it"
+            fi
+
+            # The writer's default rule, read from the archive's own bytes: spare copies exactly when the blocks total
+            # 1 MiB or more and the index frame is at most 2 % of them. The footer (last 32 bytes) gives the index
+            # frame's offset and length; a header copy's trailer ends at that offset ("OHDR" first).
+            python3 -I - "$archive" "$expected" <<'PY' || fail "$name.osa: spare copies are not where the rule puts them"
+          import struct, sys
+          path, expected = sys.argv[1], sys.argv[2]
+          b = open(path, "rb").read()
+          index_offset, index_length = struct.unpack_from("<qq", b, len(b) - 32)
+          header = 40 + struct.unpack_from("<I", b, 32)[0]
+          spares = b[index_offset - 32:index_offset - 28] == b"OHDR"
+          if spares:
+              header_copy = sum(struct.unpack_from("<qq", b, index_offset - 24)) + 32
+              blocks = index_offset - header_copy - index_length - header
+          else:
+              blocks = index_offset - header
+          rule = blocks >= 1 << 20 and index_length * 50 <= blocks
+          print(f"{path}: {blocks:,} bytes of blocks, index frame {index_length:,} bytes, spare copies: {'yes' if spares else 'no'}")
+          ok = spares == rule and (expected == "rule" or spares == (expected == "yes"))
+          if expected == "no":
+              ok = ok and blocks >= 1 << 20  # the case is there for a large file list next to 1 MiB of blocks or more
+          sys.exit(0 if ok else 1)
+          PY
+
+            out="$W/out-$name"
+            if [ "$encrypted" = yes ]; then
+              printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" t "$archive" --password-stdin || fail "$name.osa: Osmium 0.1.1 did not test it"
+              printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" x "$archive" "$out" --password-stdin || fail "$name.osa: Osmium 0.1.1 did not extract it"
+            else
+              "$OLD" t "$archive" || fail "$name.osa: Osmium 0.1.1 did not test it"
+              "$OLD" x "$archive" "$out" || fail "$name.osa: Osmium 0.1.1 did not extract it"
+            fi
+            diff -r "$W/in/$folder" "$out/$folder" || fail "$name.osa: what Osmium 0.1.1 extracted differs from the source"
+            hashes() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
+            cmp <(hashes "$W/in/$folder") <(hashes "$out/$folder") || fail "$name.osa: SHA-256 of the extracted files differ"
+            echo "$name.osa: Osmium 0.1.1 tested and extracted it exactly"
+          done <<< "$cases"
+
+      - name: Archives with methods new since 0.1.1 are refused whole by 0.1.1, with the reason
+        run: |
+          set -euo pipefail
+          if [ ! -d src/Osmium.Core/Codecs/Cm2 ]; then echo "Not active yet: this version has no methods that 0.1.1 lacks."; exit 0; fi
+          NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/negative"
+          fail() { echo "::error::$1"; exit 1; }
+          mkdir -p "$W/in/program"
+          cp "$RUNNER_TEMP/new/osmium" "$W/in/program/"   # an x64 executable: the default profile gives it new methods
+          "$NEW" a "$W/new-methods.osa" "$W/in/program" --quiet || fail "new-methods.osa: this version could not write it"
+          "$NEW" info "$W/new-methods.osa" | tee "$W/info.txt"
+          grep -Eq 'x86v2|cm2' "$W/info.txt" || fail "new-methods.osa: no block uses a method new since 0.1.1"
+
+          code=0
+          "$OLD" x "$W/new-methods.osa" "$W/old-out" 2> "$W/old.txt" || code=$?
+          cat "$W/old.txt"
+          [ "$code" -eq 1 ] || fail "new-methods.osa: Osmium 0.1.1 exited with $code, not 1"
+          grep -qF 'not supported by this version of Osmium (archive made by a newer version?)' "$W/old.txt" \
+            || fail "new-methods.osa: Osmium 0.1.1 did not say that a newer version made it"
+          if [ -e "$W/old-out" ] && [ -n "$(ls -A "$W/old-out")" ]; then fail "new-methods.osa: Osmium 0.1.1 wrote files"; fi
+
+          "$NEW" x "$W/new-methods.osa" "$W/new-out" || fail "new-methods.osa: this version did not extract it"
+          diff -r "$W/in/program" "$W/new-out/program" || fail "new-methods.osa: what this version extracted differs from the source"
+
+      - name: ZIP files of this version, checked by unzip and 7-Zip
+        run: |
+          set -euo pipefail
+          if ! command -v unzip > /dev/null || ! command -v 7z > /dev/null; then
+            { sudo apt-get update -q && sudo apt-get install -y -q unzip p7zip-full; } \
+              || { echo "::error::unzip and 7-Zip (p7zip-full) could not be installed"; exit 1; }
+          fi
+          OSMIUM_REQUIRE_INTEROP=1 dotnet test -c Release --project tests/Osmium.Core.Tests -- --filter-trait "Category=ZipInterop"

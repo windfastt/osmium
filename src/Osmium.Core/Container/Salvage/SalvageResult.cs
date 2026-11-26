@@ -31,6 +31,8 @@ public sealed record SalvageOptions
     internal string? Zone { get; init; }
     /// <summary>Writes the Mark-of-the-Web instead of <see cref="Extractor.WriteZoneIdentifier"/> (tests).</summary>
     internal Func<string, string, string?>? ZoneWriter { get; init; }
+    /// <summary>How names are compared when planning targets; null: as the file system does (tests).</summary>
+    internal StringComparer? NameComparer { get; init; }
 }
 
 public sealed record SalvageProgress(string Phase, long Done, long Total);
@@ -67,6 +69,8 @@ public sealed class SalvageFrame
     public long? ForeignIndexOffset { get; internal set; }
     /// <summary>The frame cannot be this archive's: it lies in a damaged frame's bytes or another archive lists it.</summary>
     internal bool Doubtful => EnclosingOffset is not null || ForeignIndexOffset is not null;
+    /// <summary>The spare copy of the index frame that the index names (container 1.1): part of an intact archive.</summary>
+    public bool IsSpareCopy { get; internal set; }
 
     public SalvageFrameState State { get; internal set; }
     /// <summary>Why the frame is not usable, e.g. "payload hash mismatch" or, for a newer version, "it uses method id 8".</summary>
@@ -192,7 +196,7 @@ public sealed class SalvageResult
         yield return $"Frames:  {Frames.Count:N0} frame header(s) found{FrameBreakdown()}";
         yield return $"Blocks:  {BlocksVerified:N0} of {Blocks.Count:N0} verified";
         foreach (var line in BlockProblems()) yield return "  " + line;
-        foreach (var f in Frames.Where(f => f.State is SalvageFrameState.Ignored or SalvageFrameState.Duplicate).Take(10))
+        foreach (var f in Frames.Where(f => f.State is SalvageFrameState.Ignored or SalvageFrameState.Duplicate && !f.IsSpareCopy).Take(10))
             yield return $"  {f.Name} at offset {f.Offset:N0}: {StateText(f.State)} ({f.Problem})";
         yield return IndexRecovered
             ? $"Index:   intact (frame at offset {IndexFrame!.Offset:N0})"
@@ -233,7 +237,7 @@ public sealed class SalvageResult
             : $"{FilesSkipped:N0} {(IndexRecovered ? "file(s)" : "block file(s)")} already in the destination were left as they were";
         if (Complete)
         {
-            string done = Frames.Any(f => f.State != SalvageFrameState.Verified) || UnrecognizedBytes > 0 || !HeaderIntact
+            string done = Frames.Any(f => f.State != SalvageFrameState.Verified && !f.IsSpareCopy) || UnrecognizedBytes > 0 || !HeaderIntact
                 ? "Everything was recovered: the archive is damaged, but no data was lost"
                 : "Everything was recovered";
             return skipped is null ? done + "." : $"{done}; {skipped}.";
@@ -256,7 +260,7 @@ public sealed class SalvageResult
 
     private string FrameBreakdown()
     {
-        var counts = Frames.Where(f => f.State is SalvageFrameState.Duplicate or SalvageFrameState.Ignored)
+        var counts = Frames.Where(f => f.State is SalvageFrameState.Duplicate or SalvageFrameState.Ignored && !f.IsSpareCopy)
             .GroupBy(f => f.State).OrderBy(g => g.Key).Select(g => $"{g.Count():N0} {StateText(g.Key)}").ToList();
         return counts.Count == 0 ? "" : $" ({string.Join(", ", counts)})";
     }

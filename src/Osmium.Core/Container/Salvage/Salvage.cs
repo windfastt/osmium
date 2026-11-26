@@ -40,6 +40,7 @@ internal sealed class SalvageRun : IDisposable
     private readonly SalvageSource _src;
     private readonly FrameScanner _scanner;
     private readonly List<string> _notes = [];
+    private HeaderProbe? _probe; // what was found where the header should be: a header copy must be a copy of it
     private readonly ConcurrentQueue<SalvageLoss> _lost = new(), _newer = new();
     private readonly ConcurrentQueue<SalvageRename> _renamed = new();
     private readonly ConcurrentQueue<string> _warnings = new();
@@ -64,14 +65,14 @@ internal sealed class SalvageRun : IDisposable
     {
         // 1. Header: an unencrypted archive does not need it; an encrypted one needs its salt and archive id.
         bool anyFrame = _scanner.NextFrameHeader(0, out var first);
-        var probe = HeaderProbe.Find(_src, anyFrame ? first.Offset : _src.Length);
+        var probe = _probe = HeaderProbe.Find(_src, anyFrame ? first.Offset : _src.Length);
         if (probe.Header is null && !anyFrame)
             throw new CorruptDataException($"No Osmium archive data was found in '{_archive}': it has no intact header and no frame.");
         bool encrypted = probe.Header?.Encrypted ?? EndIndexEncrypted(probe) ?? DamagedHeaderEncrypted() ?? (anyFrame && FramesLookEncrypted());
         _scanner.ArchiveEncrypted = encrypted;
         if (encrypted)
         {
-            _scanner.Key = ResolveKey(probe, anyFrame ? first.Offset : _src.Length, password, out string? keyProblem);
+            _scanner.Key = ResolveKey(probe, anyFrame ? first.Offset : _src.Length, Once(password), out string? keyProblem);
             _scanner.KeyProblem = keyProblem;
         }
         else if (probe.Header is null) _notes.Add("The archive header is damaged; an unencrypted archive does not need it.");
@@ -214,6 +215,9 @@ internal sealed class SalvageRun : IDisposable
             if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
             return new KeyMaterial(key, h.ArchiveId, h.Raw);
         }
+        // Container 1.1 keeps an intact copy of the header beside the copies of the index (FORMAT §4.1).
+        string? copyProblem = null;
+        if (probe.Header is null && KeyFromHeaderCopy(probe, password, out copyProblem) is { } fromCopy) return fromCopy;
         // The format keeps the salt and archive id only in the header. A damaged header may still hold them intact:
         // they are used only if they authenticate frames (GCM), or the password verifier confirms them. They are read
         // from the header with its CRC recomputed when that parses, else from their fixed places.
@@ -247,11 +251,73 @@ internal sealed class SalvageRun : IDisposable
                 : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
             return null;
         }
-        problem = "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
-            + "and the format keeps no other copy of them: encrypted salvage needs an intact header";
+        problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
+            + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
+            + "encrypted salvage needs an intact header";
         return null;
 
         static string Ask(Func<string?>? pw) => pw?.Invoke() ?? throw new PasswordRequiredException();
+    }
+
+    /// <summary>
+    /// The key from a header copy H, when the header itself is damaged. H sits just before the index frame and just
+    /// after its spare copy, and frame headers are not encrypted, so index frames are found by their frame headers
+    /// (bodies skipped, so that an archive stored in a block has no say while its frame header is intact). A copy is
+    /// used only when its archive id agrees with the footer at the end of the file, when there is one; when that footer
+    /// vouches for it, a password it does not accept is wrong. It is used once frames authenticate under it.
+    /// </summary>
+    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, out string? problem)
+    {
+        problem = null;
+        var copies = new List<ArchiveHeader>();
+        for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
+        {
+            long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
+            bool fits = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length;
+            if (fits && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0)
+                foreach (var (start, trailer) in HeaderCopiesBeside(fh.Offset, end - fh.Offset))
+                {
+                    ArchiveHeader h;
+                    try { h = ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)trailer.HeaderLength), writable: false)); }
+                    catch (Exception e) when (e is IOException or InvalidDataException) { continue; } // a newer version's, too
+                    if (h.Encryption is null || copies.Any(c => c.Raw.AsSpan().SequenceEqual(h.Raw))) continue;
+                    if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(h.ArchiveId) != ft.IdPrefix) continue;
+                    copies.Add(h);
+                }
+            pos = fits ? end : fh.Offset + 1;
+        }
+        if (copies.Count == 0) return null;
+        string pw = password?.Invoke() ?? throw new PasswordRequiredException();
+        bool refused = false;
+        foreach (var h in copies.AsEnumerable().Reverse()) // the last one first: the copy beside the index at the end
+        {
+            var key = ArchiveKey.Derive(pw, h.Encryption!.Salt, h.Encryption.Iterations);
+            if (!key.Matches(h.Encryption.Verifier))
+            {
+                refused |= probe.EndFooter is not null;
+                continue;
+            }
+            if (_scanner.Authenticates(key, h.ArchiveId) == false) continue;
+            _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
+            return new KeyMaterial(key, h.ArchiveId, h.Raw);
+        }
+        if (refused) throw new WrongPasswordException();
+        problem = "the archive header is damaged, and the spare copy of it that was found does not accept the password, "
+            + "or does not authenticate the frames (a wrong password, or the copy of another archive)";
+        return null;
+    }
+
+    /// <summary>Asks for the password at most once, however many places need it.</summary>
+    private static Func<string?>? Once(Func<string?>? password)
+    {
+        if (password is null) return null;
+        bool asked = false;
+        string? answer = null;
+        return () =>
+        {
+            if (!asked) (answer, asked) = (password(), true);
+            return answer;
+        };
     }
 
     // ------------------------------------------------------------------ index
@@ -259,8 +325,20 @@ internal sealed class SalvageRun : IDisposable
     /// <summary>An intact, readable index frame, and what ties it to this archive.</summary>
     /// <param name="AtEnd">The footer at the end of the file directly follows it.</param>
     /// <param name="Vouched">A footer naming this archive directly follows it, or it authenticated under this archive's key.</param>
-    /// <param name="Span">How many bytes its blocks occupy, ending where the index frame starts.</param>
-    private sealed record IndexCandidate(SalvageFrame Frame, ArchiveIndex Index, bool AtEnd, bool Vouched, long Span);
+    /// <param name="Span">How many bytes its blocks occupy, ending at <paramref name="BlocksEnd"/>.</param>
+    /// <param name="BlocksEnd">Where its blocks end: where the index frame starts, or, with spare copies (container 1.1),
+    /// where the spare copy of the index frame starts.</param>
+    private sealed record IndexCandidate(SalvageFrame Frame, ArchiveIndex Index, bool AtEnd, bool Vouched, long Span, long BlocksEnd);
+
+    /// <summary>Where the blocks of the index in <paramref name="f"/> end: an index frame with a header copy's trailer
+    /// just before it has its blocks end before its spare copy and the header copy (FORMAT §4.1).</summary>
+    private long BlocksEnd(SalvageFrame f, ArchiveIndex index)
+    {
+        if (!index.Metadata.ContainsKey(ArchiveIndex.SparesKey) || f.Offset < SpareCopies.TrailerSize) return f.Offset;
+        return SpareTrailer.Read(_src.Read(f.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+            && f.Offset - t.CopyLength - f.FrameLength is var start and >= 0
+            ? start : f.Offset;
+    }
 
     /// <summary>
     /// Picks this archive's index among the intact index frames. Set aside, unless a footer naming this archive follows
@@ -278,9 +356,10 @@ internal sealed class SalvageRun : IDisposable
         void Disown(IndexCandidate c)
         {
             foreach (var b in frames)
-                if (b.Intact && b.ForeignIndexOffset is null && b.Offset >= c.Frame.Offset - c.Span && b.Offset < c.Frame.Offset && Lists(c.Index, b))
+                if (b.Intact && b.ForeignIndexOffset is null && b.Offset >= c.BlocksEnd - c.Span && b.Offset < c.BlocksEnd && Lists(c.Index, b))
                     b.ForeignIndexOffset = c.Frame.Offset;
         }
+        var foreignIndexes = new List<IndexCandidate>();
         foreach (var f in all.Where(f => f.State == SalvageFrameState.Verified))
         {
             var footer = FooterInfo.At(_src, f.Offset + f.FrameLength);
@@ -308,22 +387,40 @@ internal sealed class SalvageRun : IDisposable
             bool atEnd = footer is not null && f.Offset + f.FrameLength + Osa.FooterSize == _src.Length;
             // An encrypted index that authenticated is this archive's: its tag binds the exact header bytes.
             bool vouched = (footer is not null && idPrefix is not null) || f.Encrypted;
-            var candidate = new IndexCandidate(f, index, atEnd, vouched, Math.Clamp(span, 0, f.Offset));
+            long blocksEnd = BlocksEnd(f, index);
+            var candidate = new IndexCandidate(f, index, atEnd, vouched, Math.Clamp(span, 0, blocksEnd), blocksEnd);
             if (foreign)
             {
                 f.Reject(SalvageFrameState.Ignored, "the footer after it names another archive");
                 Disown(candidate);
+                foreignIndexes.Add(candidate);
             }
             else candidates.Add(candidate);
         }
+        // A copy of an index frame (a spare copy, container 1.1) belongs to the archive the index frame belongs to.
+        foreach (var c in candidates.Where(c => foreignIndexes.Any(o => c.Frame.SameContent(o.Frame))).ToList())
+        {
+            var of = foreignIndexes.First(o => c.Frame.SameContent(o.Frame));
+            c.Frame.Reject(SalvageFrameState.Ignored, $"a copy of the index at offset {of.Frame.Offset:N0}, whose footer names another archive");
+            Disown(c);
+            candidates.Remove(c);
+        }
 
-        // Copies of one index count once; the best placed copy stands for them.
+        // Copies of one index count once; the best placed copy stands for them. The copy an index names as its spare
+        // (container 1.1) is no sign of damage.
         var kept = new List<IndexCandidate>();
+        var copies = new Dictionary<IndexCandidate, List<IndexCandidate>>();
         foreach (var c in candidates.OrderByDescending(c => c.AtEnd).ThenByDescending(c => c.Vouched)
                      .ThenBy(c => c.Frame.EnclosingOffset is not null).ThenByDescending(c => c.Frame.Offset))
         {
             if (kept.FirstOrDefault(k => c.Frame.SameContent(k.Frame)) is { } same)
-                c.Frame.Reject(SalvageFrameState.Duplicate, $"a copy of the index at offset {same.Frame.Offset:N0}");
+            {
+                c.Frame.IsSpareCopy = same.Index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var v) && v.Length == 8
+                    && BinaryPrimitives.ReadUInt64LittleEndian(v) == (ulong)c.Frame.Offset;
+                c.Frame.Reject(SalvageFrameState.Duplicate, c.Frame.IsSpareCopy
+                    ? $"the spare copy of the index at offset {same.Frame.Offset:N0}" : $"a copy of the index at offset {same.Frame.Offset:N0}");
+                (copies.TryGetValue(same, out var list) ? list : copies[same] = []).Add(c);
+            }
             else kept.Add(c);
         }
 
@@ -335,7 +432,7 @@ internal sealed class SalvageRun : IDisposable
             if (c.AtEnd || c.Vouched) return (null, false);
             if (c.Frame.EnclosingOffset is { } enc)
                 return ($"it lies inside the damaged frame at offset {enc:N0}, so it may belong to an archive stored in that frame", true);
-            if (kept.FirstOrDefault(o => o != c && c.Frame.Offset >= o.Frame.Offset - o.Span && c.Frame.Offset < o.Frame.Offset) is { } outer)
+            if (kept.FirstOrDefault(o => o != c && c.Frame.Offset >= o.BlocksEnd - o.Span && c.Frame.Offset < o.BlocksEnd) is { } outer)
                 return ($"it lies within the blocks of the index at offset {outer.Frame.Offset:N0}, so it belongs to an archive stored in one of them", true);
             // An archive has one index, after all of its frames (the format has no appends).
             if (outside.FirstOrDefault(b => b.Offset > c.Frame.Offset && !Lists(c.Index, b)) is { } later)
@@ -348,7 +445,14 @@ internal sealed class SalvageRun : IDisposable
             var (why, foreign) = Objection(c);
             if (why is null) { eligible.Add(c); continue; }
             c.Frame.Reject(SalvageFrameState.Ignored, why);
-            if (foreign) Disown(c);
+            if (!foreign) continue;
+            Disown(c);
+            foreach (var copy in copies.GetValueOrDefault(c, []))
+            {
+                copy.Frame.IsSpareCopy = false;
+                copy.Frame.Reject(SalvageFrameState.Ignored, $"a copy of the index at offset {c.Frame.Offset:N0}, which belongs to another archive");
+                Disown(copy);
+            }
         }
         var best = eligible.OrderByDescending(c => c.AtEnd).ThenByDescending(c => c.Vouched)
             .ThenByDescending(c => outside.Count(b => Lists(c.Index, b))).ThenByDescending(c => c.Frame.Offset).FirstOrDefault();
@@ -360,7 +464,8 @@ internal sealed class SalvageRun : IDisposable
 
         if (all.Count == 0)
             return (null, null, FooterAt(_src.Length - Osa.FooterSize) ? "no index frame was found" : "no index frame was found (the end of the archive is missing)");
-        var telling = all.OrderBy(f => f.State == SalvageFrameState.Ignored).ThenByDescending(f => f.Offset).First();
+        var telling = all.OrderBy(f => f.State == SalvageFrameState.Ignored).ThenBy(f => f.State == SalvageFrameState.Duplicate)
+            .ThenByDescending(f => f.Offset).First();
         string problem = telling.State switch
         {
             SalvageFrameState.NeedsNewerVersion => $"the index needs a newer version of Osmium ({telling.Problem})",
@@ -416,9 +521,10 @@ internal sealed class SalvageRun : IDisposable
         public ArchiveEntry Entry { get; } = entry;
         public string Target { get; } = target;
         public string? PartPath;
+        public Microsoft.Win32.SafeHandles.SafeFileHandle? Part; // open from its creation until it is verified
         public int Remaining = entry.Segments.Count;
         public readonly long[] FileOffsets = Offsets(entry);
-        public bool Failed, Finished, Renamed;
+        public bool Failed, Finished, Renamed, Replaces;
         public string? Error;
 
         private static long[] Offsets(ArchiveEntry e)
@@ -448,53 +554,62 @@ internal sealed class SalvageRun : IDisposable
         };
         string Needs(IEnumerable<int> ks) => "needs " + string.Join("; ", ks.Distinct().Order().Select(k => Describe(Status(k))));
 
-        // Plan everything before writing anything, so that a refusal leaves the destination untouched. Every entry's own
-        // name is reserved first: a renamed file must not take the name of another entry (the archive may hold both
-        // report.txt and "report (2).txt"), and two entries must not share a name on a case-insensitive file system.
-        var names = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        var targets = new Dictionary<ArchiveEntry, string>();
-        foreach (var e in index.Entries.Where(e => !e.IsDirectory))
+        // Plan everything before writing anything, so that a refusal leaves the destination untouched, with the rules
+        // of extraction (FORMAT §7): every entry's own name is reserved first, so that a renamed file never takes the
+        // name of another entry (the archive may hold both report.txt and "report (2).txt") and two entries never share
+        // a name on a case-insensitive file system; nothing is written below a link that is already in the destination;
+        // only a file planned to be replaced is replaced.
+        var names = _o.NameComparer ?? TargetNames.DefaultComparer;
+        var own = new Dictionary<ArchiveEntry, string>();
+        foreach (var e in index.Entries)
         {
-            try { targets[e] = PathSafety.Resolve(_dest, e.Path); }
-            catch (CorruptDataException ex) { _lost.Enqueue(new(e.Path, ex.Message)); }
+            try { own[e] = PathSafety.Resolve(_dest, e.Path); }
+            catch (CorruptDataException ex) { _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, ex.Message)); }
         }
-        var reserved = new HashSet<string>(targets.Values, names);
-        var taken = new HashSet<string>(names);
+        var planner = new TargetNames(_dest, names, own.Values, null);
         var planned = new List<FileJob>();
-        foreach (var e in index.Entries.Where(e => !e.IsDirectory))
+        var folders = new List<(ArchiveEntry Entry, string Path)>();
+        foreach (var e in index.Entries) // index order: parents before children
         {
-            _filesTotal++;
-            if (!targets.TryGetValue(e, out var target)) continue;
-            // Damage anywhere loses the file; if its only obstacle is a newer version, a newer Osmium can recover it.
-            var blocked = e.Segments.Select(s => s.Frame).Distinct()
-                .Where(k => chosen[k] is not { State: SalvageFrameState.Verified }).ToList();
-            if (blocked.Any(k => Status(k).State != SalvageBlockState.NeedsNewerVersion)) { _lost.Enqueue(new(e.Path, Needs(blocked))); continue; }
-            if (blocked.Count > 0) { _newer.Enqueue(new(e.Path, Needs(blocked))); continue; }
-            if (taken.Contains(target))
-                target = FreeName(target, reserved, taken); // another entry of this archive has this name here: never replace it
-            else if (File.Exists(target))
+            if (!e.IsDirectory) _filesTotal++;
+            if (!own.TryGetValue(e, out var path)) continue;
+            if (!e.IsDirectory)
             {
-                if (_o.Overwrite == OverwriteMode.Skip) { _skipped++; continue; }
-                if (_o.Overwrite == OverwriteMode.Fail) { _lost.Enqueue(new(e.Path, "a file of this name is already in the destination")); continue; }
-                if (_o.Overwrite == OverwriteMode.Rename) target = FreeName(target, reserved, taken);
+                // Damage anywhere loses the file; if its only obstacle is a newer version, a newer Osmium can recover it.
+                var blocked = e.Segments.Select(s => s.Frame).Distinct()
+                    .Where(k => chosen[k] is not { State: SalvageFrameState.Verified }).ToList();
+                if (blocked.Any(k => Status(k).State != SalvageBlockState.NeedsNewerVersion)) { _lost.Enqueue(new(e.Path, Needs(blocked))); continue; }
+                if (blocked.Count > 0) { _newer.Enqueue(new(e.Path, Needs(blocked))); continue; }
             }
-            taken.Add(target);
-            planned.Add(new FileJob(e, target) { Renamed = !names.Equals(target, targets[e]) });
+            var t = planner.Plan(path, e.IsDirectory, _o.Overwrite, TargetNames.SpelledOtherwise(_dest, e.Path, path));
+            switch (t.Outcome)
+            {
+                case TargetNames.Outcome.Skipped: _skipped++; break;
+                case TargetNames.Outcome.Unsafe: _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, t.Reason!)); break;
+                case TargetNames.Outcome.Failed:
+                    _lost.Enqueue(new(e.Path, t.Reason == "File exists." ? "a file of this name is already in the destination" : t.Reason!.TrimEnd('.')));
+                    break;
+                default:
+                    if (e.IsDirectory) folders.Add((e, t.Path!));
+                    else planned.Add(new FileJob(e, t.Path!) { Renamed = t.Renamed, Replaces = t.Replaces });
+                    break;
+            }
         }
         if (NoRoom(planned.Sum(j => j.Entry.Size))) return [];
 
-        Directory.CreateDirectory(_dest);
+        var created = new List<string>(); // folders this run created
+        Extractor.CreateFolder(_dest, created);
         _zone = _o.Zone ?? Extractor.ReadZoneIdentifier(_archive);
         var eo = new ExtractOptions { Overwrite = _o.Overwrite, RestoreTimes = _o.RestoreTimes, RestoreAttributes = _o.RestoreAttributes };
-        foreach (var e in index.Entries.Where(e => e.IsDirectory))
+        foreach (var (e, path) in folders)
         {
-            try { Directory.CreateDirectory(PathSafety.Resolve(_dest, e.Path)); }
+            try { Extractor.CreateFolder(path, created); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _lost.Enqueue(new(e.Path + "/", ex.Message)); }
         }
         var jobs = new List<FileJob>();
         foreach (var j in planned)
         {
-            try { Directory.CreateDirectory(Path.GetDirectoryName(j.Target)!); }
+            try { Extractor.CreateFolder(Path.GetDirectoryName(j.Target)!, created); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _lost.Enqueue(new(j.Entry.Path, ex.Message)); continue; }
             jobs.Add(j);
         }
@@ -512,6 +627,7 @@ internal sealed class SalvageRun : IDisposable
         var toDecode = Enumerable.Range(0, n).Where(k => chosen[k] is { State: SalvageFrameState.Verified }).ToList();
         long total = toDecode.Sum(k => index.Blocks[k].RawSize), done = 0;
         var gate = new MemoryGate(_o.MemoryBudget);
+        bool finished = false;
         try
         {
             foreach (var j in jobs.Where(j => j.Entry.Segments.Count == 0)) Complete(j);
@@ -527,18 +643,21 @@ internal sealed class SalvageRun : IDisposable
                             lock (j)
                             {
                                 if (raw is null) j.Failed = true;
-                                else if (!j.Failed) WriteSegment(j, seg, raw);
+                                else if (!j.Failed) WriteSegment(j, seg, raw, _dest);
                                 if (--j.Remaining == 0) Complete(j);
                             }
                 }
                 _scanner.Report("Recovering", Interlocked.Add(ref done, info.RawSize), total);
             });
+            finished = true;
         }
         finally
         {
             foreach (var j in jobs.Where(j => !j.Finished)) DeletePart(j); // cancelled: leave no partial files behind
+            if (!finished) Extractor.RemoveEmptyFolders(created);
         }
-        Extractor.ApplyDirectoryMetadata(index.Entries.Where(e => e.IsDirectory), _dest, eo);
+        // Times and attributes only on folders this run created, never System or ReadOnly (as extraction does).
+        Extractor.ApplyCreatedFolderMetadata(folders, created, names, eo);
         return [.. Enumerable.Range(0, n).Select(Status)];
 
         void Complete(FileJob j)
@@ -552,12 +671,11 @@ internal sealed class SalvageRun : IDisposable
             }
             try
             {
-                if (j.PartPath is null)
-                {
-                    j.PartPath = Extractor.PartName(j.Target);
-                    using (File.Create(j.PartPath)) { }
-                }
-                if (Extractor.HashFile(j.PartPath) != j.Entry.Hash)
+                if (j.Part is null) (j.PartPath, j.Part) = Extractor.CreatePart(_dest, j.Target); // an empty file
+                bool intact = Extractor.HashFile(j.Part) == j.Entry.Hash;
+                j.Part.Dispose(); // verified: closed before the mark and the rename
+                j.Part = null;
+                if (!intact)
                 {
                     DeletePart(j);
                     _lost.Enqueue(new(j.Entry.Path, "its content does not match its hash, although every block it uses verified"));
@@ -565,8 +683,11 @@ internal sealed class SalvageRun : IDisposable
                 }
                 // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                 // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
-                MarkAsDownloaded(j.PartPath, j.Entry.Path);
-                FileRetry.Move(j.PartPath, j.Target, overwrite: _o.Overwrite == OverwriteMode.Overwrite);
+                MarkAsDownloaded(j.PartPath!, j.Entry.Path);
+                // The plan checked the folders for links; checked again now, as they may have changed since.
+                if (new FileInfo(j.PartPath!).LinkTarget is not null) throw new IOException("its part file was replaced by a link while it was written");
+                if (TargetNames.LinkOnTheWay(_dest, j.Target) is { } link) throw new IOException(link);
+                FileRetry.Move(j.PartPath!, j.Target, overwrite: j.Replaces);
                 j.PartPath = null;
                 Extractor.ApplyFileMetadata(j.Target, j.Entry, eo);
                 Interlocked.Increment(ref _recovered);
@@ -629,26 +750,14 @@ internal sealed class SalvageRun : IDisposable
         _ => $"block {b.Number}, which is damaged ({b.Problem})",
     };
 
-    /// <summary>"name (2).ext", "name (3).ext"…: the first that is not on disk, not another entry's own name and not
-    /// already chosen in this run.</summary>
-    private static string FreeName(string target, HashSet<string> reserved, HashSet<string> taken)
-    {
-        string dir = Path.GetDirectoryName(target)!, stem = Path.GetFileNameWithoutExtension(target), ext = Path.GetExtension(target);
-        for (int i = 2; ; i++)
-        {
-            var candidate = Path.Combine(dir, $"{stem} ({i}){ext}");
-            if (!File.Exists(candidate) && !Directory.Exists(candidate) && !reserved.Contains(candidate) && !taken.Contains(candidate)) return candidate;
-        }
-    }
-
-    private static void WriteSegment(FileJob j, int seg, byte[] raw)
+    private static void WriteSegment(FileJob j, int seg, byte[] raw, string dest)
     {
         var s = j.Entry.Segments[seg];
         try
         {
-            j.PartPath ??= Extractor.PartName(j.Target);
-            using var h = File.OpenHandle(j.PartPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
-            RandomAccess.Write(h, raw.AsSpan((int)s.Offset, (int)s.Length), j.FileOffsets[seg]);
+            // The first segment creates the part file (never one that is there already) and keeps it open.
+            if (j.Part is null) (j.PartPath, j.Part) = Extractor.CreatePart(dest, j.Target);
+            RandomAccess.Write(j.Part, raw.AsSpan((int)s.Offset, (int)s.Length), j.FileOffsets[seg]);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -666,6 +775,8 @@ internal sealed class SalvageRun : IDisposable
 
     private static void DeletePart(FileJob j)
     {
+        j.Part?.Dispose();
+        j.Part = null;
         if (j.PartPath is null) return;
         TryDelete(j.PartPath);
         j.PartPath = null;
@@ -860,6 +971,7 @@ internal sealed class SalvageRun : IDisposable
         var spans = new List<(long Start, long End)>();
         if (probe.Header is { } h) spans.Add((probe.Offset, probe.Offset + h.Length));
         spans.AddRange(frames.Where(f => f.Intact).Select(f => (f.Offset, f.Offset + f.FrameLength)));
+        spans.AddRange(HeaderCopies(frames));
         if (FooterAt(_src.Length - Osa.FooterSize)) spans.Add((_src.Length - Osa.FooterSize, _src.Length));
         if (indexFrame is not null && FooterAt(indexFrame.Offset + indexFrame.FrameLength))
             spans.Add((indexFrame.Offset + indexFrame.FrameLength, indexFrame.Offset + indexFrame.FrameLength + Osa.FooterSize));
@@ -873,5 +985,54 @@ internal sealed class SalvageRun : IDisposable
         }
         if (pos < _src.Length) gaps.Add((pos, _src.Length));
         return (gaps.Sum(g => g.End - g.Start), gaps);
+    }
+
+    /// <summary>
+    /// The intact header copies of container 1.1 (FORMAT §4.1): the header bytes, zero padding and a trailer whose
+    /// magic and CRC check out, with header bytes that check out as a header. A header copy sits between the spare
+    /// copy of the index frame and the index frame, so it is looked for on both sides of every intact index frame.
+    /// </summary>
+    private List<(long Start, long End)> HeaderCopies(List<SalvageFrame> frames) =>
+        [.. frames.Where(f => f.IsIndex && f.Intact).SelectMany(f => HeaderCopiesBeside(f.Offset, f.FrameLength))
+            .Select(c => (c.Start, c.Start + c.Trailer.CopyLength))];
+
+    /// <summary>The intact header copies on either side of the index frame at <paramref name="offset"/>: where each
+    /// starts, and its trailer.</summary>
+    private List<(long Start, SpareTrailer Trailer)> HeaderCopiesBeside(long offset, long frameLength)
+    {
+        var found = new List<(long Start, SpareTrailer Trailer)>();
+        // Before it: the trailer ends where the index frame starts.
+        if (offset >= SpareCopies.TrailerSize && SpareTrailer.Read(_src.Read(offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+            && IsHeaderCopy(offset - t.CopyLength, t))
+            found.Add((offset - t.CopyLength, t));
+        // After it: a header, then the padding a writer puts after one of that length, then the trailer.
+        long start = offset + frameLength;
+        if (start + 40 > _src.Length) return found;
+        long headerLength = 40 + BinaryPrimitives.ReadUInt32LittleEndian(_src.Read(start + 32, 4));
+        long length = Math.Max(SpareCopies.MinHeaderCopyLength, headerLength + SpareCopies.TrailerSize);
+        if (headerLength > SpareCopies.MaxHeaderLength || start + length > _src.Length) return found;
+        if (SpareTrailer.Read(_src.Read(start + length - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } after
+            && after.HeaderLength == headerLength && after.CopyLength == length && IsHeaderCopy(start, after))
+            found.Add((start, after));
+        return found;
+    }
+
+    /// <summary>Whether the bytes at <paramref name="start"/> are a header copy of this archive: header bytes that check
+    /// out as a header, with this archive's id (from the header, else the footer at the end of the file) and, when the
+    /// header is intact, the header's very bytes; then zero padding.</summary>
+    private bool IsHeaderCopy(long start, SpareTrailer t)
+    {
+        if (start < 0 || start + t.CopyLength > _src.Length) return false;
+        var raw = _src.Read(start, (int)t.HeaderLength);
+        try
+        {
+            if (ArchiveHeader.Read(new MemoryStream(raw, writable: false)).Length != t.HeaderLength) return false;
+        }
+        catch (NewerVersionException) { } // an intact header of a newer version is still a header
+        catch (Exception e) when (e is IOException or InvalidDataException) { return false; }
+        if (_probe?.IdPrefix is { } id && BinaryPrimitives.ReadUInt64LittleEndian(raw.AsSpan(16)) != id) return false;
+        if (_probe?.Header is { } header && !raw.AsSpan().SequenceEqual(header.Raw)) return false;
+        var padding = _src.Read(start + t.HeaderLength, (int)t.PaddingLength);
+        return !padding.AsSpan().ContainsAnyExcept((byte)0);
     }
 }

@@ -34,7 +34,8 @@ public sealed class OsaArchiveSource : IArchiveSource
 
     public string Path => Reader.Path;
     public ArchiveKind Kind => ArchiveKind.Osa;
-    public string FormatName => $".osa {Osa.Major}.{Osa.Minor}";
+    /// <summary>The archive's own container version, ".osa 1.0" or ".osa 1.1".</summary>
+    public string FormatName => $".osa {Osa.Major}.{Reader.Header.Minor}";
     public bool IsEncrypted => Reader.Header.Encrypted;
     public long FileLength => Reader.FileLength;
     public long? TotalSize => Reader.TotalUnpacked;
@@ -78,19 +79,9 @@ public sealed class OsaArchiveSource : IArchiveSource
             MemoryBudget = limits.MemoryBudgetBytes,
             MapPath = map,
             BeforeReplace = request.BeforeReplace,
+            WrittenEarlier = request.WrittenEarlier,
         }, progress, ct);
-        // A file whose path is unsafe is refused before anything is written; every other chosen file that is neither
-        // written, skipped nor waiting for a newer Osmium failed (damaged, or an I/O error such as a folder that could
-        // not be created).
-        int unsafeFiles = chosen.Count(e => PathSafety.Validate(map?.Invoke(e.Path) ?? e.Path) is not null);
-        int renamed = result.Written.Count(w => w.Path != Expected(w.Entry));
-        return Map(result, chosen.Count - unsafeFiles - result.FilesSkipped, renamed);
-
-        string Expected(ArchiveEntry e)
-        {
-            try { return PathSafety.Resolve(destination, map?.Invoke(e.Path) ?? e.Path); }
-            catch (CorruptDataException) { return ""; }
-        }
+        return Map(result);
     }
 
     public ArchiveExtractResult Test(Func<ArchiveItem, bool>? select, IProgress<ExtractProgress>? progress, CancellationToken ct)
@@ -99,22 +90,22 @@ public sealed class OsaArchiveSource : IArchiveSource
         var chosen = Reader.Entries.Where(e => !e.IsDirectory && (selection?.Invoke(e) ?? true)).ToList();
         CheckExpansion(chosen.Sum(e => e.Size), _limits);
         var result = Extractor.Test(Reader, selection, new ExtractOptions { MemoryBudget = _limits.MemoryBudgetBytes }, progress, ct);
-        return Map(result, chosen.Count, renamed: 0);
+        return Map(result);
     }
 
     public void Dispose() => Reader.Dispose();
 
-    /// <param name="attempted">Chosen files that went into decoding or writing: each one is written, failed or newer.</param>
-    private ArchiveExtractResult Map(ExtractResult r, int attempted, int renamed)
+    private ArchiveExtractResult Map(ExtractResult r)
     {
         int newer = r.FilesNeedingNewerVersion;
         return new ArchiveExtractResult
         {
             FilesOk = r.FilesOk,
-            FilesFailed = Math.Max(0, attempted - r.FilesOk - newer),
+            // Damaged, an I/O error, a refused replacement: every failed file that is not waiting for a newer Osmium.
+            FilesFailed = Math.Max(0, r.FilesFailed - newer),
             SkippedExisting = r.FilesSkipped,
             SkippedUnsafe = r.SkippedUnsafe,
-            Renamed = renamed,
+            Renamed = r.Renamed,
             NeedNewerVersion = newer,
             Errors = r.Errors,
             Warnings = r.Warnings,
@@ -171,10 +162,25 @@ public sealed class OsaArchiveSource : IArchiveSource
             throw new FreeSpaceException($"Not enough free space: the files need {Bytes(output)} and {Bytes(reserve >= long.MaxValue ? long.MaxValue : (long)reserve)} must stay free, but the drive has {Bytes(free)} free.");
     }
 
-    /// <summary>The archive's properties, as the Archives page shows them.</summary>
-    private static List<ArchiveDetail> Describe(OsaReader r) =>
+    /// <summary>The archive's properties, as the Archives page shows them. "Spare copy of the file list" is there for
+    /// archives that have one and for archives of container 1.0, which never have one.</summary>
+    private static List<ArchiveDetail> Describe(OsaReader r)
+    {
+        var details = Properties(r);
+        string? spare = r.SpareCopyStatus switch
+        {
+            SpareCopyStatus.Present => "yes",
+            SpareCopyStatus.Damaged => "damaged (the archive is complete; Test says more)",
+            SpareCopyStatus.Newer => "made by a newer version of Osmium (this version does not use it)",
+            _ => r.Header.Minor == 0 ? "no (archives of Osmium 0.1 have none)" : null,
+        };
+        if (spare is not null) details.Insert(1, new("Spare copy of the file list", spare));
+        return details;
+    }
+
+    private static List<ArchiveDetail> Properties(OsaReader r) =>
     [
-        new("Format", $".osa {Osa.Major}.{Osa.Minor}"),
+        new("Format", $".osa {Osa.Major}.{r.Header.Minor}"),
         new("Created by", r.Header.Creator ?? "?"),
         new("Profile", r.Index.MetaString("profile") ?? "?"),
         new("Files", $"{r.Entries.Count(e => !e.IsDirectory):N0}"),
