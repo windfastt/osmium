@@ -69,8 +69,10 @@ internal sealed class GuardedExtractor : IEntrySink
                 if (PathSafety.Validate(mapped) is null) own.Add(Full(mapped));
             }
         // The archive being read is taken like a file of an earlier pass: an entry of its name gets a free name in every
-        // mode, so extracting next to the archive never replaces it.
-        _plan = new TargetNames(_root, StringComparer.OrdinalIgnoreCase, own, [.. request.WrittenEarlier ?? [], Path.GetFullPath(archivePath)]);
+        // mode, so extracting next to the archive never replaces it; by its file identity also when the destination
+        // reaches it by another path (a link to its folder, a junction, a mapped drive).
+        _plan = new TargetNames(_root, StringComparer.OrdinalIgnoreCase, own, [.. request.WrittenEarlier ?? [], Path.GetFullPath(archivePath)],
+            TargetNames.FileIdentity(archivePath));
         CreateRoot();
     }
 

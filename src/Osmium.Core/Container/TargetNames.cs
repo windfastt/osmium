@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Osmium.Core.Container;
 
@@ -35,12 +36,16 @@ internal sealed class TargetNames
     private readonly Dictionary<string, Dictionary<string, bool>?> _listings;
     private readonly Dictionary<string, int> _nextFree;
     private readonly Dictionary<string, string?> _links;
+    private readonly string? _protected;
 
     /// <param name="root">The destination's full path.</param>
     /// <param name="own">Every entry's own resolved full path (files and folders).</param>
     /// <param name="writtenEarlier">Paths an earlier pass of the same operation wrote: taken, never replaced or skipped.</param>
-    public TargetNames(string root, StringComparer names, IEnumerable<string> own, IEnumerable<string>? writtenEarlier)
+    /// <param name="protectedFile">The <see cref="FileIdentity(string)"/> of the archive being read: a file in the
+    /// destination that is the archive, under whatever path, gets a free name in every mode and is never replaced.</param>
+    public TargetNames(string root, StringComparer names, IEnumerable<string> own, IEnumerable<string>? writtenEarlier, string? protectedFile = null)
     {
+        _protected = protectedFile;
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         _names = names;
         _reserved = new HashSet<string>(names);
@@ -103,7 +108,9 @@ internal sealed class TargetNames
         else
         {
             var kind = OnDisk(path);
-            if (kind != OnDiskKind.None)
+            if (kind == OnDiskKind.File && _protected is not null && FileIdentity(path) == _protected)
+                path = FreeName(path, folder: false); // the archive being read, reached by another spelling of its path
+            else if (kind != OnDiskKind.None)
             {
                 switch (mode)
                 {
@@ -212,6 +219,60 @@ internal sealed class TargetNames
             return "a folder in the destination could not be checked for links";
         }
     }
+
+    /// <summary>
+    /// What identifies a file whatever path reaches it (a link or junction on the way, a mapped drive, a short name, a
+    /// hard link): the volume and file id on Windows, the device and inode on Linux. Null when it cannot be read, or
+    /// on other systems.
+    /// </summary>
+    internal static string? FileIdentity(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return FileIdentity(handle);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
+    /// <inheritdoc cref="FileIdentity(string)"/>
+    internal static string? FileIdentity(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var id = new byte[24]; // FILE_ID_INFO: the volume serial number and the 128-bit file id
+            if (GetFileInformationByHandleEx(handle, FileIdInfo, id, id.Length)) return "id:" + Convert.ToHexString(id);
+            return GetFileInformationByHandle(handle, out var info)
+                ? $"index:{info.VolumeSerialNumber:X8}:{info.FileIndexHigh:X8}{info.FileIndexLow:X8}" : null;
+        }
+        if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+        {
+            // struct stat begins with st_dev and st_ino, 8 bytes each, on every 64-bit Linux.
+            var stat = new byte[256];
+            try { return fstat((int)handle.DangerousGetHandle(), stat) == 0 ? "dev-ino:" + Convert.ToHexString(stat, 0, 16) : null; }
+            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return null; }
+        }
+        return null;
+    }
+
+    private const int FileIdInfo = 18;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, [Out] byte[] info, int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
+
+    [DllImport("libc.so.6", SetLastError = true)]
+    private static extern int fstat(int fd, [Out] byte[] stat);
 
     private const uint NameSurrogateBit = 0x20000000;
 
