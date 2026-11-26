@@ -255,7 +255,8 @@ namespace Osmium.Cli
         /// <summary>
         /// The password given with --password-stdin or --password, read once per run; null when neither was given.
         /// A --password without a value and an empty password are refused (an empty password would write an archive
-        /// without encryption). Standard input is read as UTF-8, one line, with one trailing CR/LF removed.
+        /// without encryption). Standard input is read as UTF-8, one line, with one trailing CR/LF and a leading byte
+        /// order mark removed.
         /// </summary>
         private const string PasswordNeedsAValue =
             "--password needs a value: --password-stdin reads it from standard input, or give --password <password> (--password=<password> for one that starts with --).";
@@ -280,7 +281,8 @@ namespace Osmium.Cli
             return pw;
         }
 
-        /// <summary>One line of standard input as UTF-8 (not the console's code page), without its CR/LF.</summary>
+        /// <summary>One line of standard input as UTF-8 (not the console's code page), without its CR/LF and without a
+        /// leading byte order mark.</summary>
         private static string ReadPasswordLine()
         {
             var stdin = StandardInputOverride?.Invoke() ?? Console.OpenStandardInput();
@@ -293,6 +295,8 @@ namespace Osmium.Cli
                 if (bytes.Count > 1 << 16) throw new ArgumentException("The password on standard input is too long.");
             }
             if (bytes.Count > 0 && bytes[^1] == '\r') bytes.RemoveAt(bytes.Count - 1);
+            // A byte order mark (a password file saved as "UTF-8 with BOM") marks the file, not the password.
+            if (bytes.Count >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) bytes.RemoveRange(0, 3);
             try { return new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes.ToArray()); }
             catch (System.Text.DecoderFallbackException) { throw new ArgumentException("The password on standard input is not UTF-8 text."); }
         }

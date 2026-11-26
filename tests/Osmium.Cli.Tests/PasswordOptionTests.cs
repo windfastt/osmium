@@ -128,6 +128,15 @@ public sealed class PasswordOptionTests : IDisposable
     }
 
     [Fact]
+    public async Task AByteOrderMarkIsNotPartOfThePassword()
+    {
+        Stdin([0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("secret\r\n")]);
+        Assert.Equal(0, (await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "store", "--password-stdin", "-q"])).ExitCode);
+        using (var reader = OsaReader.Open(P("out.osa"), () => "secret")) Assert.True(reader.Header.Encrypted);
+        Assert.Equal(0, (await CliRunner.RunAsync(["t", P("out.osa"), "--password", "secret"])).ExitCode);
+    }
+
+    [Fact]
     public async Task APasswordOnTheCommandLineIsWarnedAbout()
     {
         var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "store", "--password", "s3cret", "-q"]);
