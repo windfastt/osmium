@@ -50,7 +50,8 @@ public class ZipTests
         foreach (var (name, data) in entries.Where(e => !e.Item1.EndsWith('/')))
             Assert.Equal(data, File.ReadAllBytes(Path.Combine([t.Sub("out"), .. name.Split('/')])));
         Assert.True(Directory.Exists(Path.Combine(t.Sub("out"), "top", "empty")));
-        Assert.Equal(new DateTime(2024, 5, 6, 7, 8, 10, DateTimeKind.Utc), File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "top", "sub", "big.txt")));
+        // System.IO.Compression stores only the DOS date and time, a wall-clock time without a zone: read as local time.
+        Assert.Equal(TimeZoneInfo.ConvertTimeToUtc(new DateTime(2024, 5, 6, 7, 8, 10), TimeZoneInfo.Local), File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "top", "sub", "big.txt")));
         var test = s.Test(null, null, Ct);
         Assert.Equal((4, 0, 0), (test.FilesOk, test.Unverified, test.LeftOut));
     }
@@ -242,13 +243,11 @@ public class ZipTests
         var reports = new List<ExtractProgress>();
         using (var s = Open(path, new ArchiveOpenOptions { Password = () => wrong }))
         {
-            GC.Collect();
-            long allocated = GC.GetTotalAllocatedBytes(precise: true);
-            long before = GC.GetTotalMemory(forceFullCollection: true);
+            // Everything the check allocates, on this thread, stays far below the entry's 64 MiB: it is never buffered.
+            // (The process-wide counters also see the tests running beside this one, so they are not used.)
+            long allocated = GC.GetAllocatedBytesForCurrentThread();
             Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("out"), new ArchiveExtractRequest(), new SyncProgress<ExtractProgress>(reports.Add), Ct));
-            long after = GC.GetTotalMemory(forceFullCollection: true);
-            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - allocated < 16 << 20, "the check buffered the entry");
-            Assert.True(after - before < 16 << 20);
+            Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 16 << 20, "the check buffered the entry");
         }
         Assert.False(Directory.Exists(t.Sub("out")));
         Assert.Contains(reports, p => p.Current == "Checking the password");
@@ -359,9 +358,9 @@ public class ZipTests
                 ppmd[r.DataStart + 1] |= 0x0F; // memory field: (props >> 4) & 0xFF = 0xFF → 256 MB
         using (var s = Open(ForeignData.Write(t, "ppmd-big.zip", ppmd), new ArchiveOpenOptions { Limits = budget }))
         {
-            long before = GC.GetTotalAllocatedBytes(precise: true);
+            long before = GC.GetAllocatedBytesForCurrentThread();
             var r = Extract(s, t.Sub("ppmd"));
-            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+            Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
             Assert.Equal(2, r.SkippedUnsupported);
             Assert.Contains(r.Errors, e => e.Contains("needs more memory than allowed", StringComparison.Ordinal));
         }
@@ -372,9 +371,9 @@ public class ZipTests
                 BitConverter.GetBytes(0xFFFFFFFFu).CopyTo(lzma, r.DataStart + 5);
         using (var s = Open(ForeignData.Write(t, "lzma-big.zip", lzma), new ArchiveOpenOptions { Limits = budget }))
         {
-            long before = GC.GetTotalAllocatedBytes(precise: true);
+            long before = GC.GetAllocatedBytesForCurrentThread();
             Assert.Equal(3, Extract(s, t.Sub("lzma")).FilesOk);
-            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+            Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
         }
     }
 
@@ -471,6 +470,29 @@ public class ZipTests
             Assert.NotEqual("ünïcödé.txt", s.Items[1].Path);
         }
         finally { ZipSource.OemCodePageOverride = null; }
+    }
+
+    [Fact]
+    public void TimesAreUtcFromTheExtraFieldsAndLocalFromTheDosFields()
+    {
+        using var t = new TempDir();
+        var z = new ZipCraft();
+        z.Add("dos.txt", "1"u8.ToArray()); // DOS fields only: 2024-05-06 12:00:00 on the writer's clock
+        var ut = z.Add("ut.txt", "2"u8.ToArray());
+        ut.Extra = [0x55, 0x54, 5, 0, 1, .. BitConverter.GetBytes(1_000_000_000)]; // extended timestamp: UTC seconds
+        var ntfs = z.Add("ntfs.txt", "3"u8.ToArray());
+        long ft = new DateTime(2010, 1, 2, 3, 4, 5, DateTimeKind.Utc).ToFileTimeUtc();
+        ntfs.Extra = [0x0A, 0x00, 32, 0, 0, 0, 0, 0, 1, 0, 24, 0, .. BitConverter.GetBytes(ft), .. BitConverter.GetBytes(ft), .. BitConverter.GetBytes(ft)];
+        using var s = Open(ForeignData.Write(t, "times.zip", z.Build()));
+        var local = TimeZoneInfo.ConvertTimeToUtc(new DateTime(2024, 5, 6, 12, 0, 0), TimeZoneInfo.Local);
+        Assert.Equal(local, s.Items[0].ModifiedUtc);
+        Assert.Equal(DateTime.UnixEpoch.AddSeconds(1_000_000_000), s.Items[1].ModifiedUtc);
+        Assert.Equal(new DateTime(2010, 1, 2, 3, 4, 5, DateTimeKind.Utc), s.Items[2].ModifiedUtc);
+        Assert.All(s.Items, i => Assert.Equal(DateTimeKind.Utc, i.ModifiedUtc!.Value.Kind));
+        Assert.Equal(3, Extract(s, t.Sub("out")).FilesOk);
+        Assert.Equal(local, File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "dos.txt")));
+        Assert.Equal(DateTime.UnixEpoch.AddSeconds(1_000_000_000), File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "ut.txt")));
+        Assert.Equal(new DateTime(2010, 1, 2, 3, 4, 5, DateTimeKind.Utc), File.GetLastWriteTimeUtc(Path.Combine(t.Sub("out"), "ntfs.txt")));
     }
 
     [Fact]

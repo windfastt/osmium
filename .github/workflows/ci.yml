@@ -110,7 +110,7 @@ jobs:
           root = pathlib.Path("tests/Osmium.Core.Tests/Fixtures").resolve()
           readme = (root / "README.md").read_text(encoding="utf-8")
           work = pathlib.Path(tempfile.mkdtemp())
-          env = dict(os.environ, TZ="UTC", LC_ALL="C.UTF-8")
+          env = dict(os.environ, TZ="UTC", LC_ALL="C.UTF-8", LANG="C.UTF-8")
           content = re.search(r"```sh\n(.*?)```", readme, re.S).group(1)
           subprocess.run(["bash", "-e", "-c", content], cwd=work, env=env, check=True)
           rows, s, folder = [], "", None
@@ -154,10 +154,12 @@ jobs:
                   continue
               ea, eb = work / ("a-" + rel.replace("/", "_")), work / ("b-" + rel.replace("/", "_"))
               if cmd.startswith("zip "):
-                  # Made by Info-ZIP: read by Info-ZIP (its password bytes are UTF-8 here).
-                  la = run("unzip", "-l", str(a)).stdout.splitlines()[1:]
-                  lb = run("unzip", "-l", str(b)).stdout.splitlines()[1:]
-                  if la != lb: failures.append(f"{rel}: listing differs")
+                  # Made by Info-ZIP: read by Info-ZIP (its password bytes are UTF-8 here). Info-ZIP adds a folder's entries
+                  # in the order the file system lists them, which differs between file systems, so the listings are compared
+                  # as sorted lines: the same names, sizes and times, in any order.
+                  la = sorted(run("unzip", "-l", str(a)).stdout.decode().splitlines()[1:])
+                  lb = sorted(run("unzip", "-l", str(b)).stdout.decode().splitlines()[1:])
+                  if la != lb: failures.append(f"{rel}: listing differs\ncommitted:\n" + "\n".join(la) + "\nmade again:\n" + "\n".join(lb))
                   for archive, into in ((a, ea), (b, eb)):
                       r = run("unzip", "-q", *(["-P", pw] if pw else []), str(archive), "-d", str(into))
                       if r.returncode: failures.append(f"{rel}: {r.stderr.decode()}")
@@ -166,7 +168,8 @@ jobs:
                   def listing(p):
                       out = run("7z", "l", "-slt", *([f"-p{pw}"] if pw else []), str(p)).stdout.split(b"----------", 1)[-1]
                       return [l for l in out.splitlines() if l.startswith(keep)]
-                  if listing(a) != listing(b): failures.append(f"{rel}: listing differs")
+                  if listing(a) != listing(b):
+                      failures.append(f"{rel}: listing differs\ncommitted:\n" + b"\n".join(listing(a)).decode() + "\nmade again:\n" + b"\n".join(listing(b)).decode())
                   for archive, into in ((a, ea), (b, eb)):
                       r = run("7z", "x", "-bso0", "-bsp0", *([f"-p{pw}"] if pw else []), f"-o{into}", str(archive))
                       if r.returncode: failures.append(f"{rel}: {r.stderr.decode()}")

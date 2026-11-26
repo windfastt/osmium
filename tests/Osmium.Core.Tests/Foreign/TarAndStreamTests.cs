@@ -192,9 +192,9 @@ public class TarAndStreamTests
         using var t = new TempDir();
         byte[] tar = [.. Header("meta", type, 3L << 30), .. new byte[2048]];
         string path = ForeignData.Write(t, "big-header.tar", tar);
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         var e = Assert.Throws<CorruptDataException>(() => Open(path));
-        Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
         Assert.Contains("TAR header too large", e.Message);
     }
 
@@ -206,11 +206,11 @@ public class TarAndStreamTests
         foreach (var (name, data) in new[] { ("huge.tar", tar), ("huge.tar.gz", ForeignData.GZip(tar)) })
         {
             string path = ForeignData.Write(t, name, data);
-            long before = GC.GetTotalAllocatedBytes(precise: true);
+            long before = GC.GetAllocatedBytesForCurrentThread();
             var sw = System.Diagnostics.Stopwatch.StartNew();
             Assert.Throws<CorruptDataException>(() => Open(path));
             Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5));
-            Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+            Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
             // Streamed without a listing, the file before the damage is extracted and the damage is reported.
             using var s = Open(path, new ArchiveOpenOptions { ListEagerly = false });
             var r = s.Extract(t.Sub("out-" + name), new ArchiveExtractRequest(), null, Ct);
@@ -436,9 +436,9 @@ public class TarAndStreamTests
         // The index says the block holds 1,480 bytes, so a dictionary of that size is enough: it decodes.
         Assert.Equal(1, s.Test(null, null, Ct).FilesOk);
         // Without the index's sizes (detection), the declared size is what counts, and it is never allocated.
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         Assert.Equal(ArchiveKind.Xz, ArchiveSources.Detect(path));
-        Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
     }
 
     [Fact]

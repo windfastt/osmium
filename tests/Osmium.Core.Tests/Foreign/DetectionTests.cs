@@ -149,9 +149,9 @@ public class DetectionTests
         BitConverter.GetBytes(crc).CopyTo(xz, 12 + headerSize - 4);
         string path = ForeignData.Write(t, "big.xz", xz);
         GC.Collect();
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         var kind = ArchiveSources.Detect(path);
-        long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(ArchiveKind.Xz, kind);
         Assert.True(allocated < 64 << 20, $"detection allocated {allocated:N0} bytes");
     }

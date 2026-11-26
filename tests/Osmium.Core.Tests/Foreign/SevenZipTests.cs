@@ -207,9 +207,9 @@ public class SevenZipTests
         using var t = new TempDir();
         var bytes = PatchCoder("ppmd-plain-header.7z", [0x23, 0x03, 0x04, 0x01, 0x05], (b, props) => BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(props + 1), 0xFFFFFF00));
         using var s = Open(ForeignData.Write(t, "big.7z", bytes), new ArchiveOpenOptions { Limits = ImportLimits.Default with { MemoryBudgetBytes = 256 << 20 } });
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
-        Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
         Assert.Equal(2, r.FilesFailed);
         Assert.Contains(r.Errors, e => e.Contains("needs more memory than allowed", StringComparison.Ordinal));
     }
@@ -220,9 +220,9 @@ public class SevenZipTests
         using var t = new TempDir();
         var bytes = PatchCoder("lzma-plain-header.7z", [0x23, 0x03, 0x01, 0x01, 0x05], (b, props) => BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(props + 1), 0xFFFFFFFF));
         using var s = Open(ForeignData.Write(t, "big.7z", bytes), new ArchiveOpenOptions { Limits = ImportLimits.Default with { MemoryBudgetBytes = 64 << 20 } });
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         Assert.Equal(3, s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct).FilesOk);
-        Assert.True(GC.GetTotalAllocatedBytes(precise: true) - before < 32 << 20);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32 << 20);
         AssertFixtureTree(t.Sub("out"));
     }
 
