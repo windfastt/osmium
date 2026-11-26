@@ -50,26 +50,43 @@ internal static class SevenZipCraft
 
     /// <summary>The archive: the packed streams after the start header, then the header; files are named f0.bin, f1.bin…
     /// in folder order. With <paramref name="packHeader"/>, the header is stored packed: the folder it returns for the
-    /// header's bytes (its packed streams follow the files' ones) and an encoded header that names it.</summary>
-    public static byte[] Build(IReadOnlyList<Folder> folders, Func<byte[], Folder>? packHeader = null)
+    /// header's bytes (its packed streams follow the files' ones) and an encoded header that names it.
+    /// <paramref name="emptyFiles"/> empty files without data follow the others; <paramref name="name"/> names file
+    /// <c>i</c> (f0.bin… by default).</summary>
+    public static byte[] Build(IReadOnlyList<Folder> folders, Func<byte[], Folder>? packHeader = null, int emptyFiles = 0, Func<int, string>? name = null)
     {
         var packs = folders.SelectMany(f => f.Packed).ToList();
         long dataLength = packs.Sum(p => (long)p.Length);
-        var h = new List<byte> { 0x01, 0x04 };
-        PackAndUnpackInfo(h, folders, 0);
-        h.AddRange([0x08, 0x0D]);
-        foreach (var f in folders) Num(h, f.Files.Length);
-        h.Add(0x09);
-        foreach (var f in folders) foreach (var (size, _) in f.Files.SkipLast(1)) Num(h, size);
-        // A folder of one file with a folder CRC needs no file CRC here.
-        h.Add(0x0A);
-        Digests(h, [.. folders.Where(f => !(f.Files.Length == 1 && f.UnpackCrc is not null)).SelectMany(f => f.Files).Select(f => f.Crc)]);
-        h.AddRange([0x00, 0x00]);
-        int files = folders.Sum(f => f.Files.Length);
+        var h = new List<byte> { 0x01 };
+        if (folders.Count > 0)
+        {
+            h.Add(0x04);
+            PackAndUnpackInfo(h, folders, 0);
+            h.AddRange([0x08, 0x0D]);
+            foreach (var f in folders) Num(h, f.Files.Length);
+            h.Add(0x09);
+            foreach (var f in folders) foreach (var (size, _) in f.Files.SkipLast(1)) Num(h, size);
+            // A folder of one file with a folder CRC needs no file CRC here.
+            h.Add(0x0A);
+            Digests(h, [.. folders.Where(f => !(f.Files.Length == 1 && f.UnpackCrc is not null)).SelectMany(f => f.Files).Select(f => f.Crc)]);
+            h.AddRange([0x00, 0x00]);
+        }
+        int withData = folders.Sum(f => f.Files.Length), files = withData + emptyFiles;
         h.Add(0x05);
         Num(h, files);
+        if (emptyFiles > 0)
+        {
+            var empty = Bits(files, i => i >= withData);
+            h.Add(0x0E);
+            Num(h, empty.Length);
+            h.AddRange(empty);
+            var emptyFile = Bits(emptyFiles, _ => true); // files, not folders
+            h.Add(0x0F);
+            Num(h, emptyFile.Length);
+            h.AddRange(emptyFile);
+        }
         var names = new List<byte> { 0x00 };
-        for (int i = 0; i < files; i++) names.AddRange(Encoding.Unicode.GetBytes($"f{i}.bin\0"));
+        for (int i = 0; i < files; i++) names.AddRange(Encoding.Unicode.GetBytes((name?.Invoke(i) ?? $"f{i}.bin") + "\0"));
         h.Add(0x11);
         Num(h, names.Count);
         h.AddRange(names);
@@ -132,6 +149,26 @@ internal static class SevenZipCraft
     }
 
     private static byte[] Concat(byte[][] parts) => [.. parts.SelectMany(p => p)];
+
+    /// <summary>A 7z bit vector: the first item in the high bit of the first byte.</summary>
+    private static byte[] Bits(int count, Func<int, bool> set)
+    {
+        var bits = new byte[(count + 7) / 8];
+        for (int i = 0; i < count; i++) if (set(i)) bits[i / 8] |= (byte)(0x80 >> (i % 8));
+        return bits;
+    }
+
+    /// <summary>A folder that stores <paramref name="data"/> packed with LZMA, its CRC kept (for a packed header).</summary>
+    public static Folder Lzma(byte[] data)
+    {
+        var encoder = new SevenZip.Compression.LZMA.Encoder();
+        encoder.SetCoderProperties([SevenZip.CoderPropID.DictionarySize], [1 << 22]);
+        var props = new MemoryStream();
+        encoder.WriteCoderProperties(props);
+        var packed = new MemoryStream();
+        encoder.Code(new MemoryStream(data), packed, data.Length, -1, null);
+        return new([new Coder([0x03, 0x01, 0x01], props.ToArray())], [packed.ToArray()], [data.Length], [], UnpackCrc: Crc32.HashToUInt32(data));
+    }
 
     /// <summary>7z digests: "all defined", or a bit vector of the defined ones; then their CRCs.</summary>
     private static void Digests(List<byte> h, List<uint?> crcs)

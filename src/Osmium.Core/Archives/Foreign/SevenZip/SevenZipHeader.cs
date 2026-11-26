@@ -70,8 +70,8 @@ internal sealed class SzDatabase
 /// and, when it is packed (and possibly encrypted), its folder decoded first. A small file must not make the reader
 /// allocate much or run long: every count is checked against <see cref="ImportLimits.MaxEntries"/> and against the
 /// bytes that remain before anything is allocated for it, every parsed object is charged to the memory budget, a
-/// packed header may decode to at most 256 times the file's size (and never past the expansion limit), and the parse
-/// observes cancellation.
+/// packed header may decode to at most a quarter of the memory budget (and never past the expansion limit), and the
+/// parse observes cancellation.
 /// </summary>
 internal static class SevenZipHeader
 {
@@ -114,10 +114,10 @@ internal static class SevenZipHeader
         }
     }
 
-    /// <summary>The largest decoded header accepted: 256 times the archive's size (at least 1 MiB), and never more
-    /// than a quarter of the memory budget or 1 GiB.</summary>
-    public static long MaxHeader(ImportLimits limits, long fileLength) =>
-        Math.Min(Math.Min(1L << 30, Math.Max(16L << 20, limits.MemoryBudgetBytes / 4)), Math.Max(1L << 20, LimitGuard.Add(0, fileLength) > long.MaxValue / 256 ? long.MaxValue : fileLength * 256));
+    /// <summary>The largest decoded header accepted: a quarter of the memory budget, and never more than 1 GiB. Not
+    /// tied to the archive's size: the file list of many empty files packs to far less than 1/256 of itself (10,000
+    /// of them in 5 KB), and what the list holds is charged and counted as it is read.</summary>
+    public static long MaxHeader(ImportLimits limits) => Math.Min(1L << 30, Math.Max(0, limits.MemoryBudgetBytes / 4));
 
     /// <summary>Reads the database. <paramref name="decodeHeader"/> decodes a packed header's folder into bytes.</summary>
     public static SzDatabase Read(FileSlice file, ImportLimits limits, CancellationToken ct, Func<SzDatabase, SzFolder, long, byte[]> decodeHeader)
@@ -133,7 +133,7 @@ internal static class SevenZipHeader
         uint nextCrc = BinaryPrimitives.ReadUInt32LittleEndian(sig.AsSpan(28));
         if (nextSize == 0) return new SzDatabase(); // an empty archive
         if (nextOffset > file.Length - 32 || nextSize > file.Length - 32 - nextOffset) throw Corrupt("the archive is truncated (its header is missing)");
-        long cap = MaxHeader(limits, file.Length);
+        long cap = MaxHeader(limits);
         if (nextSize > cap) throw TooLarge();
         var header = new byte[nextSize];
         file.ReadAt(32 + nextOffset, header);

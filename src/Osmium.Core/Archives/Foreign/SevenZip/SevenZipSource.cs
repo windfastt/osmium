@@ -99,8 +99,16 @@ internal sealed class SevenZipSource : ForeignSource
             if (folder.IsEncrypted) _encryptedHeaders = true;
             var aes = new List<SevenZipAesStream>();
             using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null, aes), guard);
-            var bytes = new byte[size];
-            s.ReadExactly(bytes);
+            // Grown as it is decoded, so a header that declares far more than its data holds allocates only what came.
+            var bytes = new byte[Math.Min(size, 1L << 20)];
+            long done = 0;
+            while (done < size)
+            {
+                if (done == bytes.Length) Array.Resize(ref bytes, (int)Math.Min(size, 2L * bytes.Length));
+                int n = s.Read(bytes, (int)done, bytes.Length - (int)done);
+                if (n == 0) throw SevenZipHeader.Corrupt("the header ends early");
+                done += n;
+            }
             if (folder.IsEncrypted) headerProof &= folder.UnpackCrc is not null && size > 0 && aes.Any(a => a.Proves);
             return bytes;
         }

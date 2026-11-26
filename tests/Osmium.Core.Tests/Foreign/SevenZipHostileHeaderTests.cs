@@ -137,11 +137,39 @@ public class SevenZipHostileHeaderTests
     [Theory]
     [InlineData(16_776_928L)]
     [InlineData(400L << 20)]
-    public void APackedHeaderDecodingToFarMoreThanTheFileIsRefusedBeforeDecoding(long declared)
+    public void APackedHeaderDeclaringFarMoreThanItsDataAllocatesOnlyWhatComes(long declared)
+    {
+        // Within the cap the header is decoded; it is grown as it comes, so the small data fails before much is made.
+        using var t = new TempDir();
+        var e = Refused(ForeignData.Write(t, "big-header.7z", Packed([0x01, 0x00], declared)), ImportLimits.Default with { MemoryBudgetBytes = 4L << 30 }, TimeSpan.FromSeconds(2));
+        Assert.IsType<Osmium.Core.Pipeline.CorruptDataException>(e);
+    }
+
+    [Fact]
+    public void APackedHeaderPastAQuarterOfTheBudgetIsRefusedBeforeDecoding()
     {
         using var t = new TempDir();
-        var e = Refused(ForeignData.Write(t, "big-header.7z", Packed([0x01, 0x00], declared)), ImportLimits.Default, TimeSpan.FromSeconds(2));
+        var e = Refused(ForeignData.Write(t, "big-header.7z", Packed([0x01, 0x00], 17L << 20)), ImportLimits.Default with { MemoryBudgetBytes = 64L << 20 }, TimeSpan.FromSeconds(2));
         Assert.IsType<EntryLimitException>(e);
+        Assert.Equal(1L << 30, SevenZipHeader.MaxHeader(ImportLimits.Default with { MemoryBudgetBytes = 16L << 30 }));
+    }
+
+    [Fact]
+    public void AFileListOfManyEmptyFilesPackedFarSmallerThanItselfOpens()
+    {
+        // As 7-Zip writes them: 10,000 empty files at ordinary paths pack into a few KB, far less than 1/256 of the list.
+        using var t = new TempDir();
+        static string Name(int i) => $"project/module_{i / 100:D3}/src/main/resources/placeholder_file_number_{i:D5}.txt";
+        byte[] archive = SevenZipCraft.Build([], SevenZipCraft.Lzma, emptyFiles: 10_000, name: Name);
+        string path = ForeignData.Write(t, "empty-files.7z", archive);
+        long listing = 10_000L * 2 * (Name(0).Length + 1);
+        Assert.True(listing > 256 * archive.Length, $"{archive.Length:N0} bytes for a {listing:N0}-byte list");
+        using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Limits = ImportLimits.Default with { MemoryBudgetBytes = 512L << 20 } }, Ct);
+        Assert.Equal(10_000, s.Items.Count(i => !i.IsDirectory));
+        Assert.Equal(Name(9_999), s.Items[^1].Path);
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((10_000, 0), (r.FilesOk, r.LeftOut));
+        Assert.True(File.Exists(Path.Combine([t.Sub("out"), .. Name(4_321).Split('/')])));
     }
 
     [Fact]
