@@ -63,8 +63,6 @@ public sealed class OsaArchiveSource : IArchiveSource
 
     public ArchiveExtractResult Extract(string destination, ArchiveExtractRequest request, IProgress<ExtractProgress>? progress, CancellationToken ct)
     {
-        if (request.WrittenEarlier is { Count: > 0 })
-            throw new NotSupportedException("Extracting .osa archives in a second pass over earlier output is not available yet.");
         var limits = request.Limits ?? _limits;
         var selection = Selection(request.Indices, request.Select);
         var map = PrefixMap(request.StripPrefix);
@@ -81,19 +79,9 @@ public sealed class OsaArchiveSource : IArchiveSource
             MemoryBudget = limits.MemoryBudgetBytes,
             MapPath = map,
             BeforeReplace = request.BeforeReplace,
+            WrittenEarlier = request.WrittenEarlier,
         }, progress, ct);
-        // A file whose path is unsafe is refused before anything is written; every other chosen file that is neither
-        // written, skipped nor waiting for a newer Osmium failed (damaged, or an I/O error such as a folder that could
-        // not be created).
-        int unsafeFiles = chosen.Count(e => PathSafety.Validate(map?.Invoke(e.Path) ?? e.Path) is not null);
-        int renamed = result.Written.Count(w => w.Path != Expected(w.Entry));
-        return Map(result, chosen.Count - unsafeFiles - result.FilesSkipped, renamed);
-
-        string Expected(ArchiveEntry e)
-        {
-            try { return PathSafety.Resolve(destination, map?.Invoke(e.Path) ?? e.Path); }
-            catch (CorruptDataException) { return ""; }
-        }
+        return Map(result);
     }
 
     public ArchiveExtractResult Test(Func<ArchiveItem, bool>? select, IProgress<ExtractProgress>? progress, CancellationToken ct)
@@ -102,22 +90,22 @@ public sealed class OsaArchiveSource : IArchiveSource
         var chosen = Reader.Entries.Where(e => !e.IsDirectory && (selection?.Invoke(e) ?? true)).ToList();
         CheckExpansion(chosen.Sum(e => e.Size), _limits);
         var result = Extractor.Test(Reader, selection, new ExtractOptions { MemoryBudget = _limits.MemoryBudgetBytes }, progress, ct);
-        return Map(result, chosen.Count, renamed: 0);
+        return Map(result);
     }
 
     public void Dispose() => Reader.Dispose();
 
-    /// <param name="attempted">Chosen files that went into decoding or writing: each one is written, failed or newer.</param>
-    private ArchiveExtractResult Map(ExtractResult r, int attempted, int renamed)
+    private ArchiveExtractResult Map(ExtractResult r)
     {
         int newer = r.FilesNeedingNewerVersion;
         return new ArchiveExtractResult
         {
             FilesOk = r.FilesOk,
-            FilesFailed = Math.Max(0, attempted - r.FilesOk - newer),
+            // Damaged, an I/O error, a refused replacement: every failed file that is not waiting for a newer Osmium.
+            FilesFailed = Math.Max(0, r.FilesFailed - newer),
             SkippedExisting = r.FilesSkipped,
             SkippedUnsafe = r.SkippedUnsafe,
-            Renamed = renamed,
+            Renamed = r.Renamed,
             NeedNewerVersion = newer,
             Errors = r.Errors,
             Warnings = r.Warnings,

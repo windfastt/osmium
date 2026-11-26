@@ -76,6 +76,15 @@ public sealed record ExtractOptions
     internal string? Zone { get; init; }
     /// <summary>Writes the Mark-of-the-Web instead of <see cref="Extractor.WriteZoneIdentifier"/> (tests).</summary>
     internal Func<string, string, string?>? ZoneWriter { get; init; }
+    /// <summary>How names are compared when planning targets; null: as the file system does (case-insensitive on
+    /// Windows and macOS). Tests set the case-insensitive rule on Linux.</summary>
+    internal StringComparer? NameComparer { get; init; }
+    /// <summary>Full paths an earlier pass of the same operation wrote (the second pass after "Extract anyway"): they
+    /// count as written by this run, so a target equal to one of them gets a free name in every overwrite mode and is
+    /// never replaced or skipped as existing.</summary>
+    internal IReadOnlyCollection<string>? WrittenEarlier { get; init; }
+    /// <summary>Called with a block's frame number and the memory reserved for decoding it (tests).</summary>
+    internal Action<int, long>? OnReserve { get; init; }
 }
 
 /// <summary>
@@ -86,8 +95,15 @@ public sealed record ExtractOptions
 /// </summary>
 public sealed record ExtractProgress(long BytesDone, long BytesTotal, int FilesDone, int FilesTotal, string? Current);
 
+/// <param name="FilesFailed">Files not written because of damage, an I/O error, a replacement that was refused or a
+/// name that was taken in <see cref="OverwriteMode.Fail"/>; unsafe paths are not among them (<see cref="SkippedUnsafe"/>).</param>
 public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkipped, IReadOnlyList<string> Errors)
 {
+    /// <summary>Files written under another name than their own, because it was taken (by a file in the destination
+    /// in <see cref="OverwriteMode.Rename"/>, or by another entry of this run in any mode); each is in <see cref="Renames"/>.</summary>
+    public int Renamed { get; init; }
+    /// <summary>Each renamed file: its archive path and the full path it was written to.</summary>
+    public IReadOnlyList<ExtractRename> Renames { get; init; } = [];
     /// <summary>How many of <see cref="FilesFailed"/> are in blocks that need a newer version of Osmium (not damaged).</summary>
     public int FilesNeedingNewerVersion { get; init; }
     /// <summary>Problems that did not stop a file from being extracted, e.g. a Mark-of-the-Web that could not be written.</summary>
@@ -101,6 +117,10 @@ public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkippe
 
 /// <summary>A file extraction wrote: its entry and the full path it was written to (renamed when the name was taken).</summary>
 public sealed record WrittenFile(ArchiveEntry Entry, string Path);
+
+/// <summary>A file written under another name because its own was taken: "'<paramref name="ArchivePath"/>' was saved as
+/// '<paramref name="WrittenPath"/>'".</summary>
+public sealed record ExtractRename(string ArchivePath, string WrittenPath);
 
 public static class MemoryBudgets
 {
@@ -124,6 +144,9 @@ public static class Extractor
         public long[] SegmentFileOffsets { get; } = Offsets(entry);
         public bool Failed;
         public bool Written;                               // verified and in place at Target
+        public bool Done;                                  // completed: written, or failed and cleaned up
+        public bool Replaces;                              // planned to replace a file that is in the destination
+        public bool Renamed;                               // Target is not the entry's own name
         public XxHash128? Running;                       // test mode: incremental hash in file order
         public int NextSeg;
         public Dictionary<int, byte[]>? Pending;           // test mode: segments that arrived early
@@ -175,47 +198,65 @@ public static class Extractor
             entries = kept;
         }
         var files = new List<FileState>();
-        int skipped = 0, unsafePaths = 0;
-        if (!test) Directory.CreateDirectory(destination!);
-
-        // Directories first (also implicit parents), then file targets.
-        foreach (var e in entries.Where(e => e.IsDirectory))
+        int skipped = 0, unsafePaths = 0, failedEarly = 0;
+        var folders = new List<(ArchiveEntry Entry, string Path)>();
+        var created = new List<string>(); // folders this run created, each after the folder it is in
+        var names = options.NameComparer ?? TargetNames.DefaultComparer;
+        if (test) files.AddRange(entries.Where(e => !e.IsDirectory).Select(e => new FileState(e, null)));
+        else
         {
-            if (test) continue;
-            try { Directory.CreateDirectory(PathSafety.Resolve(destination!, OutPath(e))); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            // Plan every target before writing anything (FORMAT §7): resolve every entry, reserve every entry's own
+            // name, then take names in index order, parents before children.
+            string root = Path.GetFullPath(destination!);
+            var own = new Dictionary<ArchiveEntry, string>();
+            foreach (var e in entries)
             {
-                if (ex is CorruptDataException) unsafePaths++;
-                errors.Enqueue($"{e.Path}: {ex.Message}");
-            }
-        }
-        foreach (var e in entries.Where(e => !e.IsDirectory))
-        {
-            string? target = null;
-            if (!test)
-            {
-                try
+                try { own[e] = PathSafety.Resolve(root, OutPath(e)); }
+                catch (CorruptDataException ex)
                 {
-                    target = PathSafety.Resolve(destination!, OutPath(e));
-                    if (File.Exists(target))
-                    {
-                        switch (options.Overwrite)
-                        {
-                            case OverwriteMode.Skip: skipped++; continue;
-                            case OverwriteMode.Fail: throw new IOException("File exists.");
-                            case OverwriteMode.Rename: target = UniqueName(target); break;
-                        }
-                    }
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CorruptDataException)
-                {
-                    if (ex is CorruptDataException) unsafePaths++;
+                    unsafePaths++;
                     errors.Enqueue($"{e.Path}: {ex.Message}");
-                    continue;
                 }
             }
-            files.Add(new FileState(e, target));
+            var planner = new TargetNames(root, names, own.Values, options.WrittenEarlier);
+            foreach (var e in entries)
+            {
+                if (!own.TryGetValue(e, out var path)) continue;
+                var t = planner.Plan(path, e.IsDirectory, options.Overwrite);
+                switch (t.Outcome)
+                {
+                    case TargetNames.Outcome.Skipped: skipped++; break;
+                    case TargetNames.Outcome.Unsafe:
+                        unsafePaths++;
+                        errors.Enqueue($"{e.Path}: {t.Reason}");
+                        break;
+                    case TargetNames.Outcome.Failed:
+                        failedEarly++;
+                        errors.Enqueue($"{e.Path}: {t.Reason}");
+                        break;
+                    default:
+                        if (e.IsDirectory) folders.Add((e, t.Path!));
+                        else files.Add(new FileState(e, t.Path) { Replaces = t.Replaces, Renamed = t.Renamed });
+                        break;
+                }
+            }
+            // Nothing is written before this point. Folders: the destination, the folder entries, the files' folders.
+            CreateFolder(root, created);
+            foreach (var (e, path) in folders)
+            {
+                try { CreateFolder(path, created); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { errors.Enqueue($"{e.Path}: {ex.Message}"); }
+            }
+            files.RemoveAll(f =>
+            {
+                try { CreateFolder(Path.GetDirectoryName(f.Target!)!, created); return false; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    failedEarly++;
+                    errors.Enqueue($"{f.Entry.Path}: {ex.Message}");
+                    return true;
+                }
+            });
         }
 
         string? zone = test ? null : options.Zone ?? ReadZoneIdentifier(reader.Path);
@@ -235,65 +276,86 @@ public static class Extractor
             }
         }
 
-        // Empty files complete immediately.
-        foreach (var f in files.Where(f => f.Entry.Segments.Count == 0))
-        {
-            if (Complete(f, null)) ok++; else failed++;
-            filesDone++;
-        }
-
         var budget = new MemoryGate(options.MemoryBudget);
         var fileLocks = new ConcurrentDictionary<FileState, object>();
         var newerFrames = new ConcurrentDictionary<int, bool>();
-        Parallel.ForEach(byFrame.Keys.OrderBy(k => k),
-            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelBlocks), CancellationToken = ct },
-            frame =>
+        bool finished = false;
+        try
+        {
+            // Empty files complete immediately.
+            foreach (var f in files.Where(f => f.Entry.Segments.Count == 0))
             {
-                var info = reader.Blocks[frame];
-                long need = Math.Min(options.MemoryBudget, info.DecodeMemory + info.RawSize * 2);
-                using var lease = budget.Acquire(need, ct);
-                byte[]? raw = null;
-                try
+                if (Complete(f, null)) ok++; else failed++;
+                filesDone++;
+            }
+
+            Parallel.ForEach(byFrame.Keys.OrderBy(k => k),
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelBlocks), CancellationToken = ct },
+                frame =>
                 {
-                    raw = reader.ReadBlock(frame, new CodecContext { Token = ct });
-                }
-                catch (NewerVersionException ex)
-                {
-                    errors.Enqueue(ex.Message); // names the block and what it needs; it is not damage
-                    newerFrames[frame] = true;
-                }
-                catch (Exception ex) when (ex is CorruptDataException or InvalidDataException or IOException)
-                {
-                    errors.Enqueue($"block {frame}: {ex.Message}");
-                }
-                foreach (var (f, segIdx) in byFrame[frame])
-                {
-                    var seg = f.Entry.Segments[segIdx];
-                    lock (fileLocks.GetOrAdd(f, _ => new object()))
+                    var info = reader.Blocks[frame];
+                    // Every stage of the pipeline holds its whole output: reserve for the largest, which the descriptor
+                    // records (a filter that expands, or a crafted descriptor, can make it larger than the block). More
+                    // than the budget makes the block decode alone.
+                    long need = Math.Min(options.MemoryBudget, SalvageRun.DecodeCharge(info.Descriptor, info.DecodeMemory + info.RawSize * 2));
+                    options.OnReserve?.Invoke(frame, need);
+                    using var lease = budget.Acquire(need, ct);
+                    byte[]? raw = null;
+                    try
                     {
-                        if (raw is null) f.Failed = true;
-                        else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors);
-                        f.Remaining--;
-                        Interlocked.Add(ref done, seg.Length);
-                        if (f.Remaining == 0)
+                        raw = reader.ReadBlock(frame, new CodecContext { Token = ct });
+                    }
+                    catch (NewerVersionException ex)
+                    {
+                        errors.Enqueue(ex.Message); // names the block and what it needs; it is not damage
+                        newerFrames[frame] = true;
+                    }
+                    catch (Exception ex) when (ex is CorruptDataException or InvalidDataException or IOException)
+                    {
+                        errors.Enqueue($"block {frame}: {ex.Message}");
+                    }
+                    foreach (var (f, segIdx) in byFrame[frame])
+                    {
+                        var seg = f.Entry.Segments[segIdx];
+                        lock (fileLocks.GetOrAdd(f, _ => new object()))
                         {
-                            bool good = Complete(f, null) && !f.Failed;
-                            if (good) Interlocked.Increment(ref ok); else Interlocked.Increment(ref failed);
-                            Interlocked.Increment(ref filesDone);
+                            if (raw is null) f.Failed = true;
+                            else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors);
+                            f.Remaining--;
+                            Interlocked.Add(ref done, seg.Length);
+                            if (f.Remaining == 0)
+                            {
+                                bool good = Complete(f, null) && !f.Failed;
+                                if (good) Interlocked.Increment(ref ok); else Interlocked.Increment(ref failed);
+                                Interlocked.Increment(ref filesDone);
+                            }
                         }
                     }
-                }
-                progress?.Report(new ExtractProgress(Interlocked.Read(ref done), total, filesDone, files.Count, null));
-            });
+                    progress?.Report(new ExtractProgress(Interlocked.Read(ref done), total, filesDone, files.Count, null));
+                });
+            finished = true;
+        }
+        finally
+        {
+            if (!test)
+            {
+                // Cancelled or failed: no partial file of this run stays, and no folder it created that is still empty.
+                foreach (var f in files.Where(f => !f.Done)) Cleanup(f);
+                if (!finished) RemoveEmptyFolders(created);
+            }
+        }
 
-        if (!test) ApplyDirectoryMetadata(entries.Where(e => e.IsDirectory), destination!, options, OutPath);
+        if (!test) ApplyCreatedFolderMetadata(folders, created, names, options);
         progress?.Report(new ExtractProgress(total, total, filesDone, files.Count, null));
-        return new ExtractResult(ok, failed, skipped, errors.ToList())
+        var renamed = files.Where(f => f.Written && f.Renamed).ToList();
+        return new ExtractResult(ok, failed + failedEarly, skipped, errors.ToList())
         {
             FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
             Warnings = [.. warnings, .. test ? reader.VerifySpareCopies() : []],
             SkippedUnsafe = unsafePaths,
             Written = [.. files.Where(f => f.Written).Select(f => new WrittenFile(f.Entry, f.Target!))],
+            Renamed = renamed.Count,
+            Renames = [.. renamed.Select(f => new ExtractRename(f.Entry.Path, f.Target!))],
         };
 
         string OutPath(ArchiveEntry e) => mapped.TryGetValue(e, out var p) ? p : e.Path;
@@ -312,12 +374,8 @@ public static class Extractor
                 }
                 else
                 {
-                    if (f.PartPath is null)
-                    {
-                        f.PartPath = PartName(f.Target!);
-                        using (File.Create(f.PartPath)) { }
-                    }
                     if (f.Failed) { Cleanup(f); return false; }
+                    if (f.PartPath is null) f.PartPath = CreatePart(f.Target!); // an empty file
                     hash = HashFile(f.PartPath);
                 }
                 if (hash != f.Entry.Hash)
@@ -328,7 +386,9 @@ public static class Extractor
                 }
                 if (!test)
                 {
-                    if (options.Overwrite == OverwriteMode.Overwrite && options.BeforeReplace is { } beforeReplace && File.Exists(f.Target!))
+                    // Only a file planned to be replaced is: never another entry of this run, never a file of an
+                    // earlier pass, and never a name that appeared while the files were written.
+                    if (f.Replaces && options.BeforeReplace is { } beforeReplace && File.Exists(f.Target!))
                     {
                         try { beforeReplace(f.Target!); }
                         catch (Exception ex)
@@ -341,7 +401,8 @@ public static class Extractor
                     // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                     // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
                     if (zone is not null && writeZone(f.PartPath!, zone) is { } why) warnings.Enqueue(ZoneWarning(f.Entry.Path, why));
-                    Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: options.Overwrite == OverwriteMode.Overwrite);
+                    Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: f.Replaces);
+                    f.PartPath = null;
                     ApplyFileMetadata(f.Target!, f.Entry, options);
                     f.Written = true;
                 }
@@ -353,12 +414,68 @@ public static class Extractor
                 if (!test) Cleanup(f);
                 return false;
             }
+            finally
+            {
+                f.Done = true;
+            }
         }
 
+        // Deletes the part file of an entry that did not complete; only ever one this run created.
         void Cleanup(FileState f)
         {
             if (f.PartPath is null || options.KeepBroken) return;
             try { File.Delete(f.PartPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            f.PartPath = null;
+        }
+    }
+
+    /// <summary>Creates the part file of <paramref name="target"/> under a new random name; never opens a file (or a
+    /// link) that is already there.</summary>
+    private static string CreatePart(string target)
+    {
+        string part = PartName(target);
+        using (new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+        return part;
+    }
+
+    /// <summary>Creates <paramref name="folder"/> and the folders above it that are missing, adding each one this call
+    /// created to <paramref name="created"/>, outermost first.</summary>
+    private static void CreateFolder(string folder, List<string> created)
+    {
+        var missing = new List<string>();
+        for (string? d = folder; d is not null && !Directory.Exists(d); d = Path.GetDirectoryName(d)) missing.Add(d);
+        if (missing.Count == 0) return;
+        Directory.CreateDirectory(folder);
+        for (int i = missing.Count - 1; i >= 0; i--) created.Add(missing[i]);
+    }
+
+    /// <summary>Deletes the folders this run created that are empty, deepest first.</summary>
+    private static void RemoveEmptyFolders(List<string> created)
+    {
+        foreach (var d in created.OrderByDescending(d => d.Length))
+        {
+            try { if (Directory.Exists(d) && !Directory.EnumerateFileSystemEntries(d).Any()) Directory.Delete(d); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>
+    /// Times and attributes of folder entries, only on folders this run created (a folder that was already there keeps
+    /// its own), deepest first, after their contents. Never System or ReadOnly: on Windows either makes Explorer act on
+    /// a desktop.ini in the folder, which an archive should not be able to turn on.
+    /// </summary>
+    private static void ApplyCreatedFolderMetadata(List<(ArchiveEntry Entry, string Path)> folders, List<string> created, StringComparer names, ExtractOptions o)
+    {
+        var ours = new HashSet<string>(created, names);
+        foreach (var (e, path) in folders.Where(f => ours.Contains(f.Path)).OrderByDescending(f => f.Path.Length))
+        {
+            try
+            {
+                if (o.RestoreTimes && e.ModifiedUtc is { } m) Directory.SetLastWriteTimeUtc(path, m);
+                if (o.RestoreAttributes && e.Attributes is { } a && OperatingSystem.IsWindows())
+                    File.SetAttributes(path, (a & ~(FileAttributes.System | FileAttributes.ReadOnly)) | FileAttributes.Directory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
 
@@ -385,8 +502,10 @@ public static class Extractor
         }
         try
         {
-            f.PartPath ??= PartName(f.Target!);
-            using var h = File.OpenHandle(f.PartPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+            // The first segment creates the part file (never one that is there already); the path is kept only then,
+            // so that cleaning up never deletes a file this run did not create.
+            f.PartPath ??= CreatePart(f.Target!);
+            using var h = File.OpenHandle(f.PartPath, FileMode.Open, FileAccess.Write, FileShare.None);
             RandomAccess.Write(h, data, f.SegmentFileOffsets[segIdx]);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

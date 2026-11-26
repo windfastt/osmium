@@ -89,17 +89,32 @@ public class OsaSourceTests
         }
     }
 
-    [Fact]
-    public async Task ASecondPassOverEarlierOutputIsRefusedBeforeAnythingIsWritten()
+    [Theory]
+    [InlineData(OverwriteMode.Skip)]
+    [InlineData(OverwriteMode.Rename)]
+    [InlineData(OverwriteMode.Overwrite)]
+    public async Task ASecondPassNeverTakesTheNameOfAFileTheFirstPassWrote(OverwriteMode mode)
     {
         using var t = new TempDir();
         using var s = ArchiveSources.Open(await Build(t), ct: Ct);
         string outDir = Path.Combine(t.Path, "out");
-        Assert.Throws<NotSupportedException>(() => s.Extract(outDir,
-            new ArchiveExtractRequest { WrittenEarlier = [Path.Combine(outDir, "in", "a.txt")] }, null, Ct));
-        Assert.False(Directory.Exists(outDir));
-        // An empty set is no earlier pass.
-        Assert.Equal(2, s.Extract(outDir, new ArchiveExtractRequest { WrittenEarlier = [] }, null, Ct).FilesOk);
+        int a = s.Items.Single(i => i.Path == "in/a.txt").Index, b = s.Items.Single(i => i.Path == "in/b.txt").Index;
+        // The first pass wrote a.txt; the second extracts both files, as the job's "Extract anyway" pass would.
+        var first = s.Extract(outDir, new ArchiveExtractRequest { Indices = new HashSet<int> { a } }, null, Ct);
+        string earlier = Assert.Single(first.Written).Path;
+        var replaced = new List<string>();
+        var second = s.Extract(outDir, new ArchiveExtractRequest
+        {
+            Indices = new HashSet<int> { a, b }, Overwrite = mode, WrittenEarlier = [earlier], BeforeReplace = replaced.Add,
+        }, null, Ct);
+
+        Assert.Equal(2, second.FilesOk);
+        Assert.Equal(0, second.SkippedExisting);
+        Assert.Equal(1, second.Renamed);
+        Assert.Empty(replaced);
+        Assert.Equal(Path.Combine(outDir, "in", "a (2).txt"), second.Written.Single(w => w.Index == a).Path);
+        Assert.Equal(File.ReadAllBytes(t.Sub(Path.Combine("in", "a.txt"))), File.ReadAllBytes(earlier)); // untouched
+        Assert.Equal(File.ReadAllBytes(t.Sub(Path.Combine("in", "a.txt"))), File.ReadAllBytes(Path.Combine(outDir, "in", "a (2).txt")));
     }
 
     [Fact]
