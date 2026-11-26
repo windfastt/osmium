@@ -190,7 +190,11 @@ internal sealed class TargetNames
     /// tag cannot be read).</summary>
     private static bool IsNameSurrogate(string path)
     {
-        var handle = FindFirstFileW(path, out var data);
+        // The long-path form, so that a folder deep in a long path is checked rather than refused.
+        string longPath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path
+            : path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path[2..]
+            : @"\\?\" + path;
+        var handle = FindFirstFileW(longPath, out var data);
         if (handle == new IntPtr(-1)) return true;
         FindClose(handle);
         return (data.dwFileAttributes & (uint)FileAttributes.ReparsePoint) != 0 && (data.dwReserved0 & NameSurrogateBit) != 0;
