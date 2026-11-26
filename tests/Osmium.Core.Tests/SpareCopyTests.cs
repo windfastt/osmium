@@ -70,10 +70,12 @@ internal static class SpareArchives
     /// <summary>
     /// An unencrypted archive written byte by byte, so that its index can say anything about spare copies:
     /// <paramref name="sparesValue"/> gets B's offset and returns the value of the spares key (null: no key), and
-    /// <paramref name="tail"/> says whether B and H are written at all.
+    /// <paramref name="tail"/> says whether B and H are written at all, and <paramref name="lastBlockLonger"/> makes the
+    /// index say that the last block's frame is that many bytes longer than it is.
     /// </summary>
     public static string Craft(string path, IReadOnlyDictionary<string, byte[]> files, Func<long, byte[]?> sparesValue, bool tail = true,
-        bool newerIndex = false, string framePipeline = "store", Func<BlockDescriptor, BlockDescriptor>? indexDescriptor = null)
+        bool newerIndex = false, string framePipeline = "store", Func<BlockDescriptor, BlockDescriptor>? indexDescriptor = null,
+        long lastBlockLonger = 0)
     {
         var header = new ArchiveHeader { Creator = "test" };
         var headerBytes = header.Serialize();
@@ -87,7 +89,8 @@ internal static class SpareArchives
             var frame = Frame((ulong)index.Blocks.Count, 0, [.. new BlockBody(desc, BlockBody.Hash128(data), payload).SerializePrefix(), .. payload]);
             fs.Write(frame);
             index.Entries.Add(new ArchiveEntry { Path = name, Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(index.Blocks.Count, 0, data.Length)], Hash = XxHash128.HashToUInt128(data) });
-            index.Blocks.Add(new BlockInfo(index.Blocks.Count, offset, frame.Length, data.Length, data.Length, indexDescriptor?.Invoke(desc) ?? desc));
+            long claimed = frame.Length + (index.Blocks.Count == files.Count - 1 ? lastBlockLonger : 0);
+            index.Blocks.Add(new BlockInfo(index.Blocks.Count, offset, claimed, data.Length, data.Length, indexDescriptor?.Invoke(desc) ?? desc));
         }
         long spareOffset = fs.Position;
         if (sparesValue(spareOffset) is { } v) index.Metadata[ArchiveIndex.SparesKey] = v;
@@ -631,6 +634,89 @@ public class SpareCopyTests
         });
         var e = Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad));
         Assert.Equal("Block payload is corrupt (hash mismatch).", e.Message);
+    }
+
+    /// <summary>An archive whose one file is another archive, stored, whose index frame is exactly as long as the
+    /// outer one's: so that the stored archive's index frame sits where a spare copy of the outer one's could.</summary>
+    private static string ArchiveHoldingAnArchiveWithAnIndexFrameAsLong(TempDir t, SpareCopyPolicy outer)
+    {
+        var rnd = new Random(8);
+        byte[] Pad(int n) { var b = new byte[n]; rnd.NextBytes(b); return b; }
+        int innerPad = 0, outerPad = 0;
+        for (int round = 0; round < 50; round++)
+        {
+            string inner = SpareArchives.Write(t.Sub("inner.osa"), SpareArchives.Files(2, 1500, seed: 3),
+                new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Never }, new Dictionary<string, byte[]> { ["pad"] = Pad(innerPad) });
+            string path = SpareArchives.Write(t.Sub("outer.osa"), new Dictionary<string, byte[]> { ["docs/inner.osa"] = File.ReadAllBytes(inner) },
+                new OsaWriterOptions { SpareCopies = outer }, new Dictionary<string, byte[]> { ["pad"] = Pad(outerPad) });
+            long difference = SpareArchives.TailOf(path).IndexLength - SpareArchives.TailOf(inner).IndexLength;
+            if (difference == 0) return path;
+            if (difference > 0) innerPad += (int)difference;
+            else outerPad -= (int)difference;
+        }
+        throw new InvalidOperationException("The two index frames could not be made as long as each other.");
+    }
+
+    [Theory]
+    [InlineData("stored archive, no spare copies")]
+    [InlineData("stored archive, spare copies damaged")]
+    [InlineData("spare copy naming another offset")]
+    public void AFileListIsTakenFromASpareCopyOnlyWhenItNamesItsOwnOffset(string how)
+    {
+        using var t = new TempDir();
+        string path = how switch
+        {
+            "stored archive, no spare copies" => ArchiveHoldingAnArchiveWithAnIndexFrameAsLong(t, SpareCopyPolicy.Never),
+            "stored archive, spare copies damaged" => ArchiveHoldingAnArchiveWithAnIndexFrameAsLong(t, SpareCopyPolicy.Always),
+            _ => SpareArchives.Craft(t.Sub("crafted.osa"), SpareArchives.Files(2, 1500), at => SpareCopies.OffsetValue(at + 1)),
+        };
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Flip(b, tail.IndexOffset + tail.IndexLength - 3); // A's payload
+            if (tail.Trailer is null) return;
+            Flip(b, tail.TrailerOffset + 1);
+            if (how == "stored archive, spare copies damaged") Flip(b, tail.SpareOffset + tail.IndexLength - 3); // B's payload
+        });
+        if (how.StartsWith("stored", StringComparison.Ordinal))
+            Assert.Equal(tail.IndexLength, SpareArchives.TailOf(t.Sub("inner.osa")).IndexLength);
+
+        var e = Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad));
+        Assert.Equal("Block payload is corrupt (hash mismatch).", e.Message);
+    }
+
+    [Fact]
+    public void AHeaderCopyOfANewerWriterNeverStandsInForADamagedHeader()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Flip(b, 2);
+            (tail.Trailer!.Value with { Flags = 1 }).Write(b.AsSpan((int)tail.TrailerOffset)); // a valid CRC, a flag this version does not know
+        });
+        Assert.Equal("Not an Osmium archive (bad magic).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad)).Message);
+    }
+
+    [Fact]
+    public void SpareCopiesThatOverlapTheBlocksAreDamaged()
+    {
+        // The offsets add up, but the index says that its last block reaches into B.
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 1500);
+        string path = SpareArchives.Craft(t.Sub("crafted.osa"), files, SpareCopies.OffsetValue, lastBlockLonger: 10);
+        using (var r = OsaReader.Open(path))
+        {
+            Assert.Equal([OsaReader.SpareDamaged], r.Warnings);
+            Assert.False(r.HasSpareCopies);
+            Assert.Equal(SpareCopyStatus.Damaged, r.SpareCopyStatus);
+        }
+        // B, which would stand in for a damaged A, is held to its own end: its blocks must end before it starts.
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => Flip(b, tail.IndexOffset + tail.IndexLength - 3));
+        Assert.Equal("Block payload is corrupt (hash mismatch).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad)).Message);
     }
 
     [Fact]
