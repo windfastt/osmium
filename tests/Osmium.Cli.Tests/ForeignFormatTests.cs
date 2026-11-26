@@ -269,8 +269,8 @@ public sealed class ForeignFormatTests : IDisposable
         File.WriteAllText(P("in", "a.txt"), string.Concat(Enumerable.Repeat("text to deflate\n", 1000)));
         File.WriteAllText(P("in", "sub", "b.txt"), "small");
         var r = await CliRunner.RunAsync(["a", P("x.zip"), P("in")]);
-        if (r.ExitCode == 1 && r.Error.Contains("not available yet", StringComparison.Ordinal)) Assert.Skip("waiting for the ZIP writer");
-        Assert.Equal(0, r.ExitCode);
+        Assert.True(r.ExitCode == 0, r.Error);
+        Assert.Contains("Created ", r.Output);
         using var zip = ZipFile.OpenRead(P("x.zip"));
         var a = zip.Entries.Single(e => e.FullName.EndsWith("a.txt", StringComparison.Ordinal));
         using var reader = new StreamReader(a.Open());

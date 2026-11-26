@@ -63,13 +63,8 @@ jobs:
           osmium() { dotnet "$GITHUB_WORKSPACE/src/Osmium.Cli/bin/Release/net10.0/osmium.dll" "$@"; }
           w=$(mktemp -d)
           # A ZIP written by osmium, checked by Info-ZIP's unzip (an independent reader).
-          if out=$(osmium a "$w/smoke.zip" docs -q 2>&1); then
-            unzip -tq "$w/smoke.zip"
-          elif grep -q "Writing ZIP files is not available yet" <<< "$out"; then
-            echo "::warning::waiting for the ZIP writer: osmium a x.zip was not checked"
-          else
-            echo "$out"; exit 1
-          fi
+          osmium a "$w/smoke.zip" docs -q
+          unzip -tq "$w/smoke.zip"
           # A small generated folder: text, random bytes, an empty file, an empty folder, a non-ASCII name.
           mkdir -p "$w/src/tree/sub/empty"
           seq 1 20000 > "$w/src/tree/numbers.txt"
@@ -311,7 +306,6 @@ jobs:
           if (Compare-Object (Hashes "$w/in") (Hashes "$w/from-powershell")) { throw 'files extracted from the Compress-Archive ZIP differ' }
           # A ZIP made by osmium, read by three other readers.
           $out = & $cli a "$w/osmium.zip" "$w/in" 2>&1
-          if ($LASTEXITCODE -and "$out" -match 'Writing ZIP files is not available yet') { Write-Host '::warning::waiting for the ZIP writer: osmium a x.zip was not checked'; exit 0 }
           if ($LASTEXITCODE) { throw "osmium a x.zip failed: $out" }
           # tar.exe is libarchive's bsdtar, part of Windows: a reader independent of .NET.
           tar.exe -tf "$w/osmium.zip"; if ($LASTEXITCODE) { throw 'tar.exe could not read the ZIP' }
