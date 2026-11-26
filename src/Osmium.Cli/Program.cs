@@ -55,7 +55,7 @@ namespace Osmium.Cli
         public int Int(string n, int d) => Has(n) ? int.Parse(Get(n)!, CultureInfo.InvariantCulture) : d;
     }
 
-    internal static class Cli
+    internal static partial class Cli
     {
         public static async Task<int> RunAsync(string[] argv)
         {
@@ -69,11 +69,11 @@ namespace Osmium.Cli
                 return cmd switch
                 {
                     "a" or "add" or "compress" => await Compress(a, cts.Token),
-                    "x" or "extract" => Extract(a, cts.Token),
-                    "l" or "list" => List(a),
-                    "t" or "test" => Test(a, cts.Token),
+                    "x" or "extract" => Foreign(a) ? ExtractForeign(a, a.Positional[0], cts.Token) : Extract(a, cts.Token),
+                    "l" or "list" => Foreign(a) ? ListForeign(a, a.Positional[0], cts.Token) : List(a),
+                    "t" or "test" => Foreign(a) ? TestForeign(a, a.Positional[0], cts.Token) : Test(a, cts.Token),
                     "salvage" => SalvageCmd(a, cts.Token),
-                    "i" or "info" => Info(a),
+                    "i" or "info" => Foreign(a) ? InfoForeign(a, a.Positional[0], cts.Token) : Info(a),
                     "explain" => Explain(a),
                     "analyze" => Analyze(a),
                     "lab" or "bench" => await Lab(a, cts.Token),
@@ -91,6 +91,8 @@ namespace Osmium.Cli
             catch (OperationCanceledException) { Console.Error.WriteLine("Cancelled."); return 130; }
             catch (PasswordRequiredException e) { return Fail(e.Message + " Use --password or --password-stdin."); }
             catch (WrongPasswordException e) { return Fail(e.Message); }
+            catch (Osmium.Core.Archives.ExpansionLimitException e) { return Fail(e.Message + " Use --force to extract it anyway."); }
+            catch (NotSupportedException e) { return Fail(e); }
             catch (AggregateException e) when (e.Flatten().InnerExceptions.All(i => i is IOException or InvalidDataException or ArgumentException or FormatException or InvalidOperationException or UnauthorizedAccessException))
             {
                 return Fail(e.Flatten().InnerExceptions[0]);
@@ -102,6 +104,9 @@ namespace Osmium.Cli
         }
 
         private static int Fail(string msg) { Console.Error.WriteLine("error: " + msg); return 1; }
+
+        /// <summary>The archive named first is in a format other than .osa (the .osa code path is unchanged).</summary>
+        private static bool Foreign(Args a) => a.Positional.Count > 0 && ForeignKind(a.Positional[0]) is not null;
 
         private static int Fail(Exception e) =>
             Fail(Environment.GetEnvironmentVariable("OSMIUM_DEBUG") == "1" ? e.ToString() : e.Message);
@@ -120,8 +125,9 @@ namespace Osmium.Cli
                   --password-stdin | --password <pw>   --encrypt (ask for the password)   --kdf-iterations N
                   --workers host:port,…  --cluster-key OSM1-…   (distribute work)
                   --no-verify   --overwrite   --explain   --no-plan-log
-              x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob)
-              l <archive> [-v]       List contents        t <archive>    Test (full decode + hashes)
+              a <archive.zip> <files/dirs…>   Write a ZIP file (not encrypted)   --exclude "…"   --no-verify   --overwrite
+              x <archive> [dest]     Extract   (--overwrite | --skip | --rename, --include glob, --force)
+              l <archive> [-v]       List contents        t <archive>    Test (full decode + checksums)
               info <archive>         Archive details      explain <archive>  Show planner decisions
               salvage <archive> <dest>   Recover every file that verifies from a damaged archive; list what was lost
                   --password-stdin | --password <pw>   --overwrite | --skip | --rename   --force
@@ -134,6 +140,11 @@ namespace Osmium.Cli
               keygen                 Create a cluster pairing key
               license                Show the license and third-party notices
               version                Show the version
+
+            x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
+            .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files, recognised by their content. Passwords:
+            --password-stdin | --password <pw>. --force extracts an archive that expands to more than 1,000 times
+            its size; names that would leave the destination, links and devices are never extracted.
 
             Osmium is free software under the MIT License and comes with no warranty.
             Keep backups, and test archives (osmium t) before deleting originals.
@@ -234,6 +245,11 @@ namespace Osmium.Cli
         {
             if (a.Positional.Count < 2) return Fail("usage: osmium a <archive.osa> <inputs…>");
             string output = a.Positional[0];
+            switch (ArchiveTypeOf(output, out var refusal))
+            {
+                case "zip": return await CompressZip(a, output, ct);
+                case "refused": return Fail(refusal!);
+            }
             if (!output.EndsWith(Osa.Extension, StringComparison.OrdinalIgnoreCase)) output += Osa.Extension;
             // The password first: a refused one must stop the run before anything is planned or written.
             string? password = Password(a);
@@ -295,7 +311,12 @@ namespace Osmium.Cli
 
         // ------------------------------------------------------------ extract / test / list
 
-        private static OsaReader Open(Args a, string path) => OsaReader.Open(path, () => Password(a) ?? PromptPassword());
+        private static OsaReader Open(Args a, string path)
+        {
+            var r = OsaReader.Open(path, () => Password(a) ?? PromptPassword());
+            foreach (var w in r.Warnings) Console.Error.WriteLine("warning: " + w);
+            return r;
+        }
 
         private static string? PromptPassword() => PromptPassword("Password: ");
 
@@ -378,6 +399,7 @@ namespace Osmium.Cli
             var res = Extractor.Test(r, new Progress<ExtractProgress>(p => progress.Update($"Testing {Fmt.Pct(p.BytesDone, p.BytesTotal)}")), ct);
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
+            foreach (var w in res.Warnings) Console.Error.WriteLine("warning: " + w);
             Console.WriteLine(res.FilesFailed == 0 && res.Errors.Count == 0
                 ? $"OK — {res.FilesOk} file(s), {r.Blocks.Count} block(s) verified."
                 : $"FAILED — {FailureSummary(res)}.");

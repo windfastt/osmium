@@ -31,7 +31,9 @@ public static class CliRunner
             Console.SetError(e);
             Console.SetIn(i);
             int code = await Cli.RunAsync(args);
-            return new CliResult(code, o.ToString(), e.ToString());
+            var result = new CliResult(code, o.ToString(), e.ToString());
+            UserTextNames.AssertNone(result.Output + result.Error, "osmium " + string.Join(' ', args));
+            return result;
         }
         finally
         {
@@ -39,5 +41,24 @@ public static class CliRunner
             Console.SetError(error);
             Console.SetIn(stdin);
         }
+    }
+}
+
+/// <summary>Text a user sees never uses trademarks for formats or methods: no "Deflate64" or "ZIP64", and no product
+/// names. Every CLI run of these tests is checked.</summary>
+public static class UserTextNames
+{
+    public static readonly string[] Forbidden =
+        ["Deflate64", "Deflate 64", "ZIP64", "Zip64", "WinZip", "WinRAR", "7-Zip", "PKZIP", "PKWARE", "Bandizip", "PeaZip", "NanaZip"];
+
+    /// <summary>Accepted exceptions, each with its reason (none in the command-line tool's own text).</summary>
+    public static readonly (string Text, string Reason)[] Allowed = [];
+
+    public static void AssertNone(string text, string where)
+    {
+        foreach (var (allowed, _) in Allowed) text = text.Replace(allowed, "", StringComparison.Ordinal);
+        foreach (var word in Forbidden)
+            if (text.Contains(word, StringComparison.OrdinalIgnoreCase))
+                throw new Xunit.Sdk.XunitException($"'{word}' appears in the output of {where}.");
     }
 }

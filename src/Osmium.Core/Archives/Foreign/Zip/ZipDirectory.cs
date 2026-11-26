@@ -69,17 +69,17 @@ internal static class ZipDirectory
         long cdEnd = eocdPos;
         if (total == 0xFFFF || onDisk == 0xFFFF || cdSize == 0xFFFFFFFF || cdOffset == 0xFFFFFFFF || disk == 0xFFFF)
         {
-            if (eocdPos < 20) throw Corrupt("damaged ZIP64 end record");
+            if (eocdPos < 20) throw Corrupt("damaged end record of a large archive");
             var loc = new byte[20];
             file.ReadAt(eocdPos - 20, loc);
             if (Le.U32(loc, 0) == Locator64Sig)
             {
                 if (Le.U32(loc, 16) > 1) throw new NotSupportedException("Multi-volume ZIP archives are not supported.");
                 long pos = (long)Le.U64(loc, 8);
-                if (pos < 0 || pos + 56 > eocdPos) throw Corrupt("damaged ZIP64 end record");
+                if (pos < 0 || pos + 56 > eocdPos) throw Corrupt("damaged end record of a large archive");
                 var r = new byte[56];
                 file.ReadAt(pos, r);
-                if (Le.U32(r, 0) != Eocd64Sig) throw Corrupt("damaged ZIP64 end record");
+                if (Le.U32(r, 0) != Eocd64Sig) throw Corrupt("damaged end record of a large archive");
                 zip64 = true;
                 disk = Le.U32(r, 16);
                 cdDisk = Le.U32(r, 20);
@@ -129,7 +129,7 @@ internal static class ZipDirectory
             var extra = new byte[extraLength];
             cd.ReadExactly(extra);
             cd.Position += commentLength;
-            if ((rec.Flags & 0x2000) != 0) throw new NotSupportedException("This archive uses PKWARE strong encryption, which Osmium cannot read.");
+            if ((rec.Flags & 0x2000) != 0) throw new NotSupportedException("This archive encrypts its list of files with a strong-encryption method Osmium cannot read.");
             string? unicodeName = null;
             DateTime? ntfsTime = null, unixTime = null;
             foreach (var (id, data) in Extras(extra))

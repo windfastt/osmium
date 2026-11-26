@@ -94,7 +94,7 @@ internal sealed class ZipSource : ForeignSource
         string? unsupported = null;
         if (type == EntryType.File)
         {
-            if ((r.Flags & 0x40) != 0) unsupported = "it uses PKWARE strong encryption, which Osmium cannot read";
+            if ((r.Flags & 0x40) != 0) unsupported = "it uses a strong-encryption method Osmium cannot read";
             else if (r.IsAes && (r.AesStrength is < 1 or > 3 || r.AesVersion is not (1 or 2))) unsupported = "it uses an AES encryption variant Osmium cannot read";
             else if (!Readable(r.RealMethod)) unsupported = $"it uses compression method {r.RealMethod} ({MethodName(r.RealMethod)}), which Osmium cannot read";
             else if (r.Encrypted && r.RealMethod == 95) unsupported = "it is xz data inside encryption, which Osmium cannot read";

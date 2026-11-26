@@ -400,7 +400,7 @@ public class ZipTests
         Assert.Equal(2, r.SkippedLinks);
         Assert.Equal(3, r.SkippedUnsupported);
         Assert.Contains(r.Errors, e => e.Contains("compression method 6 (Implode), which Osmium cannot read", StringComparison.Ordinal));
-        Assert.Contains(r.Errors, e => e.Contains("PKWARE strong encryption, which Osmium cannot read", StringComparison.Ordinal));
+        Assert.Contains(r.Errors, e => e.Contains("a strong-encryption method Osmium cannot read", StringComparison.Ordinal));
         Assert.Equal(["ok.txt"], FilesUnder(t.Sub("out")));
     }
 
@@ -410,7 +410,7 @@ public class ZipTests
         using var t = new TempDir();
         var z = new ZipCraft();
         z.Add("a.txt", "a"u8.ToArray(), flags: 0x2000);
-        Assert.Contains("PKWARE strong encryption", Assert.Throws<NotSupportedException>(() => Open(ForeignData.Write(t, "cd.zip", z.Build()))).Message);
+        Assert.Contains("strong-encryption method", Assert.Throws<NotSupportedException>(() => Open(ForeignData.Write(t, "cd.zip", z.Build()))).Message);
         var d = new ZipCraft { Disk = 1 };
         d.Add("a.txt", "a"u8.ToArray());
         Assert.Equal("Multi-volume ZIP archives are not supported.", Assert.Throws<NotSupportedException>(() => Open(ForeignData.Write(t, "disk.zip", d.Build()))).Message);
