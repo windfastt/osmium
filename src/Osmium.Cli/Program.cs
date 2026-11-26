@@ -56,13 +56,22 @@ namespace Osmium.Cli
         /// <summary>The names of the options given, as typed (without their dashes).</summary>
         public IEnumerable<string> Names => _opts.Keys;
 
-        /// <summary>How an option is shown in a message: "-q", "--profile"; a stray one only by its first two
-        /// characters, since "-psecret" may hold a password.</summary>
+        /// <summary>How a known option is shown in a message: "-q", "--profile".</summary>
         public static string Shown(string name) => name.Length == 1 ? "-" + name : "--" + name;
 
-        /// <summary>The first option that <paramref name="known"/> does not hold, as it is shown, or null.</summary>
-        public string? Unknown(IReadOnlySet<string> known) =>
-            _stray.Count > 0 ? _stray[0][..2] + "…" : Names.FirstOrDefault(n => !known.Contains(n)) is { } n ? Shown(n) : null;
+        /// <summary>The first option that <paramref name="known"/> does not hold, as it is shown: only its dashes and its
+        /// first two characters ("--pa…", "-p…"), since what was typed may hold a password ("-psecret",
+        /// "--password:secret"); null when every option is known.</summary>
+        public string? Unknown(IReadOnlySet<string> known)
+        {
+            if (_stray.Count > 0) return _stray[0][..2] + "…";
+            if (Names.FirstOrDefault(n => !known.Contains(n)) is not { } name) return null;
+            string dashes = name.Length == 1 ? "-" : "--";
+            return name.Length <= 2 ? dashes + name : dashes + name[..2] + "…";
+        }
+
+        /// <summary>The first option, by name, that <paramref name="known"/> does not hold, or null.</summary>
+        public string? FirstOutside(IReadOnlySet<string> known) => Names.FirstOrDefault(n => !known.Contains(n));
 
         private static bool IsOption(string a) => a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1]));
 

@@ -174,7 +174,7 @@ internal static partial class Cli
         if (a.Has("profile")) return Fail("--profile does not apply to ZIP files, which Osmium writes with Deflate; use an .osa archive for profiles.");
         if (a.Has("pipeline")) return Fail("--pipeline does not apply to ZIP files; use an .osa archive to choose a pipeline.");
         if (a.Has("spare-copies")) return Fail("--spare-copies applies to .osa archives; a ZIP file has no spare copy of its file list.");
-        if (a.Unknown(ZipOptions) is { } other) return Fail($"{other} does not apply to ZIP files; it is for .osa archives.");
+        if (a.FirstOutside(ZipOptions) is { } other) return Fail($"{Args.Shown(other)} does not apply to ZIP files; it is for .osa archives.");
         bool quiet = a.Has("quiet") || a.Has("q");
         var progress = new ProgressLine(quiet);
         var sw = Stopwatch.StartNew();

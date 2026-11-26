@@ -23,8 +23,10 @@ public sealed class OptionTests : IDisposable
     [Theory]
     [InlineData(new[] { "-p", "secret" }, "'-p'")]
     [InlineData(new[] { "-psecret" }, "'-p…'")]
-    [InlineData(new[] { "--pasword", "secret" }, "'--pasword'")]
+    [InlineData(new[] { "--pasword", "secret" }, "'--pa…'")]
     [InlineData(new[] { "--pw=secret" }, "'--pw'")]
+    [InlineData(new[] { "--password:secret" }, "'--pa…'")]
+    [InlineData(new[] { "--psecret" }, "'--ps…'")]
     public async Task AnUnknownOptionIsAnErrorAndWritesNothing(string[] options, string shown)
     {
         var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "store", .. options]);
@@ -35,18 +37,18 @@ public sealed class OptionTests : IDisposable
     }
 
     [Theory]
-    [InlineData("x", "--overwrit")]
-    [InlineData("t", "--overwrite")]
-    [InlineData("l", "--quiet")]
-    [InlineData("info", "-v")]
-    [InlineData("salvage", "--include")]
-    public async Task EveryCommandRefusesOptionsItDoesNotRead(string command, string option)
+    [InlineData("x", "--overwrit", "--ov…")]
+    [InlineData("t", "--overwrite", "--ov…")]
+    [InlineData("l", "--quiet", "--qu…")]
+    [InlineData("info", "-v", "-v")]
+    [InlineData("salvage", "--include", "--in…")]
+    public async Task EveryCommandRefusesOptionsItDoesNotRead(string command, string option, string shown)
     {
         var made = await CliRunner.RunAsync(["a", P("ok.osa"), P("in"), "--profile", "store", "-q"]);
         Assert.Equal(0, made.ExitCode);
         var r = await CliRunner.RunAsync([command, P("ok.osa"), P("dest"), option, "x"]);
         Assert.Equal(1, r.ExitCode);
-        Assert.Contains($"Unknown option '{option}' for osmium {command}", r.Error);
+        Assert.Contains($"Unknown option '{shown}' for osmium {command}", r.Error);
         Assert.False(Directory.Exists(P("dest")));
     }
 
