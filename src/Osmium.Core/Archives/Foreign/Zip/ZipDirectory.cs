@@ -191,6 +191,8 @@ internal static class ZipDirectory
         var h = new byte[30];
         foreach (var r in records)
         {
+            // The AES method without the encryption flag would be read as plain bytes that no CRC or code covers.
+            if (r.IsAes && !r.Encrypted) { r.Damaged = "it names AES encryption but is not marked as encrypted"; continue; }
             if (r.LocalOffset + 30 > cdStart) { r.Damaged = "its local header lies outside the entries"; continue; }
             local.ReadAt(r.LocalOffset, h);
             if (Le.U32(h, 0) != LocalSig) { r.Damaged = "its local header is missing"; continue; }

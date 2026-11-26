@@ -162,9 +162,11 @@ internal sealed class ZipSource : ForeignSource
             }
         }
         s = Decoder(r, s, e.Path, r.Encrypted ? null : raw);
-        s = new VerifyingStream(new CountingStream(s, op.Guard), r.UncompressedSize, r.IsAes && r.AesVersion == 2 ? null : r.Crc, "the file");
+        uint? crc = r.IsAes && r.AesVersion == 2 ? null : r.Crc; // AE-2 stores no CRC: its authentication code stands for it
+        s = new VerifyingStream(new CountingStream(s, op.Guard), r.UncompressedSize, crc, "the file");
         if (aes is not null) s = WinZipAesStream.CheckAtEnd(s, aes.Finish);
-        return new EntryContent(s, Verified: true);
+        // Verified only when a check runs over the data: its CRC, or the authentication code of AES.
+        return new EntryContent(s, Verified: crc is not null || aes is not null);
     }
 
     /// <summary>The decoder for the entry's method, after the memory pre-checks (decoders allocate what they declare).</summary>

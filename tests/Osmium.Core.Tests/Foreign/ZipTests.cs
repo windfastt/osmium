@@ -224,6 +224,24 @@ public class ZipTests
     }
 
     [Fact]
+    public void TheAesMethodWithoutTheEncryptionFlagIsDamaged()
+    {
+        // Read as it stands it would be plain bytes that no CRC (AE-2 stores none) and no authentication code covers.
+        using var t = new TempDir();
+        var data = "bytes nothing checks"u8.ToArray();
+        var z = new ZipCraft();
+        z.Items.Add(new ZipCraft.Item { Name = "x.txt"u8.ToArray(), Method = 99, Flags = 0x0800, Extra = ZipCraft.AesExtra(0), Stored = data, Crc = 0x12345678, Size = data.Length });
+        z.Add("fine.txt", "fine"u8.ToArray());
+        using var s = Open(ForeignData.Write(t, "flagless.zip", z.Build()));
+        var r = Extract(s, t.Sub("out"));
+        Assert.Equal((1, 1, 0), (r.FilesOk, r.FilesFailed, r.Unverified));
+        Assert.Contains(r.Errors, e => e == "x.txt: damaged data (it names AES encryption but is not marked as encrypted)");
+        Assert.Equal(["fine.txt"], FilesUnder(t.Sub("out")));
+        var test = s.Test(null, null, Ct);
+        Assert.Equal((1, 1), (test.FilesOk, test.FilesFailed));
+    }
+
+    [Fact]
     public void AnAesPasswordThatPassesTheVerifierIsStillCheckedAgainstTheAuthenticationCode()
     {
         using var t = new TempDir();
