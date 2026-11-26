@@ -87,7 +87,44 @@ public class SalvageWithSpareTests
         Assert.True(newer.FilesRecovered >= older.FilesRecovered, $"1.1 recovered {newer.FilesRecovered}, 1.0 {older.FilesRecovered}");
         Assert.True(newer.BlocksVerified >= older.BlocksVerified);
         Assert.True(newer.ExitCode <= older.ExitCode);
-        if (how != "zeroed") AssertRecovered(files, t.Sub("v11-out"), newer);
+        // With the header zeroed, a 1.0 archive keeps no other copy of its salt and archive id; a 1.1 archive does.
+        AssertRecovered(files, t.Sub("v11-out"), newer);
+        if (how == "zeroed") Assert.Equal((0, 0), (older.FilesRecovered, newer.ExitCode));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnEncryptedArchiveWithItsHeaderDestroyedIsSalvagedWithTheKeyOfItsHeaderCopy(bool footerDamaged)
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(4, 3000);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, WithSpares(SpareArchives.Password));
+        var tail = SpareArchives.TailOf(path, SpareArchives.Password);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Array.Clear(b, 0, (int)tail.HeaderLength);
+            if (footerDamaged) b[^5] ^= 0x01; // the footer's CRC
+        });
+        int asked = 0;
+
+        var res = Salvage.Run(bad, t.Sub("out"), () => { asked++; return SpareArchives.Password; }, null, Ct);
+        Assert.Equal(1, asked);
+        Assert.True(res.Encrypted);
+        Assert.False(res.HeaderIntact);
+        Assert.Null(res.KeyProblem);
+        Assert.Contains(res.Notes, n => n.Contains("its spare copy beside the file list is intact and was used", StringComparison.Ordinal));
+        AssertRecovered(files, t.Sub("out"), res);
+
+        // Vouched for by the footer, the copy says that a password is wrong; without the footer, it may be another archive's.
+        if (!footerDamaged)
+        {
+            Assert.Throws<WrongPasswordException>(() => Salvage.Run(bad, t.Sub("wrong"), () => "not the password", null, Ct));
+            return;
+        }
+        var wrong = Salvage.Run(bad, t.Sub("wrong"), () => "not the password", null, Ct);
+        Assert.Contains("the spare copy of it that was found does not accept the password", wrong.KeyProblem);
+        Assert.Equal(0, wrong.FilesRecovered);
     }
 
     [Fact]

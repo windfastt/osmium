@@ -273,10 +273,14 @@ index's offsets:
    archive is written as `block-<frame number>-at-<offset>.bin` and never stands for this archive's block. An
    unencrypted frame does not name its archive, so where the frames stop following one another the report says so.
 6. Encryption: the salt, iterations and archive id are kept in the header and, in archives with spare copies, in the
-   header copy H (§4.1), which opening uses when the header fails; salvage reads them from offset 0 (the footer keeps the
-   first 8 bytes of the id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so when the header is
-   damaged elsewhere its key fields, read from their fixed places, still yield the blocks once they authenticate a
-   frame. The index frame also binds the exact header bytes: salvage rebuilds the header from those fields as a writer
+   header copy H (§4.1), which opening uses when the header fails. Salvage reads them from the header at offset 0. When
+   that is damaged, it looks for an intact H beside each index frame (frame headers are not encrypted, so index frames
+   are found without the key) whose archive id matches the footer at the end of the file when there is one, and uses
+   it once its password verifier accepts the password and frames authenticate under it; when that footer vouches for H
+   and the verifier refuses the password, the password is wrong. Otherwise it reads them from the damaged header (the
+   footer keeps the first 8 bytes of the id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so
+   when the header is damaged elsewhere its key fields, read from their fixed places, still yield the blocks once they
+   authenticate a frame. The index frame also binds the exact header bytes: salvage rebuilds the header from those fields as a writer
    makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x), and a rebuild that
    authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit

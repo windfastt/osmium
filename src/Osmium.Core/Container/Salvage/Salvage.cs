@@ -71,7 +71,7 @@ internal sealed class SalvageRun : IDisposable
         _scanner.ArchiveEncrypted = encrypted;
         if (encrypted)
         {
-            _scanner.Key = ResolveKey(probe, anyFrame ? first.Offset : _src.Length, password, out string? keyProblem);
+            _scanner.Key = ResolveKey(probe, anyFrame ? first.Offset : _src.Length, Once(password), out string? keyProblem);
             _scanner.KeyProblem = keyProblem;
         }
         else if (probe.Header is null) _notes.Add("The archive header is damaged; an unencrypted archive does not need it.");
@@ -214,6 +214,9 @@ internal sealed class SalvageRun : IDisposable
             if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
             return new KeyMaterial(key, h.ArchiveId, h.Raw);
         }
+        // Container 1.1 keeps an intact copy of the header beside the copies of the index (FORMAT §4.1).
+        string? copyProblem = null;
+        if (probe.Header is null && KeyFromHeaderCopy(probe, password, out copyProblem) is { } fromCopy) return fromCopy;
         // The format keeps the salt and archive id only in the header. A damaged header may still hold them intact:
         // they are used only if they authenticate frames (GCM), or the password verifier confirms them. They are read
         // from the header with its CRC recomputed when that parses, else from their fixed places.
@@ -247,11 +250,73 @@ internal sealed class SalvageRun : IDisposable
                 : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
             return null;
         }
-        problem = "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
-            + "and the format keeps no other copy of them: encrypted salvage needs an intact header";
+        problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
+            + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
+            + "encrypted salvage needs an intact header";
         return null;
 
         static string Ask(Func<string?>? pw) => pw?.Invoke() ?? throw new PasswordRequiredException();
+    }
+
+    /// <summary>
+    /// The key from a header copy H, when the header itself is damaged. H sits just before the index frame and just
+    /// after its spare copy, and frame headers are not encrypted, so index frames are found by their frame headers
+    /// (bodies skipped, so that an archive stored in a block has no say while its frame header is intact). A copy is
+    /// used only when its archive id agrees with the footer at the end of the file, when there is one; when that footer
+    /// vouches for it, a password it does not accept is wrong. It is used once frames authenticate under it.
+    /// </summary>
+    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, out string? problem)
+    {
+        problem = null;
+        var copies = new List<ArchiveHeader>();
+        for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
+        {
+            long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
+            bool fits = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length;
+            if (fits && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0)
+                foreach (var (start, trailer) in HeaderCopiesBeside(fh.Offset, end - fh.Offset))
+                {
+                    ArchiveHeader h;
+                    try { h = ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)trailer.HeaderLength), writable: false)); }
+                    catch (Exception e) when (e is IOException or InvalidDataException) { continue; } // a newer version's, too
+                    if (h.Encryption is null || copies.Any(c => c.Raw.AsSpan().SequenceEqual(h.Raw))) continue;
+                    if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(h.ArchiveId) != ft.IdPrefix) continue;
+                    copies.Add(h);
+                }
+            pos = fits ? end : fh.Offset + 1;
+        }
+        if (copies.Count == 0) return null;
+        string pw = password?.Invoke() ?? throw new PasswordRequiredException();
+        bool refused = false;
+        foreach (var h in copies.AsEnumerable().Reverse()) // the last one first: the copy beside the index at the end
+        {
+            var key = ArchiveKey.Derive(pw, h.Encryption!.Salt, h.Encryption.Iterations);
+            if (!key.Matches(h.Encryption.Verifier))
+            {
+                refused |= probe.EndFooter is not null;
+                continue;
+            }
+            if (_scanner.Authenticates(key, h.ArchiveId) == false) continue;
+            _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
+            return new KeyMaterial(key, h.ArchiveId, h.Raw);
+        }
+        if (refused) throw new WrongPasswordException();
+        problem = "the archive header is damaged, and the spare copy of it that was found does not accept the password, "
+            + "or does not authenticate the frames (a wrong password, or the copy of another archive)";
+        return null;
+    }
+
+    /// <summary>Asks for the password at most once, however many places need it.</summary>
+    private static Func<string?>? Once(Func<string?>? password)
+    {
+        if (password is null) return null;
+        bool asked = false;
+        string? answer = null;
+        return () =>
+        {
+            if (!asked) (answer, asked) = (password(), true);
+            return answer;
+        };
     }
 
     // ------------------------------------------------------------------ index
@@ -926,25 +991,28 @@ internal sealed class SalvageRun : IDisposable
     /// magic and CRC check out, with header bytes that check out as a header. A header copy sits between the spare
     /// copy of the index frame and the index frame, so it is looked for on both sides of every intact index frame.
     /// </summary>
-    private List<(long Start, long End)> HeaderCopies(List<SalvageFrame> frames)
+    private List<(long Start, long End)> HeaderCopies(List<SalvageFrame> frames) =>
+        [.. frames.Where(f => f.IsIndex && f.Intact).SelectMany(f => HeaderCopiesBeside(f.Offset, f.FrameLength))
+            .Select(c => (c.Start, c.Start + c.Trailer.CopyLength))];
+
+    /// <summary>The intact header copies on either side of the index frame at <paramref name="offset"/>: where each
+    /// starts, and its trailer.</summary>
+    private List<(long Start, SpareTrailer Trailer)> HeaderCopiesBeside(long offset, long frameLength)
     {
-        var found = new List<(long Start, long End)>();
-        foreach (var f in frames.Where(f => f.IsIndex && f.Intact))
-        {
-            // Before it: the trailer ends where the index frame starts.
-            if (f.Offset >= SpareCopies.TrailerSize && SpareTrailer.Read(_src.Read(f.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
-                && IsHeaderCopy(f.Offset - t.CopyLength, t))
-                found.Add((f.Offset - t.CopyLength, f.Offset));
-            // After it: a header, then the padding a writer puts after one of that length, then the trailer.
-            long start = f.Offset + f.FrameLength;
-            if (start + 40 > _src.Length) continue;
-            long headerLength = 40 + BinaryPrimitives.ReadUInt32LittleEndian(_src.Read(start + 32, 4));
-            long length = Math.Max(SpareCopies.MinHeaderCopyLength, headerLength + SpareCopies.TrailerSize);
-            if (headerLength > SpareCopies.MaxHeaderLength || start + length > _src.Length) continue;
-            if (SpareTrailer.Read(_src.Read(start + length - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } after
-                && after.HeaderLength == headerLength && after.CopyLength == length && IsHeaderCopy(start, after))
-                found.Add((start, start + length));
-        }
+        var found = new List<(long Start, SpareTrailer Trailer)>();
+        // Before it: the trailer ends where the index frame starts.
+        if (offset >= SpareCopies.TrailerSize && SpareTrailer.Read(_src.Read(offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+            && IsHeaderCopy(offset - t.CopyLength, t))
+            found.Add((offset - t.CopyLength, t));
+        // After it: a header, then the padding a writer puts after one of that length, then the trailer.
+        long start = offset + frameLength;
+        if (start + 40 > _src.Length) return found;
+        long headerLength = 40 + BinaryPrimitives.ReadUInt32LittleEndian(_src.Read(start + 32, 4));
+        long length = Math.Max(SpareCopies.MinHeaderCopyLength, headerLength + SpareCopies.TrailerSize);
+        if (headerLength > SpareCopies.MaxHeaderLength || start + length > _src.Length) return found;
+        if (SpareTrailer.Read(_src.Read(start + length - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } after
+            && after.HeaderLength == headerLength && after.CopyLength == length && IsHeaderCopy(start, after))
+            found.Add((start, after));
         return found;
     }
 
