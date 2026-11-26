@@ -403,6 +403,45 @@ public class SevenZipTests
         }
     }
 
+    /// <summary>Folders of AES over Copy, one file each with its CRC, of the given sizes, all under "right".</summary>
+    private static string CopyFolders(TempDir t, params int[] sizes)
+    {
+        var props = SevenZipCraft.AesProps(10, [], SomeIv);
+        var folders = sizes.Select((size, i) => SevenZipCraft.Encrypted("right", props, ForeignData.Text(size, i + 1))).ToList();
+        return ForeignData.Write(t, "many.7z", SevenZipCraft.Build(folders));
+    }
+
+    [Fact]
+    public void AWrongPasswordIsFoundWithoutDecryptingEveryFolder()
+    {
+        // Twenty folders, the largest first: the search reads the three cheapest, then calls the password wrong.
+        using var t = new TempDir();
+        int[] sizes = [.. Enumerable.Range(0, 20).Select(i => (20 - i) << 14)];
+        string path = CopyFolders(t, sizes);
+        using (var s = (SevenZipSource)Open(path, new ArchiveOpenOptions { Password = () => "wrong" }))
+        {
+            Assert.Throws<WrongPasswordException>(() => s.Test(null, null, Ct));
+            Assert.Equal((long)sizes.Order().Take(SevenZipSource.MaxProofFolders).Sum(), s.ProofBytesRead);
+        }
+        // Within a smaller budget the search stops after the first failure: the next would pass it.
+        SevenZipSource.MaxProofBytesOverride = 2 << 14;
+        try
+        {
+            using var s = (SevenZipSource)Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+            Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct));
+            Assert.False(Directory.Exists(t.Sub("out")));
+            Assert.Equal(1L << 14, s.ProofBytesRead);
+        }
+        finally { SevenZipSource.MaxProofBytesOverride = null; }
+        // The right password: the cheapest folder proves it, and everything extracts.
+        using (var s = (SevenZipSource)Open(path, new ArchiveOpenOptions { Password = () => "right" }))
+        {
+            var r = s.Extract(t.Sub("right"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal((20, 0), (r.FilesOk, r.FilesFailed));
+            Assert.Equal(1L << 14, s.ProofBytesRead);
+        }
+    }
+
     [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {

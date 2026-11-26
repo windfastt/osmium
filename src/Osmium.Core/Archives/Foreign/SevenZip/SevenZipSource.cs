@@ -19,6 +19,20 @@ internal sealed class SevenZipSource : ForeignSource
     /// archive of many folders, each with its own salt, could keep the processor busy for days.</summary>
     public const long MaxKeyRounds = 1L << 27;
 
+    /// <summary>After a first try fails, the password search stops at this many failed folders, or once this much
+    /// data was decoded in all, and the password is taken as wrong: a wrong one must not cost a full decrypt of a large
+    /// archive of many folders. A damaged first folder still tells itself apart when a cheap next one proves the key.</summary>
+    public const int MaxProofFolders = 3;
+    public const long MaxProofBytes = 64L << 20;
+
+    private static readonly AsyncLocal<long?> ProofBytesSeam = new();
+
+    /// <summary>For tests: the data the password search may decode instead of <see cref="MaxProofBytes"/>.</summary>
+    internal static long? MaxProofBytesOverride { get => ProofBytesSeam.Value; set => ProofBytesSeam.Value = value; }
+
+    /// <summary>The bytes the password checks of this source have decoded so far.</summary>
+    internal long ProofBytesRead { get; private set; }
+
     internal const string Unprovable = "encrypted without a stored checksum, so Osmium cannot check the password";
 
     internal const string KeyBudgetRefusal = "this archive asks for more password key derivation than Osmium allows for one archive";
@@ -211,20 +225,34 @@ internal sealed class SevenZipSource : ForeignSource
     /// decrypted reached that output (a coder whose output nothing reads, or that feeds only BCJ2's range coder, proves
     /// nothing). When nothing proves the password, no file without a stored CRC is written under it. A data error or a
     /// mismatch is a wrong password or damage, which
-    /// 7z cannot tell apart: the next such folder is tried, and when one proves the password the failed one is
-    /// reported as damaged when it is read; when every one fails, the password is wrong. When no selected encrypted
+    /// 7z cannot tell apart: the next such folder is tried (the cheapest proofs first, within
+    /// <see cref="MaxProofFolders"/> failures and <see cref="MaxProofBytes"/>), and when one proves the password the
+    /// failed one is reported as damaged when it is read; otherwise the password is wrong. When no selected encrypted
     /// folder has any CRC, nothing can prove the password; those entries are then refused.
     /// </summary>
     protected override bool VerifyPassword(IReadOnlyList<ForeignEntry> encrypted, string password, Operation op)
     {
         var byFolder = FilesByFolder();
-        bool failed = false;
+        // The cheapest proofs first: the fewest bytes to decode up to the end of the file whose CRC decides.
+        var candidates = new List<(int Folder, int StopAfter, long Cost)>();
         foreach (int folder in encrypted.Select(e => _db.Files[e.Index].Folder).Distinct())
         {
             if (ProofFile(folder, byFolder) is not { } stopAfter) continue;
+            var f0 = _db.Folders[folder];
+            long cost = stopAfter < 0 ? f0.UnpackSize : byFolder[folder].TakeWhile(i => i != stopAfter).Sum(i => _db.Files[i].Size) + _db.Files[stopAfter].Size;
+            candidates.Add((folder, stopAfter, cost));
+        }
+        candidates.Sort((a, b) => a.Cost != b.Cost ? a.Cost.CompareTo(b.Cost) : a.Folder.CompareTo(b.Folder));
+        int tries = 0, failures = 0;
+        long read = 0, budget = MaxProofBytesOverride ?? MaxProofBytes;
+        foreach (var (folder, stopAfter, total) in candidates)
+        {
+            // The first try always runs; after it, at most MaxProofFolders failures and MaxProofBytes read in all.
+            if (tries > 0 && (failures >= MaxProofFolders || read + total > budget)) break;
             var f = _db.Folders[folder];
             if (!KeysWithinBudget(f)) continue;
-            long total = stopAfter < 0 ? f.UnpackSize : byFolder[folder].TakeWhile(i => i != stopAfter).Sum(i => _db.Files[i].Size) + _db.Files[stopAfter].Size;
+            tries++;
+            long before = ProofBytesRead;
             var aes = new List<SevenZipAesStream>();
             try
             {
@@ -236,8 +264,8 @@ internal sealed class SevenZipSource : ForeignSource
                     var crc = new System.IO.Hashing.Crc32();
                     long done = 0;
                     int n;
-                    while ((n = s.Read(buf, 0, buf.Length)) > 0) { crc.Append(buf.AsSpan(0, n)); done += n; op.Progress.Checking(done, total); }
-                    if (crc.GetCurrentHashAsUInt32() != f.UnpackCrc) { failed = true; continue; }
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0) { crc.Append(buf.AsSpan(0, n)); done += n; ProofBytesRead += n; op.Progress.Checking(done, total); }
+                    if (crc.GetCurrentHashAsUInt32() != f.UnpackCrc) { failures++; continue; }
                 }
                 else
                 {
@@ -247,16 +275,20 @@ internal sealed class SevenZipSource : ForeignSource
                         var file = _db.Files[i];
                         using var part = new VerifyingStream(new ExactStream(new NonClosing(s), file.Size, "a file"), file.Size, i == stopAfter ? file.Crc : null, "the file");
                         int n;
-                        while ((n = part.Read(buf, 0, buf.Length)) > 0) { skipped += n; op.Progress.Checking(skipped, total); }
+                        while ((n = part.Read(buf, 0, buf.Length)) > 0) { skipped += n; ProofBytesRead += n; op.Progress.Checking(skipped, total); }
                         if (i == stopAfter) break;
                     }
                 }
                 if (aes.Any(a => a.Proves)) return true;
             }
-            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failed = true; }
-            finally { _ct = default; }
+            catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failures++; }
+            finally
+            {
+                _ct = default;
+                read += ProofBytesRead - before;
+            }
         }
-        if (failed) throw new WrongPasswordException();
+        if (failures > 0) throw new WrongPasswordException();
         return false;
     }
 
