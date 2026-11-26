@@ -515,7 +515,7 @@ internal sealed class SalvageRun : IDisposable
                 if (blocked.Any(k => Status(k).State != SalvageBlockState.NeedsNewerVersion)) { _lost.Enqueue(new(e.Path, Needs(blocked))); continue; }
                 if (blocked.Count > 0) { _newer.Enqueue(new(e.Path, Needs(blocked))); continue; }
             }
-            var t = planner.Plan(path, e.IsDirectory, _o.Overwrite);
+            var t = planner.Plan(path, e.IsDirectory, _o.Overwrite, TargetNames.SpelledOtherwise(_dest, e.Path, path));
             switch (t.Outcome)
             {
                 case TargetNames.Outcome.Skipped: _skipped++; break;

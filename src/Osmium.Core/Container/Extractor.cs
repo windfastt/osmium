@@ -226,7 +226,7 @@ public static class Extractor
             foreach (var e in entries)
             {
                 if (!own.TryGetValue(e, out var path)) continue;
-                var t = planner.Plan(path, e.IsDirectory, options.Overwrite);
+                var t = planner.Plan(path, e.IsDirectory, options.Overwrite, TargetNames.SpelledOtherwise(root!, OutPath(e), path));
                 switch (t.Outcome)
                 {
                     case TargetNames.Outcome.Skipped: skipped++; break;

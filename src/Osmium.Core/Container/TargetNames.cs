@@ -55,8 +55,22 @@ internal sealed class TargetNames
         foreach (var w in writtenEarlier ?? []) _files.Add(Path.GetFullPath(w));
     }
 
+    /// <summary>
+    /// Whether the system turned <paramref name="relative"/> into another spelling when it resolved it to
+    /// <paramref name="resolved"/>: on Windows a short 8.3 name of an existing file or folder ("LONGFO~1") becomes its
+    /// long name. Such an entry may name a file the user knows under its long name, so it never replaces one.
+    /// </summary>
+    internal static bool SpelledOtherwise(string root, string relative, string resolved)
+    {
+        string full = Path.GetFullPath(root);
+        if (!full.EndsWith(Path.DirectorySeparatorChar)) full += Path.DirectorySeparatorChar;
+        return !string.Equals(full + relative.Replace('/', Path.DirectorySeparatorChar), resolved, StringComparison.Ordinal);
+    }
+
     /// <summary>Plans one entry; call in index order (parents before children).</summary>
-    public Target Plan(string own, bool isDirectory, OverwriteMode mode)
+    /// <param name="otherSpelling">The entry reached its own path under another spelling (<see cref="SpelledOtherwise"/>):
+    /// a file there is never replaced, it gets a free name instead.</param>
+    public Target Plan(string own, bool isDirectory, OverwriteMode mode, bool otherSpelling = false)
     {
         string path = own;
         // Folders above it, outermost first: one that a file of this run took moves to a free name, with everything
@@ -95,7 +109,7 @@ internal sealed class TargetNames
                 {
                     case OverwriteMode.Skip: return new(Outcome.Skipped, null, false, false, null);
                     case OverwriteMode.Fail: return new(Outcome.Failed, null, false, false, kind == OnDiskKind.Directory ? "A folder of this name exists." : "File exists.");
-                    case OverwriteMode.Overwrite when kind == OnDiskKind.File: replaces = true; break;
+                    case OverwriteMode.Overwrite when kind == OnDiskKind.File && !otherSpelling: replaces = true; break;
                     case OverwriteMode.Overwrite when kind == OnDiskKind.Directory:
                         return new(Outcome.Failed, null, false, false, "A folder of this name is in the destination; it is not replaced by a file.");
                     default: path = FreeName(path, folder: false); break; // Rename, or a name known only by another spelling

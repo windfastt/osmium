@@ -181,6 +181,48 @@ public class ExtractSafetyTests
     }
 
     [Fact]
+    public void AFileReachedUnderAnotherSpellingIsNeverReplaced()
+    {
+        using var t = new TempDir();
+        string dest = P(t, "out");
+        Directory.CreateDirectory(dest);
+        string existing = Path.Combine(dest, "x.txt");
+        File.WriteAllText(existing, "the user's");
+        Assert.False(TargetNames.SpelledOtherwise(dest, "x.txt", existing)); // spelled as resolved
+
+        var plain = new TargetNames(dest, StringComparer.Ordinal, [existing], null).Plan(existing, false, OverwriteMode.Overwrite);
+        Assert.Equal((existing, true), (plain.Path, plain.Replaces));
+        // Reached under another spelling (as a short 8.3 name resolves to the long one): a free name, never the file.
+        var other = new TargetNames(dest, StringComparer.Ordinal, [existing], null).Plan(existing, false, OverwriteMode.Overwrite, otherSpelling: true);
+        Assert.Equal((Path.Combine(dest, "x (2).txt"), false, true), (other.Path, other.Replaces, other.Renamed));
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int GetShortPathNameW(string longPath, char[] shortPath, int size);
+
+    [Fact]
+    public void AnEntryNamedByAShortNameNeverReplacesTheFileUnderItsLongName()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Short 8.3 names exist on Windows only.");
+        using var t = new TempDir();
+        string dest = P(t, "out"), folder = Path.Combine(dest, "Long Folder Name");
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(Path.Combine(folder, "x.txt"), "the user's");
+        var buffer = new char[1024];
+        int n = GetShortPathNameW(folder, buffer, buffer.Length);
+        string shortName = Path.GetFileName(new string(buffer, 0, n));
+        Assert.SkipWhen(n == 0 || shortName == "Long Folder Name", "This volume makes no short 8.3 names.");
+
+        string archive = Write(P(t, "a.osa"), [($"{shortName}/x.txt", Data("from the archive"))]);
+        var replaced = new List<string>();
+        var res = Extract(archive, dest, new ExtractOptions { Overwrite = OverwriteMode.Overwrite, BeforeReplace = replaced.Add });
+        Assert.Equal(1, res.FilesOk);
+        Assert.Empty(replaced);
+        Assert.Equal("the user's", File.ReadAllText(Path.Combine(folder, "x.txt")));
+        Assert.Equal("from the archive", File.ReadAllText(Path.Combine(folder, "x (2).txt")));
+    }
+
+    [Fact]
     public void ThousandsOfNamesThatDifferOnlyInCaseEachGetTheirOwnFreeName()
     {
         using var t = new TempDir();
