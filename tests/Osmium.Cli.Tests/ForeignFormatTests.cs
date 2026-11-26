@@ -77,6 +77,24 @@ public sealed class ForeignFormatTests : IDisposable
     }
 
     [Fact]
+    public async Task ASingleCompressedFileIsExtractedNextToIt()
+    {
+        string path = P("notes.txt.gz");
+        using (var fs = File.Create(path))
+        using (var gz = new GZipStream(fs, CompressionLevel.Optimal))
+            gz.Write(Encoding.UTF8.GetBytes("the notes\n"));
+        var r = await CliRunner.RunAsync(["x", path, "-q"]);
+        Assert.Equal(0, r.ExitCode);
+        Assert.Equal("the notes\n", File.ReadAllText(P("notes.txt")));
+        Assert.False(Directory.Exists(P("notes.txt")));
+        // Again: the name is taken, so the file gets a free one; nothing is replaced.
+        var again = await CliRunner.RunAsync(["x", path, "-q"]);
+        Assert.Equal(0, again.ExitCode);
+        Assert.Equal("the notes\n", File.ReadAllText(P("notes (2).txt")));
+        Assert.Equal(["notes (2).txt", "notes.txt", "notes.txt.gz"], Directory.GetFiles(_dir).Select(Path.GetFileName).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task ExtractsIntoAGivenFolderWithAnIncludeFilter()
     {
         string path = Zip("a.zip", Tree);

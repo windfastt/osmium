@@ -110,7 +110,12 @@ internal static partial class Cli
     {
         using var s = OpenForeign(a, path, ct);
         PrintWarnings(s.Warnings);
-        string dest = a.Positional.Count > 1 ? a.Positional[1] : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, ArchiveSources.StemOf(path));
+        // A single compressed file goes next to the archive (a name already there gets a free one, as usual);
+        // archives of several entries go to a folder named after the archive.
+        string folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        string dest = a.Positional.Count > 1 ? a.Positional[1]
+            : s.Kind is ArchiveKind.GZip or ArchiveKind.BZip2 or ArchiveKind.Xz or ArchiveKind.Zstd ? folder
+            : Path.Combine(folder, ArchiveSources.StemOf(path));
         var mode = a.Has("overwrite") ? OverwriteMode.Overwrite : a.Has("skip") ? OverwriteMode.Skip : OverwriteMode.Rename;
         var progress = new ProgressLine(a.Has("quiet"));
         var sw = Stopwatch.StartNew();

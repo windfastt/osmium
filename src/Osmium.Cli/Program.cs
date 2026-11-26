@@ -142,7 +142,8 @@ namespace Osmium.Cli
               version                Show the version
 
             x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
-            .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files, recognised by their content. Passwords:
+            .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files (extracted next to themselves), recognised
+            by their content. Passwords:
             --password-stdin | --password <pw>. --force extracts an archive that expands to more than 1,000 times
             its size; names that would leave the destination, links and devices are never extracted.
 
