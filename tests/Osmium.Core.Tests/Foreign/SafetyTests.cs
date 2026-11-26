@@ -11,8 +11,13 @@ public class SafetyTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    public static TheoryData<string> Names() =>
-        ["../evil.txt", "a/../../evil.txt", "/abs.txt", "C:\\evil.txt", "//host/share/evil.txt", "CON", "aux.txt", "x.exe:Zone.Identifier", "name.", "\u202Eevil.txt"];
+    /// <summary>Each name and where it is saved: null when it is refused.</summary>
+    public static TheoryData<string, string?> Names() => new()
+    {
+        { "../evil.txt", null }, { "a/../../evil.txt", null }, { "/abs.txt", null }, { "C:\\evil.txt", null },
+        { "//host/share/evil.txt", null }, { "CON", null }, { "aux.txt", null },
+        { "x.exe:Zone.Identifier", "x.exe_Zone.Identifier" }, { "name.", "name_" }, { "\u202Eevil.txt", "\u202Eevil.txt" },
+    };
 
     private static byte[] TarOf(params (string Name, string Text)[] entries)
     {
@@ -25,8 +30,11 @@ public class SafetyTests
 
     [Theory]
     [MemberData(nameof(Names))]
-    public void UnsafeNamesFromRealFormatsStayInside(string name)
+    public void UnsafeNamesFromRealFormatsStayInside(string name, string? savedAs)
     {
+        // An absolute name of this system must not appear where it points, either.
+        string? absolute = Path.IsPathRooted(name) && !name.StartsWith("//", StringComparison.Ordinal) ? Path.GetFullPath(name) : null;
+        bool existedBefore = absolute is not null && File.Exists(absolute);
         foreach (var kind in new[] { "zip", "tar", "tgz" })
         {
             using var t = new TempDir();
@@ -42,8 +50,18 @@ public class SafetyTests
             string archive = ForeignData.Write(t, "a." + kind, data);
             using var s = ArchiveSources.Open(archive, null, Ct);
             var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
-            Assert.True(r.FilesOk >= 1);
-            Assert.Equal(2, r.FilesOk + r.SkippedUnsafe);
+            if (savedAs is null)
+            {
+                Assert.Equal((1, 1), (r.FilesOk, r.SkippedUnsafe));
+                Assert.Contains(r.Errors, e => e.Contains("not extracted", StringComparison.Ordinal));
+                Assert.Equal(["good.txt"], Directory.GetFiles(t.Sub("out"), "*", SearchOption.AllDirectories).Select(Path.GetFileName));
+            }
+            else
+            {
+                Assert.Equal((2, 0, savedAs == name ? 0 : 1), (r.FilesOk, r.SkippedUnsafe, r.Renamed));
+                Assert.Equal("payload", File.ReadAllText(Path.Combine(t.Sub("out"), savedAs)));
+            }
+            if (absolute is not null) Assert.Equal(existedBefore, File.Exists(absolute));
             Assert.Equal("untouched", File.ReadAllText(Path.Combine(t.Sub("outside"), "sentinel.txt")));
             Assert.Equal(["a." + kind, "out", "outside"], Directory.GetFileSystemEntries(t.Path).Select(Path.GetFileName).Order(StringComparer.Ordinal));
             Assert.Single(Directory.GetFiles(t.Sub("outside")));
