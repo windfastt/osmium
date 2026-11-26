@@ -167,21 +167,36 @@ internal sealed class TargetNames
     {
         if (_names.Equals(dir, _root)) return null;
         if (_links.TryGetValue(dir, out var known)) return known;
-        string? why;
+        return _links[dir] = LinkReason(dir);
+    }
+
+    /// <summary>
+    /// Checked again, without the plan's answers, just before a part file is created and just before it is renamed to
+    /// its file's name: why no folder between <paramref name="root"/> and <paramref name="path"/> may be written
+    /// through (one became a link while the files were written), or null.
+    /// </summary>
+    internal static string? LinkOnTheWay(string root, string path)
+    {
+        string r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        for (string? d = Path.GetDirectoryName(path); d is not null && d.Length > r.Length; d = Path.GetDirectoryName(d))
+            if (LinkReason(d) is { } why) return why;
+        return null;
+    }
+
+    private static string? LinkReason(string dir)
+    {
         try
         {
             var info = new DirectoryInfo(dir);
-            if (info.LinkTarget is not null) why = LinkRefused;
-            else if (!info.Exists && !File.Exists(dir)) why = null;
-            else if (OperatingSystem.IsWindows() && (info.Attributes & FileAttributes.ReparsePoint) != 0 && IsNameSurrogate(dir)) why = LinkRefused;
-            else why = null;
+            if (info.LinkTarget is not null) return LinkRefused;
+            if (!info.Exists && !File.Exists(dir)) return null;
+            if (OperatingSystem.IsWindows() && (info.Attributes & FileAttributes.ReparsePoint) != 0 && IsNameSurrogate(dir)) return LinkRefused;
+            return null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            why = "a folder in the destination could not be checked for links";
+            return "a folder in the destination could not be checked for links";
         }
-        _links[dir] = why;
-        return why;
     }
 
     private const uint NameSurrogateBit = 0x20000000;

@@ -142,6 +142,8 @@ public static class Extractor
         public ArchiveEntry Entry { get; } = entry;
         public string? Target { get; } = target;
         public string? PartPath { get; set; }
+        /// <summary>The part file, open from its creation until it is verified: every write and the hash go through it.</summary>
+        public Microsoft.Win32.SafeHandles.SafeFileHandle? Part;
         public int Remaining = entry.Segments.Count;
         public long[] SegmentFileOffsets { get; } = Offsets(entry);
         public bool Failed;
@@ -204,23 +206,23 @@ public static class Extractor
         var folders = new List<(ArchiveEntry Entry, string Path)>();
         var created = new List<string>(); // folders this run created, each after the folder it is in
         var names = options.NameComparer ?? TargetNames.DefaultComparer;
+        string? root = test ? null : Path.GetFullPath(destination!);
         if (test) files.AddRange(entries.Where(e => !e.IsDirectory).Select(e => new FileState(e, null)));
         else
         {
             // Plan every target before writing anything (FORMAT §7): resolve every entry, reserve every entry's own
             // name, then take names in index order, parents before children.
-            string root = Path.GetFullPath(destination!);
             var own = new Dictionary<ArchiveEntry, string>();
             foreach (var e in entries)
             {
-                try { own[e] = PathSafety.Resolve(root, OutPath(e)); }
+                try { own[e] = PathSafety.Resolve(root!, OutPath(e)); }
                 catch (CorruptDataException ex)
                 {
                     unsafePaths++;
                     errors.Enqueue($"{e.Path}: {ex.Message}");
                 }
             }
-            var planner = new TargetNames(root, names, own.Values, options.WrittenEarlier);
+            var planner = new TargetNames(root!, names, own.Values, options.WrittenEarlier);
             foreach (var e in entries)
             {
                 if (!own.TryGetValue(e, out var path)) continue;
@@ -243,7 +245,7 @@ public static class Extractor
                 }
             }
             // Nothing is written before this point. Folders: the destination, the folder entries, the files' folders.
-            CreateFolder(root, created);
+            CreateFolder(root!, created);
             foreach (var (e, path) in folders)
             {
                 try { CreateFolder(path, created); }
@@ -322,7 +324,7 @@ public static class Extractor
                         lock (fileLocks.GetOrAdd(f, _ => new object()))
                         {
                             if (raw is null) f.Failed = true;
-                            else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors);
+                            else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors, root);
                             f.Remaining--;
                             Interlocked.Add(ref done, seg.Length);
                             if (f.Remaining == 0)
@@ -379,8 +381,10 @@ public static class Extractor
                 else
                 {
                     if (f.Failed) { Cleanup(f); return false; }
-                    if (f.PartPath is null) f.PartPath = CreatePart(f.Target!); // an empty file
-                    hash = HashFile(f.PartPath);
+                    if (f.Part is null) (f.PartPath, f.Part) = CreatePart(root!, f.Target!); // an empty file
+                    hash = HashFile(f.Part);
+                    f.Part.Dispose(); // verified: closed before the mark and the rename
+                    f.Part = null;
                 }
                 if (hash != f.Entry.Hash)
                 {
@@ -405,6 +409,9 @@ public static class Extractor
                     // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                     // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
                     if (zone is not null && writeZone(f.PartPath!, zone) is { } why) warnings.Enqueue(ZoneWarning(f.Entry.Path, why));
+                    // The plan checked the folders for links; checked again now, as they may have changed since.
+                    if (new FileInfo(f.PartPath!).LinkTarget is not null) throw new IOException("its part file was replaced by a link while it was written");
+                    if (TargetNames.LinkOnTheWay(root!, f.Target!) is { } link) throw new IOException(link);
                     Osmium.Core.IO.FileRetry.Move(f.PartPath!, f.Target!, overwrite: f.Replaces);
                     f.PartPath = null;
                     ApplyFileMetadata(f.Target!, f.Entry, options);
@@ -427,19 +434,41 @@ public static class Extractor
         // Deletes the part file of an entry that did not complete; only ever one this run created.
         void Cleanup(FileState f)
         {
+            f.Part?.Dispose();
+            f.Part = null;
             if (f.PartPath is null || options.KeepBroken) return;
             try { File.Delete(f.PartPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             f.PartPath = null;
         }
     }
 
-    /// <summary>Creates the part file of <paramref name="target"/> under a new random name; never opens a file (or a
-    /// link) that is already there.</summary>
-    internal static string CreatePart(string target)
+    /// <summary>
+    /// Creates the part file of <paramref name="target"/> under a new random name and keeps it open: it never opens a
+    /// file (or a link) that is already there, and refuses when a folder on the way from <paramref name="root"/> has
+    /// become a link since the targets were planned.
+    /// </summary>
+    internal static (string Path, Microsoft.Win32.SafeHandles.SafeFileHandle Handle) CreatePart(string root, string target)
     {
+        if (TargetNames.LinkOnTheWay(root, target) is { } why) throw new IOException(why);
         string part = PartName(target);
-        using (new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
-        return part;
+        return (part, File.OpenHandle(part, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None));
+    }
+
+    /// <summary>XxHash128 of an open file's whole content, read through the handle.</summary>
+    internal static UInt128 HashFile(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
+    {
+        var h = new XxHash128();
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(1 << 20);
+        try
+        {
+            int n;
+            for (long at = 0; (n = RandomAccess.Read(handle, buffer, at)) > 0; at += n) h.Append(buffer.AsSpan(0, n));
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+        return h.GetCurrentHashAsUInt128();
     }
 
     /// <summary>Creates <paramref name="folder"/> and the folders above it that are missing, adding each one this call
@@ -483,7 +512,7 @@ public static class Extractor
         }
     }
 
-    private static void WriteSegment(FileState f, int segIdx, ReadOnlySpan<byte> data, bool test, ConcurrentQueue<string> errors)
+    private static void WriteSegment(FileState f, int segIdx, ReadOnlySpan<byte> data, bool test, ConcurrentQueue<string> errors, string? root)
     {
         if (test)
         {
@@ -508,9 +537,8 @@ public static class Extractor
         {
             // The first segment creates the part file (never one that is there already); the path is kept only then,
             // so that cleaning up never deletes a file this run did not create.
-            f.PartPath ??= CreatePart(f.Target!);
-            using var h = File.OpenHandle(f.PartPath, FileMode.Open, FileAccess.Write, FileShare.None);
-            RandomAccess.Write(h, data, f.SegmentFileOffsets[segIdx]);
+            if (f.Part is null) (f.PartPath, f.Part) = CreatePart(root!, f.Target!);
+            RandomAccess.Write(f.Part, data, f.SegmentFileOffsets[segIdx]);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -522,13 +550,6 @@ public static class Extractor
     internal static string PartName(string target) =>
         target + ".osmium-part-" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant();
 
-    internal static UInt128 HashFile(string path)
-    {
-        var h = new XxHash128();
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
-        h.Append(fs);
-        return h.GetCurrentHashAsUInt128();
-    }
 
     /// <summary>Mark-of-the-Web: files extracted from a downloaded archive inherit its zone (Windows only).</summary>
     internal static string? ReadZoneIdentifier(string archivePath)

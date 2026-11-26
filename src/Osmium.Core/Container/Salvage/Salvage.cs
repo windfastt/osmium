@@ -455,6 +455,7 @@ internal sealed class SalvageRun : IDisposable
         public ArchiveEntry Entry { get; } = entry;
         public string Target { get; } = target;
         public string? PartPath;
+        public Microsoft.Win32.SafeHandles.SafeFileHandle? Part; // open from its creation until it is verified
         public int Remaining = entry.Segments.Count;
         public readonly long[] FileOffsets = Offsets(entry);
         public bool Failed, Finished, Renamed, Replaces;
@@ -576,7 +577,7 @@ internal sealed class SalvageRun : IDisposable
                             lock (j)
                             {
                                 if (raw is null) j.Failed = true;
-                                else if (!j.Failed) WriteSegment(j, seg, raw);
+                                else if (!j.Failed) WriteSegment(j, seg, raw, _dest);
                                 if (--j.Remaining == 0) Complete(j);
                             }
                 }
@@ -604,8 +605,11 @@ internal sealed class SalvageRun : IDisposable
             }
             try
             {
-                j.PartPath ??= Extractor.CreatePart(j.Target); // an empty file
-                if (Extractor.HashFile(j.PartPath) != j.Entry.Hash)
+                if (j.Part is null) (j.PartPath, j.Part) = Extractor.CreatePart(_dest, j.Target); // an empty file
+                bool intact = Extractor.HashFile(j.Part) == j.Entry.Hash;
+                j.Part.Dispose(); // verified: closed before the mark and the rename
+                j.Part = null;
+                if (!intact)
                 {
                     DeletePart(j);
                     _lost.Enqueue(new(j.Entry.Path, "its content does not match its hash, although every block it uses verified"));
@@ -613,8 +617,11 @@ internal sealed class SalvageRun : IDisposable
                 }
                 // Mark-of-the-Web goes on the part file: it moves with the rename, so the file never exists without
                 // it, and it is in place before a ReadOnly attribute would make the stream unwritable.
-                MarkAsDownloaded(j.PartPath, j.Entry.Path);
-                FileRetry.Move(j.PartPath, j.Target, overwrite: j.Replaces);
+                MarkAsDownloaded(j.PartPath!, j.Entry.Path);
+                // The plan checked the folders for links; checked again now, as they may have changed since.
+                if (new FileInfo(j.PartPath!).LinkTarget is not null) throw new IOException("its part file was replaced by a link while it was written");
+                if (TargetNames.LinkOnTheWay(_dest, j.Target) is { } link) throw new IOException(link);
+                FileRetry.Move(j.PartPath!, j.Target, overwrite: j.Replaces);
                 j.PartPath = null;
                 Extractor.ApplyFileMetadata(j.Target, j.Entry, eo);
                 Interlocked.Increment(ref _recovered);
@@ -677,15 +684,14 @@ internal sealed class SalvageRun : IDisposable
         _ => $"block {b.Number}, which is damaged ({b.Problem})",
     };
 
-    private static void WriteSegment(FileJob j, int seg, byte[] raw)
+    private static void WriteSegment(FileJob j, int seg, byte[] raw, string dest)
     {
         var s = j.Entry.Segments[seg];
         try
         {
-            // The first segment creates the part file (never one that is there already).
-            j.PartPath ??= Extractor.CreatePart(j.Target);
-            using var h = File.OpenHandle(j.PartPath, FileMode.Open, FileAccess.Write, FileShare.None);
-            RandomAccess.Write(h, raw.AsSpan((int)s.Offset, (int)s.Length), j.FileOffsets[seg]);
+            // The first segment creates the part file (never one that is there already) and keeps it open.
+            if (j.Part is null) (j.PartPath, j.Part) = Extractor.CreatePart(dest, j.Target);
+            RandomAccess.Write(j.Part, raw.AsSpan((int)s.Offset, (int)s.Length), j.FileOffsets[seg]);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -703,6 +709,8 @@ internal sealed class SalvageRun : IDisposable
 
     private static void DeletePart(FileJob j)
     {
+        j.Part?.Dispose();
+        j.Part = null;
         if (j.PartPath is null) return;
         TryDelete(j.PartPath);
         j.PartPath = null;

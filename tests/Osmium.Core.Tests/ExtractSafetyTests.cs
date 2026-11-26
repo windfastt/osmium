@@ -275,6 +275,76 @@ public class ExtractSafetyTests
         Assert.Empty(Directory.GetFileSystemEntries(outside));
     }
 
+    private static bool TryFileLink(string link, string target)
+    {
+        try
+        {
+            File.CreateSymbolicLink(link, target);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
+    public void APartFileReplacedByALinkWhileItIsWrittenIsNeverWrittenThrough()
+    {
+        using var t = new TempDir();
+        var big = new byte[150_000];
+        new Random(5).NextBytes(big);
+        string archive = Write(P(t, "a.osa"), [("big.bin", big)], blockSize: 64 << 10); // three blocks
+        string dest = P(t, "out"), victim = P(t, "victim.txt");
+        File.WriteAllText(victim, "precious");
+        bool swapped = false;
+        var progress = new SyncProgress(_ =>
+        {
+            if (swapped) return;
+            swapped = true;
+            string part = Directory.GetFiles(dest, "*.osmium-part-*").Single(); // after the first block
+            File.Delete(part);
+            if (!TryFileLink(part, victim)) Assert.Skip("Symbolic links cannot be created here (Windows needs Developer Mode or administrator rights).");
+        });
+        ExtractResult res;
+        using (var r = OsaReader.Open(archive))
+            res = Extractor.Extract(r, dest, null, new ExtractOptions { MaxParallelBlocks = 1 }, progress, Ct);
+        Assert.True(swapped);
+        Assert.Equal("precious", File.ReadAllText(victim));
+        Assert.Equal((0, 1), (res.FilesOk, res.FilesFailed));
+        Assert.Contains(res.Errors, e => e.Contains("replaced by a link", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(dest, "big.bin")));
+        Assert.Empty(Directory.GetFileSystemEntries(dest));
+    }
+
+    [Fact]
+    public void AFolderThatBecomesALinkWhileFilesAreWrittenIsNeverWrittenThrough()
+    {
+        using var t = new TempDir();
+        var big = new byte[150_000];
+        new Random(6).NextBytes(big);
+        // "a-big.bin" fills the first blocks; "docs/late.txt" comes in the last one.
+        string archive = Write(P(t, "a.osa"), [("a-big.bin", big), ("docs/late.txt", Data("late"))], blockSize: 64 << 10);
+        string dest = P(t, "out"), outside = P(t, "outside");
+        Directory.CreateDirectory(Path.Combine(dest, "docs"));
+        Directory.CreateDirectory(outside);
+        bool swapped = false;
+        var progress = new SyncProgress(_ =>
+        {
+            if (swapped) return;
+            swapped = true;
+            Directory.Delete(Path.Combine(dest, "docs"));
+            if (!TryLink(Path.Combine(dest, "docs"), outside)) Assert.Skip("Symbolic links cannot be created here (Windows needs Developer Mode or administrator rights).");
+        });
+        ExtractResult res;
+        using (var r = OsaReader.Open(archive))
+            res = Extractor.Extract(r, dest, null, new ExtractOptions { MaxParallelBlocks = 1 }, progress, Ct);
+        Assert.True(swapped);
+        Assert.Empty(Directory.GetFileSystemEntries(outside));
+        Assert.Equal((1, 1), (res.FilesOk, res.FilesFailed));
+        Assert.Contains(res.Errors, e => e.StartsWith("docs/late.txt: ", StringComparison.Ordinal) && e.Contains(TargetNames.LinkRefused, StringComparison.Ordinal));
+    }
+
     [Fact]
     public void TheDestinationItselfMayBeALinkTheUserChose()
     {
