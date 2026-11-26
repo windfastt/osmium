@@ -106,7 +106,9 @@ public sealed record ExtractResult(int FilesOk, int FilesFailed, int FilesSkippe
     public IReadOnlyList<ExtractRename> Renames { get; init; } = [];
     /// <summary>How many of <see cref="FilesFailed"/> are in blocks that need a newer version of Osmium (not damaged).</summary>
     public int FilesNeedingNewerVersion { get; init; }
-    /// <summary>Problems that did not stop a file from being extracted, e.g. a Mark-of-the-Web that could not be written.</summary>
+    /// <summary>Problems that did not stop a file from being extracted: first what the reader found when opening the
+    /// archive (<see cref="OsaReader.Warnings"/>, such as a spare copy that stood in for the file list; Test adds the
+    /// comparison of the spare copies), then problems of single files, such as a Mark-of-the-Web that could not be written.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
     /// <summary>Entries (files and folders) not extracted because their path is unsafe (<see cref="PathSafety"/>);
     /// each is also in <see cref="Errors"/>, and none is in <see cref="FilesFailed"/>.</summary>
@@ -351,7 +353,9 @@ public static class Extractor
         return new ExtractResult(ok, failed + failedEarly, skipped, errors.ToList())
         {
             FilesNeedingNewerVersion = newerFrames.IsEmpty ? 0 : files.Count(f => f.Entry.Segments.Any(s => newerFrames.ContainsKey(s.Frame))),
-            Warnings = [.. warnings, .. test ? reader.VerifySpareCopies() : []],
+            // What the reader found when opening (a spare copy that stood in for the file list…) comes first, so that
+            // every caller showing the result shows it; Test adds the comparison of the spare copies.
+            Warnings = [.. reader.Warnings.Concat(test ? reader.VerifySpareCopies() : []).Distinct(), .. warnings],
             SkippedUnsafe = unsafePaths,
             Written = [.. files.Where(f => f.Written).Select(f => new WrittenFile(f.Entry, f.Target!))],
             Renamed = renamed.Count,

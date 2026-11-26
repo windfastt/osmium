@@ -735,6 +735,23 @@ public class SpareCopyTests
         }
     }
 
+    [Fact]
+    public void ExtractAndTestResultsCarryWhatTheReaderFoundWhenOpening()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        // The header's CRC (its marker stays, so that the archive is still recognised) and the file list are damaged.
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => { b[tail.HeaderLength - 1] ^= 1; b[tail.IndexOffset + 40] ^= 1; });
+        using var r = OsaReader.Open(bad);
+        string[] expected = [OsaReader.UsedSpareHeader, OsaReader.UsedSpareIndex];
+        Assert.Equal(expected, Extractor.Extract(r, t.Sub("out"), null, null, null, Ct).Warnings);
+        Assert.Equal(expected, Extractor.Test(r, null, Ct).Warnings); // once each, though Test also compares the copies
+        using var s = Archives.ArchiveSources.Open(bad, ct: Ct);
+        Assert.Equal(expected, s.Extract(t.Sub("out2"), new Archives.ArchiveExtractRequest(), null, Ct).Warnings);
+    }
+
     // ------------------------------------------------------------------ read errors (bad sectors)
 
     /// <summary>Opens with the bytes in [from, to) unreadable, as a bad sector is; extracts every file and returns the
