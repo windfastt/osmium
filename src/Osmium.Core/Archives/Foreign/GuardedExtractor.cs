@@ -1,3 +1,4 @@
+using System.Globalization;
 using Osmium.Core.Container;
 using Osmium.Core.IO;
 using Osmium.Core.Text;
@@ -11,15 +12,18 @@ namespace Osmium.Core.Archives.Foreign;
 /// same rules as .osa extraction (<see cref="TargetNames"/>, here always case-insensitive): never through a link already
 /// in the destination, a free name that nothing else uses for a collision inside the run, with an earlier pass, or with
 /// a file the system finds under another spelling (a short 8.3 name), and the overwrite mode for files that were
-/// already there. The link check runs again just before the part file is made and before it is moved. Write to a part
-/// file through the limit
-/// counters and the format's checks, then give it the Mark-of-the-Web, move it into place and set its time and only
+/// already there; at most <see cref="MaxCopiesOfOneName"/> files of one name. The link check runs again just before
+/// the part file is made and before it is moved. Write to a part file through the limit counters and the format's
+/// checks, then give it the Mark-of-the-Web, move it into place and set its time and only
 /// its ReadOnly and Hidden attributes. A cancellation or failure removes this run's part files and the empty folders
 /// it created; finished files stay.
 /// </summary>
 internal sealed class GuardedExtractor : IEntrySink
 {
     private const int CopyBuffer = 1 << 18;
+    /// <summary>How many file entries of one run may have the same name (each further one gets the next free name);
+    /// more are refused, so that a small archive of one name repeated cannot fill a folder with numbered copies.</summary>
+    public const int MaxCopiesOfOneName = 1000;
     private const long FreeSpaceInterval = 64L << 20;
 
     private readonly string _root;
@@ -37,6 +41,7 @@ internal sealed class GuardedExtractor : IEntrySink
     private readonly HashSet<string> _createdDirSet = new(StringComparer.Ordinal);
     private readonly List<(ForeignEntry Entry, string Path)> _dirEntries = [];
     private readonly Dictionary<string, string> _filesByArchivePath = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _copies = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _errors = [], _warnings = [];
     private readonly List<ExtractedFile> _out = [];
     private string? _currentPart;
@@ -70,6 +75,7 @@ internal sealed class GuardedExtractor : IEntrySink
     private static readonly AsyncLocal<string?> ZoneSeam = new();
     private static readonly AsyncLocal<Func<string, string, string?>?> ZoneWriterSeam = new();
     private static readonly AsyncLocal<long?> FreeSpaceIntervalSeam = new();
+    private static readonly AsyncLocal<int?> MaxCopiesSeam = new();
 
     /// <summary>For tests (this async flow only): the Mark-of-the-Web to give files instead of the archive's own.</summary>
     internal static string? ZoneOverride { get => ZoneSeam.Value; set => ZoneSeam.Value = value; }
@@ -77,6 +83,8 @@ internal sealed class GuardedExtractor : IEntrySink
     internal static Func<string, string, string?>? ZoneWriterOverride { get => ZoneWriterSeam.Value; set => ZoneWriterSeam.Value = value; }
     /// <summary>For tests: how many bytes are written between free-space checks (64 MiB).</summary>
     internal static long? FreeSpaceIntervalOverride { get => FreeSpaceIntervalSeam.Value; set => FreeSpaceIntervalSeam.Value = value; }
+    /// <summary>For tests: how many file entries may have one name (<see cref="MaxCopiesOfOneName"/>).</summary>
+    internal static int? MaxCopiesOverride { get => MaxCopiesSeam.Value; set => MaxCopiesSeam.Value = value; }
 
     private static string Esc(string s) => DisplayText.Escape(s);
     private string Full(string relative) => PathSafety.Resolve(_root, relative);
@@ -165,6 +173,15 @@ internal sealed class GuardedExtractor : IEntrySink
         try
         {
             string full = Full(mapped);
+            if (e.Type != EntryType.Directory)
+            {
+                int copies = _copies[full] = _copies.GetValueOrDefault(full) + 1, max = MaxCopiesOverride ?? MaxCopiesOfOneName;
+                if (copies > max)
+                {
+                    Refuse(ref _unsafe, e, $"more than {max.ToString("N0", CultureInfo.InvariantCulture)} entries of this archive have this name");
+                    return;
+                }
+            }
             var plan = _plan.Plan(full, e.Type == EntryType.Directory, _request.Overwrite, TargetNames.SpelledOtherwise(_root, mapped, full));
             switch (plan.Outcome)
             {

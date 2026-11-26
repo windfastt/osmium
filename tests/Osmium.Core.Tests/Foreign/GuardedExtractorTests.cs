@@ -261,18 +261,41 @@ public class GuardedExtractorTests
         const int n = 10_000;
         static List<MemoryEntry> Entries(Func<int, string> name) => [.. Enumerable.Range(0, n).Select(i => new MemoryEntry(name(i), []))];
         using var distinct = new Setup();
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var d = distinct.Extract(Entries(i => $"f{i}.txt"));
-        var distinctTime = sw.Elapsed;
         using var same = new Setup();
-        sw.Restart();
-        var r = same.Extract(Entries(_ => "a.txt"));
-        var sameTime = sw.Elapsed;
+        GuardedExtractor.MaxCopiesOverride = n;
+        TimeSpan distinctTime, sameTime;
+        ArchiveExtractResult d, r;
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            d = distinct.Extract(Entries(i => $"f{i}.txt"));
+            distinctTime = sw.Elapsed;
+            sw.Restart();
+            r = same.Extract(Entries(_ => "a.txt"));
+            sameTime = sw.Elapsed;
+        }
+        finally { GuardedExtractor.MaxCopiesOverride = null; }
         Assert.Equal(n, d.FilesOk);
         Assert.Equal((n, n - 1), (r.FilesOk, r.Renamed));
         Assert.True(File.Exists(same.At($"a ({n}).txt")));
         Assert.True(sameTime < distinctTime * 2 + TimeSpan.FromSeconds(1),
             $"{n:N0} copies of one name took {sameTime.TotalSeconds:F1} s, {n:N0} different names {distinctTime.TotalSeconds:F1} s");
+    }
+
+    [Fact]
+    public void MoreThanAThousandFilesOfOneNameAreRefused()
+    {
+        using var s = new Setup();
+        const int max = GuardedExtractor.MaxCopiesOfOneName;
+        // Names that differ only in case are one name; folders of one name are one folder and do not count.
+        var entries = Enumerable.Range(0, max + 5).Select(i => new MemoryEntry(i % 2 == 0 ? "a.txt" : "A.TXT", [])).ToList();
+        entries.AddRange([MemoryEntry.Folder("d"), MemoryEntry.Folder("d"), MemoryEntry.File("other.txt", "x")]);
+        var r = s.Extract(entries);
+        Assert.Equal((max + 1, 5), (r.FilesOk, r.SkippedUnsafe));
+        Assert.Equal(5, r.Errors.Count(e => e.EndsWith("not extracted: more than 1,000 entries of this archive have this name", StringComparison.Ordinal)));
+        Assert.Equal(max + 1, s.FilesUnder().Count);
+        Assert.True(File.Exists(s.At($"a ({max}).txt")) || File.Exists(s.At($"A ({max}).TXT")));
+        s.AssertNothingOutside();
     }
 
     [Theory]
