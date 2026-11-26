@@ -37,6 +37,50 @@ public sealed class PasswordOptionTests : IDisposable
     }
 
     [Theory]
+    [InlineData("--password-stdin")]
+    [InlineData("--encrypt")]
+    [InlineData("--profile")]
+    [InlineData("-q")]
+    public async Task APasswordOptionNeverTakesTheNextOptionAsItsValue(string next)
+    {
+        Stdin(Encoding.UTF8.GetBytes("from stdin\n"));
+        var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--password", next, "store"]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains("--password needs a value", r.Error);
+        Assert.Contains("--password=<password> for one that starts with --", r.Error);
+        Assert.False(File.Exists(P("out.osa")));
+    }
+
+    [Fact]
+    public async Task AnyOptionWithoutItsValueIsAnError()
+    {
+        var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "--no-verify"]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains("--profile needs a value", r.Error);
+        Assert.False(File.Exists(P("out.osa")));
+    }
+
+    [Fact]
+    public async Task APasswordThatStartsWithTwoDashesIsGivenWithAnEqualsSign()
+    {
+        var a = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--profile", "store", "-q", "--password=--odd one"]);
+        Assert.Equal(0, a.ExitCode);
+        Assert.Throws<PasswordRequiredException>(() => OsaReader.Open(P("out.osa"), null));
+        Assert.Equal(0, (await CliRunner.RunAsync(["t", P("out.osa"), "--password=--odd one"])).ExitCode);
+        Assert.Equal(1, (await CliRunner.RunAsync(["t", P("out.osa"), "--password=--odd"])).ExitCode);
+    }
+
+    [Fact]
+    public async Task BothPasswordOptionsAtOnceAreRefused()
+    {
+        Stdin(Encoding.UTF8.GetBytes("from stdin\n"));
+        var r = await CliRunner.RunAsync(["a", P("out.osa"), P("in"), "--password", "on the line", "--password-stdin"]);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains("Give the password once", r.Error);
+        Assert.False(File.Exists(P("out.osa")));
+    }
+
+    [Theory]
     [InlineData("--password=")]
     [InlineData("--password-stdin")]
     public async Task AnEmptyPasswordIsRefusedAndWritesNothing(string option)

@@ -10,7 +10,9 @@ return await Cli.RunAsync(args);
 
 namespace Osmium.Cli
 {
-    /// <summary>Minimal argument parser: positional args + "--name value" / "--flag" options.</summary>
+    /// <summary>Minimal argument parser: positional args + "--name value" / "--name=value" / "--flag" options. An option
+    /// that takes a value never takes the next option as it ("--password --encrypt" has no password): a value that
+    /// starts with "--" is given as "--name=--value".</summary>
     internal sealed class Args
     {
         public List<string> Positional { get; } = [];
@@ -29,13 +31,13 @@ namespace Osmium.Cli
             for (int i = 0; i < list.Count; i++)
             {
                 var a = list[i];
-                if (a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1])))
+                if (IsOption(a))
                 {
                     string name = a.TrimStart('-');
                     string? value = null;
                     int eq = name.IndexOf('=');
                     if (eq > 0) { value = name[(eq + 1)..]; name = name[..eq]; }
-                    else if (!Flags.Contains(name) && i + 1 < list.Count) value = list[++i];
+                    else if (!Flags.Contains(name) && i + 1 < list.Count && !IsOption(list[i + 1])) value = list[++i];
                     else if (!Flags.Contains(name)) _withoutValue.Add(name);
                     _opts[name] = value ?? "true";
                 }
@@ -43,9 +45,13 @@ namespace Osmium.Cli
             }
         }
 
+        private static bool IsOption(string a) => a.StartsWith("--") || (a.StartsWith('-') && a.Length == 2 && !char.IsDigit(a[1]));
+
         public bool Has(string n) => _opts.ContainsKey(n);
-        /// <summary>An option that takes a value was given last, with nothing after it.</summary>
+        /// <summary>An option that takes a value has none: nothing, or another option, follows it.</summary>
         public bool MissingValue(string n) => _withoutValue.Contains(n);
+        /// <summary>The first option that takes a value but was given none.</summary>
+        public string? FirstMissingValue => _withoutValue.FirstOrDefault();
         /// <summary>The password of this run, once read (standard input can be read only once).</summary>
         internal string? CachedPassword { get; set; }
         internal bool PasswordRead { get; set; }
@@ -62,6 +68,10 @@ namespace Osmium.Cli
             if (argv.Length == 0 || argv[0] is "-h" or "--help" or "help") { Usage(); return 0; }
             var cmd = argv[0].ToLowerInvariant();
             var a = new Args(argv.Skip(1));
+            if (a.FirstMissingValue is { } missing)
+                return Fail(missing.Equals("password", StringComparison.OrdinalIgnoreCase)
+                    ? PasswordNeedsAValue
+                    : $"--{missing} needs a value: --{missing} <value>, or --{missing}=<value> for a value that starts with --.");
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); Console.Error.WriteLine("\nCancelling…"); };
             try
@@ -145,9 +155,9 @@ namespace Osmium.Cli
 
             x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
             .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files (extracted next to themselves), recognised
-            by their content. Passwords:
-            --password-stdin | --password <pw>. --force extracts an archive that expands to more than 1,000 times
-            its size; names that would leave the destination, links and devices are never extracted.
+            by their content. Passwords: --password-stdin | --password <pw> (--password=<pw> when it starts with --).
+            --force extracts an archive that expands to more than 1,000 times its size; names that would leave the
+            destination, links and devices are never extracted.
 
             Exit codes: 0 done; 1 error; 2 files damaged, failed or left out; 3 (t) every file verified, with
             warnings (such as a damaged spare copy of the file list); 130 cancelled.
@@ -186,15 +196,19 @@ namespace Osmium.Cli
         /// A --password without a value and an empty password are refused (an empty password would write an archive
         /// without encryption). Standard input is read as UTF-8, one line, with one trailing CR/LF removed.
         /// </summary>
+        private const string PasswordNeedsAValue =
+            "--password needs a value: --password-stdin reads it from standard input, or give --password <password> (--password=<password> for one that starts with --).";
+
         internal static string? Password(Args a)
         {
             if (a.PasswordRead) return a.CachedPassword;
             string? pw;
+            if (a.Has("password-stdin") && a.Has("password"))
+                throw new ArgumentException("Give the password once: with --password-stdin or with --password, not both.");
             if (a.Has("password-stdin")) pw = ReadPasswordLine();
             else if (a.Has("password"))
             {
-                if (a.MissingValue("password"))
-                    throw new ArgumentException("--password needs a value: --password-stdin reads it from standard input, or give --password <password>.");
+                if (a.MissingValue("password")) throw new ArgumentException(PasswordNeedsAValue);
                 pw = a.Get("password");
                 Console.Error.WriteLine("warning: a password given with --password can be seen by other programs on this computer; --password-stdin keeps it private.");
             }
