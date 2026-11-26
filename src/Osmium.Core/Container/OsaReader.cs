@@ -379,13 +379,17 @@ public sealed class OsaReader : IDisposable
     /// </summary>
     public NewerVersionException? NewerVersion => Index.Blocks.Select(b => b.Descriptor.NewerVersion).FirstOrDefault(e => e is not null);
 
-    /// <summary>Reads and structurally verifies one frame (CRCs, tag, payload hash) without decoding it.</summary>
+    /// <summary>Reads and structurally verifies one frame (CRCs, tag, payload hash) without decoding it. Its pipeline
+    /// must be the one the index gives for it: memory is reserved and limits are checked from the index's copy.</summary>
     /// <exception cref="NewerVersionException">The block needs a newer version of Osmium.</exception>
     public BlockBody ReadBody(int frame)
     {
         var b = Blocks[frame];
         if (b.Descriptor.NewerVersion is { } newer) throw newer.Again();
-        return ReadFrame(_handle, b.Offset, b.FrameLength, (ulong)frame, Header, _key, _registry, isIndex: false);
+        var body = ReadFrame(_handle, b.Offset, b.FrameLength, (ulong)frame, Header, _key, _registry, isIndex: false);
+        if (!body.Descriptor.Serialize().AsSpan().SequenceEqual(b.Descriptor.Serialize()))
+            throw new CorruptDataException($"Block {frame} does not match the file list (its pipeline differs).");
+        return body;
     }
 
     /// <summary>Reads, decodes and hash-verifies one block's raw content.</summary>

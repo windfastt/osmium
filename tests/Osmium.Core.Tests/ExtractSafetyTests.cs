@@ -408,6 +408,22 @@ public class ExtractSafetyTests
         Assert.Equal(60_000, small[0]);
     }
 
+    [Fact]
+    public void ABlockWhosePipelineIsNotTheOneTheFileListGivesIsRefusedBeforeItIsDecoded()
+    {
+        using var t = new TempDir();
+        var files = new Dictionary<string, byte[]> { ["x.bin"] = new byte[5000] };
+        // The file list says "store" (little memory); the frame itself is zstd: memory would be reserved for the one
+        // and spent on the other.
+        string path = SpareArchives.Craft(t.Sub("a.osa"), files, _ => null, tail: false, framePipeline: "zstd(level=3)",
+            indexDescriptor: d => new BlockDescriptor(PipelineSpec.Parse("store", MethodRegistry.Default), [d.RawSize]));
+        var res = Extract(path, P(t, "out"));
+        Assert.Equal((0, 1), (res.FilesOk, res.FilesFailed));
+        Assert.Contains(res.Errors, e => e.Contains("does not match the file list", StringComparison.Ordinal));
+        using var r = OsaReader.Open(path);
+        Assert.Contains(Extractor.Test(r, null, Ct).Errors, e => e.Contains("does not match the file list", StringComparison.Ordinal));
+    }
+
     // ------------------------------------------------------------------ Mark-of-the-Web
 
     private const string Zone = "[ZoneTransfer]\r\nZoneId=3\r\n";

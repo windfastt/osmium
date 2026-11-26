@@ -73,7 +73,7 @@ internal static class SpareArchives
     /// <paramref name="tail"/> says whether B and H are written at all.
     /// </summary>
     public static string Craft(string path, IReadOnlyDictionary<string, byte[]> files, Func<long, byte[]?> sparesValue, bool tail = true,
-        bool newerIndex = false)
+        bool newerIndex = false, string framePipeline = "store", Func<BlockDescriptor, BlockDescriptor>? indexDescriptor = null)
     {
         var header = new ArchiveHeader { Creator = "test" };
         var headerBytes = header.Serialize();
@@ -82,12 +82,12 @@ internal static class SpareArchives
         var index = new ArchiveIndex();
         foreach (var (name, data) in files.OrderBy(f => f.Key, StringComparer.Ordinal))
         {
-            var (desc, payload) = PipelineExecutor.Encode(PipelineSpec.Parse("store", Reg), data, CodecContext.None);
+            var (desc, payload) = PipelineExecutor.Encode(PipelineSpec.Parse(framePipeline, Reg), data, CodecContext.None);
             long offset = fs.Position;
             var frame = Frame((ulong)index.Blocks.Count, 0, [.. new BlockBody(desc, BlockBody.Hash128(data), payload).SerializePrefix(), .. payload]);
             fs.Write(frame);
             index.Entries.Add(new ArchiveEntry { Path = name, Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(index.Blocks.Count, 0, data.Length)], Hash = XxHash128.HashToUInt128(data) });
-            index.Blocks.Add(new BlockInfo(index.Blocks.Count, offset, frame.Length, data.Length, data.Length, desc));
+            index.Blocks.Add(new BlockInfo(index.Blocks.Count, offset, frame.Length, data.Length, data.Length, indexDescriptor?.Invoke(desc) ?? desc));
         }
         long spareOffset = fs.Position;
         if (sparesValue(spareOffset) is { } v) index.Metadata[ArchiveIndex.SparesKey] = v;
