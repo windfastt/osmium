@@ -444,6 +444,37 @@ public class GuardedExtractorTests
         if (OperatingSystem.IsWindows()) File.SetAttributes(s.At("tool.exe"), FileAttributes.Normal);
     }
 
+    [Theory]
+    [InlineData(236)]
+    [InlineData(237)]
+    [InlineData(255)]
+    public void ANameOfUpTo255CharactersExtracts(int length)
+    {
+        using var s = new Setup();
+        string name = new string('n', length - 4) + ".txt";
+        var r = s.Extract([MemoryEntry.File(name, "a long name")]);
+        Assert.True(r.FilesOk == 1, string.Join("; ", r.Errors));
+        Assert.Equal("a long name", File.ReadAllText(s.At(name)));
+        Assert.Equal([name], s.FilesUnder());
+    }
+
+    [Fact]
+    public void APartFileNameStaysWithin255CharactersAndHoldsWholeCharacters()
+    {
+        string dir = Path.GetFullPath("d");
+        string emoji = char.ConvertFromUtf32(0x1F600);
+        foreach (var file in new[] { "short.txt", new string('n', 255), new string('x', 235) + emoji + new string('y', 18) })
+        {
+            string part = GuardedExtractor.PartName(Path.Combine(dir, file));
+            string name = Path.GetFileName(part);
+            Assert.Equal(dir, Path.GetDirectoryName(part));
+            Assert.True(name.Length <= 255);
+            Assert.Matches(@"\.osmium-part-[0-9a-f]{6}$", name);
+            Assert.False(char.IsHighSurrogate(name[^20]));
+            Assert.StartsWith(name[..^19], file);
+        }
+    }
+
     [Fact]
     public void ABrokenFileThatIsKeptGetsTheMarkToo()
     {

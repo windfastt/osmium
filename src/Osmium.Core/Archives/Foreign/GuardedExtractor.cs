@@ -253,7 +253,7 @@ internal sealed class GuardedExtractor : IEntrySink
             Refuse(ref _unsafe, e, link);
             return;
         }
-        string part = Extractor.PartName(target);
+        string part = PartName(target);
         _currentPart = part;
         _progress.Current(e.Path);
         bool keep = false;
@@ -329,6 +329,19 @@ internal sealed class GuardedExtractor : IEntrySink
                 _currentPart = null;
             }
         }
+    }
+
+    /// <summary>The part file of <paramref name="target"/>: its name and ".osmium-part-" with six random hex digits,
+    /// the name cut short where the part's name would pass 255 characters, so that a name of 237 to 255 characters,
+    /// which is legal, still extracts.</summary>
+    internal static string PartName(string target)
+    {
+        string part = Extractor.PartName(target), file = Path.GetFileName(target);
+        if (Path.GetFileName(part).Length <= EntryNames.MaxComponent) return part;
+        string suffix = Path.GetFileName(part)[file.Length..];
+        int keep = EntryNames.MaxComponent - suffix.Length;
+        if (char.IsHighSurrogate(file[keep - 1])) keep--; // never half a character
+        return Path.Combine(Path.GetDirectoryName(target)!, file[..keep] + suffix);
     }
 
     private static int ReadContent(Stream s, byte[] buf)
