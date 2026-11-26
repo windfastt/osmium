@@ -174,6 +174,12 @@ public class DetectionTests
     [InlineData("CON.zip", "_CON.zip files")]
     [InlineData("aux.tar.gz", "_aux.tar.gz files")]
     [InlineData("dots..zip", "dots..zip files")]
+    [InlineData("...osa", "...osa files")]
+    [InlineData("..osa", "..osa files")]
+    [InlineData("...zip", "...zip files")]
+    [InlineData("..tar.gz", "..tar.gz files")]
+    [InlineData(" .zip", " .zip files")]
+    [InlineData("nul.7z", "_nul.7z files")]
     public void StemOfStripsTheArchiveExtensions(string name, string stem)
     {
         Assert.Equal(stem, ArchiveSources.StemOf(Path.Combine("dir", name)));
