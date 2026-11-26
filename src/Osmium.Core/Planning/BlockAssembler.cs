@@ -14,26 +14,43 @@ public static class BlockAssembler
     }
 
     /// <summary>Fills <paramref name="destination"/> with the block's bytes from <paramref name="from"/> on, reading only
-    /// the parts of the source files that overlap that range (padding is zero).</summary>
+    /// the parts of the source files that overlap that range (padding is zero). Each file is read only while it is the
+    /// file the scan saw (<see cref="SourceIdentity.Open"/>), once for neighbouring parts of the same file.</summary>
+    /// <exception cref="SourceChangedException">A file is not the one the scan saw, or became shorter.</exception>
     public static void AssembleRange(ArchivePlan plan, PlanBlock block, long from, Span<byte> destination)
     {
         destination.Clear();
         long end = from + destination.Length;
-        foreach (var part in block.Parts)
+        SourceFile? open = null;
+        FileStream? fs = null;
+        try
         {
-            long ps = part.BlockOffset, pe = part.BlockOffset + part.Length;
-            if (pe <= from || ps >= end) continue;
-            long s = Math.Max(ps, from), e = Math.Min(pe, end);
-            var unit = plan.Units[part.Unit];
-            var src = plan.Files[unit.File].Src;
-            long fileOffset = unit.Offset + part.UnitOffset + (s - ps);
-            ReadExact(src.FullPath, fileOffset, destination.Slice((int)(s - from), (int)(e - s)));
+            foreach (var part in block.Parts)
+            {
+                long ps = part.BlockOffset, pe = part.BlockOffset + part.Length;
+                if (pe <= from || ps >= end) continue;
+                long s = Math.Max(ps, from), e = Math.Min(pe, end);
+                var unit = plan.Units[part.Unit];
+                var src = plan.Files[unit.File].Src;
+                if (!ReferenceEquals(src, open))
+                {
+                    fs?.Dispose();
+                    fs = null;
+                    fs = SourceIdentity.Open(src);
+                    open = src;
+                }
+                long fileOffset = unit.Offset + part.UnitOffset + (s - ps);
+                ReadExact(fs!.SafeFileHandle, src.FullPath, fileOffset, destination.Slice((int)(s - from), (int)(e - s)));
+            }
+        }
+        finally
+        {
+            fs?.Dispose();
         }
     }
 
-    public static void ReadExact(string path, long offset, Span<byte> dst)
+    private static void ReadExact(Microsoft.Win32.SafeHandles.SafeFileHandle h, string path, long offset, Span<byte> dst)
     {
-        using var h = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         int total = 0;
         while (total < dst.Length)
         {

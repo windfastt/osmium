@@ -96,6 +96,8 @@ public sealed class PlanGroup
     public EffectiveRules Rules { get; set; } = new();
     public List<string> Explain { get; } = [];
     public bool Forced { get; set; }
+    /// <summary>How the files are ordered when not by extension, name and path, for the explain log.</summary>
+    public string? Ordering { get; set; }
 }
 
 public sealed class PlanBlock
@@ -147,9 +149,13 @@ public sealed class Planner(PlanOptions o)
         {
             try
             {
-                if (p.Level != ProfileLevel.Store && f.Src.Size > 0) f.Analysis = Sniffer.Analyze(f.Src.FullPath, p.SampleWindows);
+                if (p.Level != ProfileLevel.Store && f.Src.Size > 0)
+                {
+                    using var fs = SourceIdentity.Open(f.Src);
+                    f.Analysis = Sniffer.Analyze(fs.SafeFileHandle, f.Src.Size, p.SampleWindows);
+                }
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException)
             {
                 failed.Add(f);
                 lock (plan.Warnings) plan.Warnings.Add($"{f.Src.RelPath}: cannot read ({e.Message})");
@@ -164,8 +170,8 @@ public sealed class Planner(PlanOptions o)
             if (f.Rules.Exclude) { Log($"excluded {f.Src.RelPath} ({string.Join("; ", f.Rules.Provenance)})"); continue; }
             if (forced is not null && f.Rules.Pipeline is null) f.Rules.Pipeline = forced;
             f.Class = f.Analysis?.Class ?? CompatClass.Binary;
-            long cap = o.BlockCap ?? p.BlockCap;
-            if (f.Class is CompatClass.Audio or CompatClass.Image && f.Src.Size > cap) f.Class = CompatClass.Structured;
+            // Audio and image filters work on one file in one block; a file too large for that is treated as records.
+            if (f.Class is CompatClass.Audio or CompatClass.Image && f.Src.Size > MediaBlockCap(o.BlockCap ?? p.BlockCap)) f.Class = CompatClass.Structured;
             plan.Files.Add(f);
         }
 
@@ -174,7 +180,7 @@ public sealed class Planner(PlanOptions o)
         Dedupe(plan, dedup, ct);
 
         // 3. groups and layout
-        BuildGroups(plan);
+        BuildGroups(plan, ct);
         Layout(plan, o.BlockCap ?? p.BlockCap);
 
         // 4. choose a pipeline for each group. Groups are independent, so they are planned concurrently; the trial
@@ -207,10 +213,10 @@ public sealed class Planner(PlanOptions o)
                 List<ChunkInfo> chunks;
                 try
                 {
-                    (chunks, var h) = DedupScanner.Chunk(f.Src.FullPath, ct);
+                    (chunks, var h) = DedupScanner.Chunk(f.Src, ct);
                     f.Hash = h;
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException)
                 {
                     plan.Warnings.Add($"{f.Src.RelPath}: cannot read ({e.Message})");
                     continue;
@@ -243,8 +249,8 @@ public sealed class Planner(PlanOptions o)
                 foreach (int i in bySize)
                 {
                     string sha;
-                    try { sha = Convert.ToHexString(DedupScanner.Sha256File(files[i].Src.FullPath, ct)); }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+                    try { sha = Convert.ToHexString(DedupScanner.Sha256File(files[i].Src, ct)); }
+                    catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException) { continue; }
                     if (bySha.TryGetValue(sha, out int first)) duplicateOf[i] = first;
                     else bySha[sha] = i;
                 }
@@ -267,9 +273,10 @@ public sealed class Planner(PlanOptions o)
 
     // ------------------------------------------------------------------ grouping
 
-    private void BuildGroups(ArchivePlan plan)
+    private void BuildGroups(ArchivePlan plan, CancellationToken ct)
     {
         var byKey = new Dictionary<string, PlanGroup>();
+        var members = new List<List<GroupMember>>(); // per group, its files in the order below
         var order = Enumerable.Range(0, plan.Files.Count)
             .OrderBy(i => Path.GetExtension(plan.Files[i].Src.RelPath), StringComparer.OrdinalIgnoreCase)
             .ThenBy(i => Path.GetFileName(plan.Files[i].Src.RelPath), StringComparer.OrdinalIgnoreCase)
@@ -277,7 +284,8 @@ public sealed class Planner(PlanOptions o)
         foreach (int i in order)
         {
             var f = plan.Files[i];
-            var own = f.Units.Where(u => plan.Units[u].File == i).ToList();
+            // A chunk can repeat inside a file (a run of zeros, say): its unit is placed once, at its first occurrence.
+            var own = f.Units.Where(u => plan.Units[u].File == i).Distinct().ToList();
             if (own.Count == 0) continue;
             string solid = f.Rules.Solid;
             string key = f.Rules.Pipeline is not null ? $"F:{f.Rules.Pipeline}|{solid}|{f.Rules.Key}"
@@ -289,13 +297,18 @@ public sealed class Planner(PlanOptions o)
                 g = new PlanGroup { Id = plan.Groups.Count, Key = key, Class = f.Class, Rep = f.Analysis, Rules = f.Rules, Forced = f.Rules.Pipeline is not null };
                 byKey[key] = g;
                 plan.Groups.Add(g);
+                members.Add([]);
             }
             if (f.Analysis is not null && (g.Rep is null || f.Src.Size > (g.Rep.Stats.SampledBytes))) g.Rep ??= f.Analysis;
-            foreach (var u in own) { g.Units.Add(u); g.Size += plan.Units[u].Length; }
+            members[g.Id].Add(new GroupMember(i, own));
+            foreach (var u in own) g.Size += plan.Units[u].Length;
             f.Group = g.Id;
         }
+        if (o.Profile.SimilarityOrder) OrderBySimilarity(plan, members, ct);
         foreach (var g in plan.Groups)
         {
+            // A file's own units stay together and in their order (chunk dedup splits a file into several).
+            foreach (var m in members[g.Id]) g.Units.AddRange(m.Units);
             g.Alignment = g.Class switch
             {
                 CompatClass.CodeArm64 => 4,
@@ -306,13 +319,71 @@ public sealed class Planner(PlanOptions o)
         }
     }
 
+    private readonly record struct GroupMember(int File, List<int> Units);
+
+    /// <summary>
+    /// Reorders the files of every group of at least <see cref="SimilarityOrder.MinFiles"/> files whose classes qualify
+    /// (<see cref="SimilarityOrder.Applies"/>) so that similar files are adjacent. The chain starts from the group's first
+    /// file in name order and breaks ties by that order, so the result depends only on the files' contents and names.
+    /// Groups forced to Store gain nothing and keep their order, as do groups with a file that cannot be read.
+    /// </summary>
+    private void OrderBySimilarity(ArchivePlan plan, List<List<GroupMember>> members, CancellationToken ct)
+    {
+        var eligible = plan.Groups.Where(g =>
+            members[g.Id].Count is >= SimilarityOrder.MinFiles and <= SimilarityOrder.MaxFiles
+            && !(g.Forced && g.Rules.Pipeline!.IsStore)
+            && members[g.Id].All(m => SimilarityOrder.Applies(plan.Files[m.File].Class))).ToList();
+        if (eligible.Count == 0) return;
+        var files = eligible.SelectMany(g => members[g.Id]).Select(m => m.File).ToArray();
+        var signatures = new ulong[files.Length];
+        var unreadable = new bool[files.Length];
+        int hashed = 0;
+        SourceChangedException? changed = null;
+        // Each signature depends only on its own file, so computing them in parallel does not change the order.
+        Parallel.For(0, files.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(o.Threads, 1, 8), CancellationToken = ct }, k =>
+        {
+            try { signatures[k] = SimilarityOrder.Signature(plan.Files[files[k]].Src); }
+            catch (SourceChangedException e) { Interlocked.CompareExchange(ref changed, e, null); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { unreadable[k] = true; }
+            o.Progress?.Invoke("Ordering", (double)Interlocked.Increment(ref hashed) / files.Length);
+        });
+        if (changed is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(changed);
+        int start = 0;
+        foreach (var g in eligible)
+        {
+            var list = members[g.Id];
+            var range = start..(start + list.Count);
+            start += list.Count;
+            int bad = Array.IndexOf(unreadable, true, range.Start.Value, list.Count);
+            if (bad >= 0)
+            {
+                g.Ordering = $"order: by extension, name and path ({plan.Files[files[bad]].Src.RelPath} could not be read)";
+                continue;
+            }
+            members[g.Id] = [.. SimilarityOrder.Chain(signatures[range]).Select(k => list[k])];
+            g.Ordering = $"order: similarity (SimHash), {list.Count:N0} files";
+        }
+    }
+
+    /// <summary>The largest block, given the profile's (or the job's) block cap: it leaves enough headroom in the memory
+    /// budget for raw, filtered and compressed copies and for verification.</summary>
+    private long BlockCap(long profileCap) =>
+        Math.Clamp(Math.Min(profileCap, Math.Max(16L << 20, o.MemoryBudget / 6)), 1L << 16, BlockLimits.MaxRawSize);
+
+    /// <summary>The largest single audio or image file kept in one block for its own filter: at least 64 MiB, so that a
+    /// profile with small blocks still gives a song or a large picture its audio or image pipeline, within the same
+    /// memory headroom as any block.</summary>
+    private long MediaBlockCap(long profileCap) => BlockCap(Math.Max(profileCap, MediaMinBlock));
+
+    private const long MediaMinBlock = 64L << 20;
+
     private void Layout(ArchivePlan plan, long profileCap)
     {
-        // Keep enough headroom for raw + filtered + compressed copies and verification.
-        long memCap = Math.Max(16L << 20, o.MemoryBudget / 6);
-        long cap = Math.Clamp(Math.Min(profileCap, memCap), 1L << 16, BlockLimits.MaxRawSize);
+        long blockCap = BlockCap(profileCap), mediaCap = MediaBlockCap(profileCap);
         foreach (var g in plan.Groups)
         {
+            // Audio and image files are their own groups, each in one block (see the reclassification above).
+            long cap = g.Class is CompatClass.Audio or CompatClass.Image && g.Key.StartsWith("own:", StringComparison.Ordinal) ? mediaCap : blockCap;
             PlanBlock? cur = null;
             foreach (int u in g.Units)
             {
@@ -359,6 +430,7 @@ public sealed class Planner(PlanOptions o)
         long biggestBlock = plan.Blocks.Where(b => b.Group == g.Id).Select(b => b.RawSize).DefaultIfEmpty(0).Max();
         g.Explain.Add($"group {g.Id}: {g.Class}, {g.Units.Count} unit(s), {g.Size:N0} bytes{(g.Rep is null ? "" : ", e.g. " + g.Rep.Format)}");
         foreach (var pr in g.Rules.Provenance.Distinct()) g.Explain.Add("  rule: " + pr);
+        if (g.Ordering is not null) g.Explain.Add("  " + g.Ordering);
 
         if (g.Forced)
         {
@@ -380,29 +452,44 @@ public sealed class Planner(PlanOptions o)
         }
 
         var alive = allowed.Take(p.MaxCandidates).ToList();
-        var scores = new Dictionary<PipelineSpec, double>();
+        // The candidates of the last rung that produced results, best first, with their objective on its sample; and,
+        // when the search is screened, the earlier rungs it could still screen on, with the scores of the candidates
+        // that took part in the rung after them.
+        var ranked = new List<(PipelineSpec Spec, double Score)>();
         byte[] sample = [];
+        var earlier = new List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)>();
         foreach (long rung in p.FullDataTrials ? [Math.Min(g.Size, BlockLimits.MaxRawSize)] : p.Rungs)
         {
-            sample = BuildSample(plan, g, rung);
-            var sizes = await trials.RunAsync(alive, sample, ct);
-            var ranked = alive.Select((s, i) => (s, size: sizes[i])).Where(t => t.size >= 0)
-                .OrderBy(t => Objective(t.s, t.size, sample.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
-            g.Explain.Add($"  rung {sample.Length:N0} B: " + string.Join(", ", ranked.Select(t => $"{t.s} = {t.size:N0}")));
-            if (ranked.Count == 0) break;
-            foreach (var (s, size) in ranked) scores[s] = Objective(s, size, sample.Length);
+            var next = BuildSample(plan, g, rung);
+            var sizes = await trials.RunAsync(alive, next, ct);
+            var results = alive.Select((s, i) => (s, size: sizes[i])).Where(t => t.size >= 0)
+                .OrderBy(t => Objective(t.s, t.size, next.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
+            g.Explain.Add($"  rung {next.Length:N0} B: " + string.Join(", ", results.Select(t => $"{t.s} = {t.size:N0}")));
+            if (results.Count == 0) break;
+            if (p.ScreenSearch && p.SearchEvals > 0 && ranked.Count > 0)
+            {
+                var tried = alive.ToHashSet();
+                earlier.Add((sample, ranked.Where(t => tried.Contains(t.Spec)).ToDictionary(t => t.Spec, t => t.Score)));
+            }
+            sample = next;
+            // A kept sample at most half the current one also qualifies for any later, larger last sample, so the
+            // smaller ones before it can no longer be chosen.
+            int usable = earlier.FindLastIndex(e => 2L * e.Sample.Length <= sample.Length);
+            if (usable > 0) earlier.RemoveRange(0, usable);
+            ranked = [.. results.Select(t => (t.s, Objective(t.s, t.size, next.Length)))];
             int keep = Math.Max(2, (int)Math.Ceiling(ranked.Count / (double)p.Eta));
-            alive = ranked.Take(keep).Select(t => t.s).ToList();
+            alive = ranked.Take(keep).Select(t => t.Spec).ToList();
             if (sample.Length >= g.Size) break;
         }
-        if (alive.Count == 0)
+        if (ranked.Count == 0)
         {
             g.Spec = allowed[0];
             g.Explain.Add($"  all trials failed; using {g.Spec}");
             return;
         }
+        var scores = ranked.ToDictionary(t => t.Spec, t => t.Score);
 
-        var best = alive[0];
+        var best = p.PreferFasterDecoder ? FasterOnANearTie(g, ranked) : ranked[0].Spec;
         // Incompressible data: anything but Store must win by at least 1 %.
         if (g.Class == CompatClass.Incompressible && best.Codec.Method.Id != MethodIds.Store)
         {
@@ -410,8 +497,10 @@ public sealed class Planner(PlanOptions o)
             if (store is not null && scores[best] > scores[store] * 0.99) best = store;
         }
 
-        if (p.SearchEvals > 0 && !best.IsStore)
-            best = await HillClimbAsync(g, best, scores[best], sample, biggestBlock, trials, ct);
+        bool search = p.SearchEvals > 0 && !best.IsStore;
+        Screen? screen = search && p.ScreenSearch ? ScreeningSample(earlier, sample.Length, best) : null;
+        earlier.Clear(); // only the screening sample, if any, lives on during the search
+        if (search) best = await HillClimbAsync(g, best, scores[best], sample, screen, biggestBlock, trials, ct);
 
         g.Spec = best;
         if (p.RaceTopTwo)
@@ -422,29 +511,102 @@ public sealed class Planner(PlanOptions o)
         g.Explain.Add($"  chose {g.Spec}{(g.Alternates.Count > 0 ? $" (race vs {g.Alternates[0]})" : "")}");
     }
 
+    /// <summary>Candidates whose objective is within this fraction of the best are a near tie.</summary>
+    private const double TieMargin = 0.001;
+
+    /// <summary>
+    /// A near tie goes to the faster decoder: of the last rung's candidates whose objective is within
+    /// <see cref="TieMargin"/> of the best, the one with the lowest estimated decode time for the whole group (then the
+    /// lower objective, then the spec text). The size cost is at most 0.1 % of the group.
+    /// </summary>
+    private static PipelineSpec FasterOnANearTie(PlanGroup g, List<(PipelineSpec Spec, double Score)> ranked)
+    {
+        var (best, bestScore) = ranked[0];
+        var (pick, pickScore) = ranked.Where(t => t.Score <= bestScore * (1 + TieMargin))
+            .OrderBy(t => t.Spec.EstimateDecodeSeconds(g.Size)).ThenBy(t => t.Score).ThenBy(t => t.Spec.ToString(), StringComparer.Ordinal)
+            .First();
+        if (!pick.Equals(best))
+            g.Explain.Add($"  tie: chose {pick} (decodes faster) over {best} ({(bestScore > 0 ? 100 * (pickScore - bestScore) / bestScore : 0):0.00} % smaller)");
+        return pick;
+    }
+
+    /// <summary>A screened neighbour reaches the full sample only if it is within this fraction of the incumbent's score
+    /// on the smaller sample.</summary>
+    private const double ScreenMargin = 0.005;
+
+    /// <summary>The smaller sample a search step is screened on, and the incumbent's objective on it.</summary>
+    private readonly record struct Screen(byte[] Sample, double Score);
+
+    /// <summary>
+    /// The largest earlier rung's sample that is at most half the last one, so that screening a step with enough
+    /// neighbours costs less than compressing all of them on the last (<see cref="ScreeningPays"/> decides per step): the
+    /// previous rung when the group fills the profile's rungs (1 of 4 MiB for Ultra, 4 of 16 MiB for Insane), an earlier
+    /// one or none for a group that ends between rungs. Every candidate of the last rung took part in every earlier rung,
+    /// so its score there is known.
+    /// </summary>
+    private static Screen? ScreeningSample(List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)> earlier, int last, PipelineSpec best)
+    {
+        for (int k = earlier.Count - 1; k >= 0; k--)
+            if (2L * earlier[k].Sample.Length <= last && earlier[k].Scores.TryGetValue(best, out double score))
+                return new Screen(earlier[k].Sample, score);
+        return null;
+    }
+
+    /// <summary>
+    /// Whether screening a step of <paramref name="n"/> neighbours can cut its work: compressing all of them on the
+    /// smaller sample and up to <paramref name="keep"/> on the full one must cost less than compressing all of them on the
+    /// full sample. It cannot when there are few neighbours: with n ≤ 2, every promising neighbour is compressed twice.
+    /// </summary>
+    internal static bool ScreeningPays(int n, int keep, long small, long full) => n * small + (long)keep * full < n * full;
+
+    /// <param name="screen">When set, each step compresses its neighbours on this smaller sample first and only the best
+    /// max(2, ⌈n / η⌉) of them, and of those only the ones within <see cref="ScreenMargin"/> of the incumbent, also on
+    /// <paramref name="sample"/>, unless that cannot cut the step's work (<see cref="ScreeningPays"/>): such a step tries
+    /// its neighbours on <paramref name="sample"/> only, and if it moves, the rest of the search is not screened (the new
+    /// incumbent has no score on the smaller sample). A move needs the same gain on <paramref name="sample"/> as without
+    /// screening, and the budget still counts every neighbour generated.</param>
     /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same
     /// check the candidates passed (the sample is usually much smaller than the blocks it stands for).</param>
-    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, long biggestBlock,
-        ITrialRunner trials, CancellationToken ct)
+    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, Screen? screen,
+        long biggestBlock, ITrialRunner trials, CancellationToken ct)
     {
         int budget = o.Profile.SearchEvals;
         var tried = new HashSet<PipelineSpec> { best };
+        int screened = 0, promoted = 0, screenLength = screen?.Sample.Length ?? 0;
         while (budget > 0)
         {
             var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, biggestBlock)).Take(budget).ToList();
             if (neighbours.Count == 0) break;
             budget -= neighbours.Count;
-            var sizes = await trials.RunAsync(neighbours, sample, ct);
-            var top = neighbours.Select((s, i) => (s, score: sizes[i] < 0 ? double.MaxValue : Objective(s, sizes[i], sample.Length)))
+            var candidates = neighbours;
+            Dictionary<PipelineSpec, double>? smallScores = null;
+            int keep = Math.Max(2, (int)Math.Ceiling(neighbours.Count / (double)o.Profile.Eta));
+            if (screen is { } sc && ScreeningPays(neighbours.Count, keep, sc.Sample.Length, sample.Length))
+            {
+                var small = await trials.RunAsync(neighbours, sc.Sample, ct);
+                var promising = neighbours.Select((s, i) => (s, score: small[i] < 0 ? double.MaxValue : Objective(s, small[i], sc.Sample.Length)))
+                    .OrderBy(t => t.score).ThenBy(t => t.s.ToString(), StringComparer.Ordinal)
+                    .Take(keep).Where(t => t.score <= sc.Score * (1 + ScreenMargin)).ToList();
+                screened += neighbours.Count;
+                promoted += promising.Count;
+                if (promising.Count == 0) break; // nothing promising: as if no neighbour were better
+                smallScores = promising.ToDictionary(t => t.s, t => t.score);
+                candidates = [.. promising.Select(t => t.s)];
+            }
+            var sizes = await trials.RunAsync(candidates, sample, ct);
+            var top = candidates.Select((s, i) => (s, score: sizes[i] < 0 ? double.MaxValue : Objective(s, sizes[i], sample.Length)))
                 .OrderBy(t => t.score).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).First();
             if (top.score < bestScore * (1 - 1e-4))
             {
                 g.Explain.Add($"  search: {top.s} improves {bestScore:N0} → {top.score:N0}");
                 best = top.s;
                 bestScore = top.score;
+                screen = screen is { } moved && smallScores is not null ? moved with { Score = smallScores[best] } : null;
             }
             else break;
         }
+        if (screened > 0)
+            g.Explain.Add($"  screening: {screened} neighbour(s) on {screenLength:N0} B, {promoted} promoted to {sample.Length:N0} B");
         return best;
     }
 

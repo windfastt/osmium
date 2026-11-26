@@ -30,7 +30,7 @@ Defaults for new archives.
 | **Default profile**<br>Store → Insane: higher profiles try more algorithms and take longer. | Balanced | Store · Fast · Balanced · Max · Ultra · Insane |  |
 | **Decode-speed weight**<br>Penalise pipelines that are slow to extract (context mixing decompresses at about 0.3 MB/s). | None | None · Light · Strong |  |
 | **Deduplication**<br>Auto = profile default. Chunks finds repeats inside and across files (slower to plan). | Auto | Auto · Off · Files · Chunks |  |
-| **Solid block size**<br>0 = profile default. Larger blocks compress better but need more memory and limit parallelism. | 0 | 0 – 1,024 MiB |  |
+| **Solid block size**<br>0 = profile default (Balanced: 32 MiB). Larger blocks compress better, most of all near-identical files or versions that would otherwise land in different blocks, but need more memory and limit parallelism. | 0 | 0 – 1,024 MiB |  |
 | **Verify every block**<br>Decode each block and compare before writing it. Strongly recommended. | on |  | **caution** |
 | **Store planner log in archive**<br>Lets 'Explain' show why each pipeline was chosen (archive-relative paths only). | on |  |  |
 | **Exclude patterns**<br>One glob per line, e.g. *.tmp or node_modules/** | `Thumbs.db`, `desktop.ini`, `*.osmium-part-*`, `*.osa.partial-*` |  |  |
@@ -158,7 +158,7 @@ Each watched folder (Settings → Watch folders) has: path, include subfolders, 
 |---|---|---|---|---|---|---|---|---|
 | `store` | 0 | — | 1 | 0 | 64M | no | Off | No compression; packaging only. |
 | `fast` | 1 | — | 1 | 0 | 16M | no | Off | zstd level 3; quick to make and to open. |
-| `balanced` | 16 | — | 1 | 0 | 64M | no | Files | Smart per-type defaults (LZMA / PPMd / zstd with filters). Fast to decompress. |
+| `balanced` | 16 | — | 1 | 0 | 32M | no | Files | Smart per-type defaults (LZMA / PPMd / zstd with filters). Fast to decompress. |
 | `max` | 32 | 1M | 4 | 0 | 256M | no | Files | Trial-compresses a few candidates per group; no context mixing, so it still opens fast. |
 | `ultra` | 64 | 1M → 4M | 10 | 24 | 512M | yes (mem 22) | Files | Context mixing allowed, two sample rungs and parameter search. |
 | `insane` | 128 | 256K → 1M → 4M → 16M | 40 | 48 | 1G | yes (mem 24) | Chunks | Everything: up to 40 candidates, 4 rungs, deep search, top-2 race on full blocks, chunk dedup. Very slow; CM archives also decompress slowly. |

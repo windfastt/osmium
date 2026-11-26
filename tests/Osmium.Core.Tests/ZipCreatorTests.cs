@@ -499,6 +499,45 @@ public class ZipCreatorTests
     }
 
     [Fact]
+    public void ADeviceIsNotOpenedAsAFile()
+    {
+        // /dev/zero can seek like a file and never ends.
+        Assert.SkipUnless(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "Devices such as /dev/zero are files in a folder on Linux and macOS; Windows has none.");
+        string zero = Path.Combine(Path.GetPathRoot(Path.GetTempPath())!, "dev", "zero");
+        using (var plain = File.OpenRead(zero)) Assert.True(plain.CanSeek);
+
+        Assert.Null(ZipSources.Open(zero, "zero", out string? refusal));
+        Assert.Equal(ZipSources.NotRegular, refusal);
+    }
+
+    [Fact]
+    public async Task ADeviceSwappedInAfterTheScanIsLeftOut()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Device nodes are made with mknod here on Linux; Windows has none.");
+        using var t = new TempDir();
+        string input = P(t, "in");
+        MakeTree(input);
+        var scan = Scanner.Scan([input], ct: Ct);
+        string device = Path.Combine(input, "random.bin");
+        File.Delete(device);
+        // A character device like /dev/zero (1, 5).
+        using (var mk = Process.Start(new ProcessStartInfo("mknod", [device, "c", "1", "5"]) { UseShellExecute = false, RedirectStandardError = true })!)
+        {
+            mk.WaitForExit();
+            if (mk.ExitCode != 0) Assert.Skip("Making a device node needs administrator rights.");
+        }
+        string output = P(t, "out.zip");
+
+        var task = ZipCreator.CreateAsync(scan, new ZipOptions { OutputPath = output }, Ct);
+        Assert.Same(task, await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(30), Ct)));
+        var r = await task;
+
+        Assert.Equal(1, r.LeftOutUnreadable);
+        Assert.Equal($"{device}: it is not a regular file, so it was left out", Assert.Single(r.Warnings));
+        Assert.DoesNotContain("in/random.bin", ReadWithBcl(output).Keys);
+    }
+
+    [Fact]
     public async Task AFileChangedWhileItIsReadIsLeftOutWithoutATornCopy()
     {
         using var t = new TempDir();

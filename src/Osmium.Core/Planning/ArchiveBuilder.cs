@@ -89,7 +89,9 @@ public static class ArchiveBuilder
 
         var gate = new MemoryGate(o.MemoryBudget);
         var throttle = new SemaphoreSlim(Math.Max(1, o.Threads));
-        var results = new Dictionary<int, (CompressedBlock Block, UInt128 Hash, long DecodeMem)>();
+        // Compressed blocks waiting for their turn to be written. Each keeps its payload charged to the memory gate until it
+        // is written, so a slow block followed by many fast ones cannot pile up payloads beyond the budget.
+        var results = new Dictionary<int, (CompressedBlock Block, UInt128 Hash, long DecodeMem, MemoryGate.Lease Charge)>();
         var resultsLock = new object();
         var writeLock = new object();
         using var failCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -114,12 +116,13 @@ public static class ArchiveBuilder
             {
                 while (true)
                 {
-                    (CompressedBlock Block, UInt128 Hash, long DecodeMem) r;
+                    (CompressedBlock Block, UInt128 Hash, long DecodeMem, MemoryGate.Lease Charge) r;
                     lock (resultsLock)
                     {
                         if (!results.Remove(nextToWrite, out r)) return;
                     }
                     int frame = writer.WriteBlock(r.Block.Descriptor, r.Hash, r.Block.Payload, r.DecodeMem);
+                    r.Charge.Dispose();
                     if (frame != nextToWrite) throw new InvalidOperationException("Internal error: frame order.");
                     nextToWrite++;
                     Interlocked.Add(ref bytesOut, Osa.FrameHeaderSize + r.Block.Payload.Length);
@@ -153,6 +156,7 @@ public static class ArchiveBuilder
             var b = block;
             tasks.Add(Task.Run(async () =>
             {
+                bool queued = false; // once queued, the block's remaining charge is released when it is written
                 try
                 {
                     var ctx = new CodecContext
@@ -185,7 +189,9 @@ public static class ArchiveBuilder
                             throw new InvalidOperationException($"Verification failed for block {b.Id} ({best.Descriptor.Spec}). The archive was not written. Please report this.");
                     }
                     long decodeMem = best.Descriptor.Spec.DecodeMemory(raw.Length);
-                    lock (resultsLock) results[b.Id] = (best, rawHash, decodeMem);
+                    var charge = lease.Keep(best.Payload.Length);
+                    queued = true;
+                    lock (resultsLock) results[b.Id] = (best, rawHash, decodeMem, charge);
                     Interlocked.Add(ref bytesIn, raw.Length);
                     Interlocked.Increment(ref blocksDone);
                     DrainWrites();
@@ -198,7 +204,7 @@ public static class ArchiveBuilder
                 }
                 finally
                 {
-                    lease.Dispose();
+                    if (!queued) lease.Dispose();
                     throttle.Release();
                 }
             }, jobCt));
@@ -218,13 +224,8 @@ public static class ArchiveBuilder
         DrainWrites();
         if (nextToWrite != plan.Blocks.Count) throw new InvalidOperationException("Internal error: not all blocks were written.");
 
-        // Source change detection (size/mtime) — the archive must describe one consistent snapshot.
-        foreach (var f in plan.Files)
-        {
-            var fi = new FileInfo(f.Src.FullPath);
-            if (!fi.Exists || fi.Length != f.Src.Size || fi.LastWriteTimeUtc != f.Src.ModifiedUtc)
-                throw new SourceChangedException(f.Src.FullPath, "changed while it was being archived");
-        }
+        // The archive must describe one consistent snapshot: every file is still the one the scan saw.
+        foreach (var f in plan.Files) SourceIdentity.Verify(f.Src);
 
         // Index entries
         var placements = new Dictionary<int, List<(int Block, long BlockOffset, long UnitOffset, long Length)>>();

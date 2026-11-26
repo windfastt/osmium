@@ -291,7 +291,8 @@ public static class Sniffer
         arch = CpuArch.None; desc = "";
         if (head.Length < 0x40) return false;
         int pe = BinaryPrimitives.ReadInt32LittleEndian(head.AsSpan(0x3C));
-        if (pe <= 0 || pe + 24 > head.Length || !head.AsSpan(pe, 4).SequenceEqual("PE\0\0"u8)) return false;
+        // Compared by subtraction: the offset comes from the file and pe + 24 can overflow.
+        if (pe <= 0 || pe > head.Length - 24 || !head.AsSpan(pe, 4).SequenceEqual("PE\0\0"u8)) return false;
         ushort machine = BinaryPrimitives.ReadUInt16LittleEndian(head.AsSpan(pe + 4));
         arch = machine switch { 0x014C => CpuArch.X86, 0x8664 => CpuArch.X64, 0xAA64 => CpuArch.Arm64, _ => CpuArch.None };
         int opt = pe + 24;
@@ -350,9 +351,11 @@ public static class Sniffer
         int bpp = BinaryPrimitives.ReadUInt16LittleEndian(head.AsSpan(28));
         uint comp = BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(30));
         if (w <= 0 || hgt <= 0 || bpp is not (8 or 24 or 32) || comp is not (0 or 3)) return false;
-        int rowBytes = ((w * bpp + 31) / 32) * 4;
-        if (pixOff + (long)rowBytes * hgt > size) return false;
-        img = new ImageInfo(pixOff, w, hgt, bpp / 8, rowBytes);
+        // Width and height come from the file: compute the row size in 64 bits, and check that the rows fit by dividing,
+        // since rowBytes * height can overflow even a long.
+        long rowBytes = ((long)w * bpp + 31) / 32 * 4;
+        if (pixOff >= size || rowBytes > int.MaxValue || rowBytes > (size - pixOff) / hgt) return false;
+        img = new ImageInfo(pixOff, w, hgt, bpp / 8, (int)rowBytes);
         return true;
     }
 }

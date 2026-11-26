@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.IO;
 
 namespace Osmium.Core.Archives.Zip;
 
@@ -79,7 +80,7 @@ internal static class ZipSources
     /// <summary>Whether a folder between <paramref name="path"/> and the folder that was scanned (the first part of
     /// <paramref name="name"/>, which may be a link the user chose) is a link or another reparse point; the scan
     /// followed none.</summary>
-    private static bool FolderOnTheWayIsLink(string path, string name)
+    internal static bool FolderOnTheWayIsLink(string path, string name)
     {
         int inside = name.Count(c => c == '/') - 1;
         string? folder = Path.GetDirectoryName(path);
@@ -117,16 +118,21 @@ internal static class ZipSources
         }
         try
         {
-            var attributes = File.GetAttributes(handle);
-            if ((attributes & FileAttributes.ReparsePoint) != 0) refusal = IsLink;
-            else if ((attributes & FileAttributes.Directory) != 0) refusal = NotRegular;
+            // What the system says the open file is: a device can seek like a file and read without end.
+            if (FileStat.IsRegular(handle) is false) refusal = NotRegular;
             else
             {
-                var fs = new FileStream(handle, FileAccess.Read, 1 << 16);
-                if (fs.CanSeek) return fs;
-                fs.Dispose();
-                refusal = NotRegular;
-                return null;
+                var attributes = File.GetAttributes(handle);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) refusal = IsLink;
+                else if ((attributes & FileAttributes.Directory) != 0) refusal = NotRegular;
+                else
+                {
+                    var fs = new FileStream(handle, FileAccess.Read, 1 << 16);
+                    if (fs.CanSeek) return fs;
+                    fs.Dispose();
+                    refusal = NotRegular;
+                    return null;
+                }
             }
         }
         catch
@@ -144,12 +150,7 @@ internal static class ZipSources
     {
         if (OperatingSystem.IsMacOS()) return 0x100 | 0x4 | 0x1000000; // O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         if (!OperatingSystem.IsLinux()) return null;
-        int noFollow = RuntimeInformation.ProcessArchitecture switch
-        {
-            Architecture.Arm or Architecture.Armv6 or Architecture.Arm64 or Architecture.Ppc64le => 0x8000,
-            Architecture.X86 or Architecture.X64 or Architecture.S390x or Architecture.LoongArch64 or Architecture.RiscV64 => 0x20000,
-            _ => 0,
-        };
+        int noFollow = FileStat.LinuxNoFollow();
         return noFollow == 0 ? null : noFollow | 0x800 | 0x80000; // O_NONBLOCK | O_CLOEXEC
     }
 

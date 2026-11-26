@@ -1,6 +1,11 @@
 namespace Osmium.Core.Planning;
 
-public sealed record SourceFile(string FullPath, string RelPath, long Size, DateTime ModifiedUtc, DateTime CreatedUtc, FileAttributes Attributes);
+public sealed record SourceFile(string FullPath, string RelPath, long Size, DateTime ModifiedUtc, DateTime CreatedUtc, FileAttributes Attributes)
+{
+    /// <summary>The file's id (device and inode) when the scan could learn it without opening the file, as on Linux: a
+    /// later read checks that it opened this same file.</summary>
+    internal UInt128? FileId { get; init; }
+}
 public sealed record SourceDir(string FullPath, string RelPath, DateTime ModifiedUtc, DateTime CreatedUtc, FileAttributes Attributes);
 
 public sealed record ScanOptions
@@ -41,7 +46,7 @@ public static class Scanner
             if (File.Exists(full))
             {
                 var fi = new FileInfo(full);
-                if (Accept(fi, unique)) files.Add(ToSource(fi, unique));
+                if (Accept(fi, unique, out var id)) files.Add(ToSource(fi, unique, id));
             }
             else if (Directory.Exists(full))
             {
@@ -72,14 +77,20 @@ public static class Scanner
                     dirs.Add(new SourceDir(d.FullName, childRel, d.LastWriteTimeUtc, d.CreationTimeUtc, d.Attributes));
                     Walk(d, childRel);
                 }
-                else if (c is FileInfo f && Accept(f, childRel)) files.Add(ToSource(f, childRel));
+                else if (c is FileInfo f && Accept(f, childRel, out var id)) files.Add(ToSource(f, childRel, id));
             }
         }
 
-        bool Accept(FileInfo f, string rel)
+        bool Accept(FileInfo f, string rel, out UInt128? id)
         {
+            id = null;
             if ((f.Attributes & FileAttributes.ReparsePoint) != 0) { skipped.Add($"{f.FullName}: symbolic link skipped"); return false; }
-            return AcceptAttrs(f.Attributes, rel, f.FullName);
+            if (!AcceptAttrs(f.Attributes, rel, f.FullName)) return false;
+            // A pipe could keep a read waiting for ever, and a device could feed it without end.
+            (string? notRegular, id) = SourceIdentity.Look(f.FullName);
+            if (notRegular is null) return true;
+            skipped.Add($"{f.FullName}: not a regular file ({notRegular}), left out");
+            return false;
         }
 
         bool AcceptAttrs(FileAttributes a, string rel, string fullName)
@@ -97,6 +108,6 @@ public static class Scanner
         }
     }
 
-    private static SourceFile ToSource(FileInfo f, string rel) =>
-        new(f.FullName, rel, f.Length, f.LastWriteTimeUtc, f.CreationTimeUtc, f.Attributes);
+    private static SourceFile ToSource(FileInfo f, string rel, UInt128? id) =>
+        new(f.FullName, rel, f.Length, f.LastWriteTimeUtc, f.CreationTimeUtc, f.Attributes) { FileId = id };
 }
