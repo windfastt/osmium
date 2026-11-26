@@ -379,6 +379,31 @@ public class SevenZipTests
     }
 
     [Fact]
+    public void AFolderCrcAloneCatchesAWrongPassword()
+    {
+        // Two files, neither with its own CRC: only the folder's CRC can refuse a wrong password.
+        using var t = new TempDir();
+        var a = "first file of the folder"u8.ToArray();
+        var b = "second file of the folder"u8.ToArray();
+        byte[] all = [.. a, .. b];
+        var props = SevenZipCraft.AesProps(10, [], SomeIv);
+        var folder = new SevenZipCraft.Folder([new(SevenZipCraft.AesId, props)], [SevenZipCraft.Encrypt("right", props, all)], [all.Length],
+            [(a.Length, null), (b.Length, null)], UnpackCrc: System.IO.Hashing.Crc32.HashToUInt32(all));
+        string path = ForeignData.Write(t, "folder-crc.7z", SevenZipCraft.Build([folder]));
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" }))
+        {
+            Assert.Throws<WrongPasswordException>(() => s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct));
+            Assert.False(Directory.Exists(t.Sub("out")));
+        }
+        using (var s = Open(path, new ArchiveOpenOptions { Password = () => "right" }))
+        {
+            var r = s.Extract(t.Sub("right"), new ArchiveExtractRequest(), null, Ct);
+            Assert.Equal(2, r.FilesOk);
+            Assert.Equal(b, File.ReadAllBytes(Path.Combine(t.Sub("right"), "f1.bin")));
+        }
+    }
+
+    [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {
         // Six folders, each with its own salt: within a budget of four keys, four are read and two are refused before
