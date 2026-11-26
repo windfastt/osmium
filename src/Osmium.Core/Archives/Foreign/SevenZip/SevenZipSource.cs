@@ -69,6 +69,7 @@ internal sealed class SevenZipSource : ForeignSource
         using var file = new FileSlice(_handle, 0, FileLength, 4096);
         // One guard for every level of packed headers, against the file's size and the limits the caller gave.
         var guard = new LimitGuard(Options.Limits, FileLength, ct);
+        bool headerProof = true;
         try
         {
             _db = SevenZipHeader.Read(file, Options.Limits, ct, DecodeHeader);
@@ -80,7 +81,8 @@ internal sealed class SevenZipSource : ForeignSource
         }
         catch (Exception e) when (ForeignErrors.IsDecoderFailure(e)) { throw ForeignErrors.Damaged(Name, e); }
         catch (OutOfMemoryException) { throw SevenZipHeader.TooLarge(); } // a last resort: the limits above come first
-        if (_encryptedHeaders) PasswordProven = true;
+        // The file list decoded and matched its CRC: that proves the password, when every AES coder decrypted on the way.
+        if (_encryptedHeaders && headerProof) PasswordProven = true;
         if (DropChecksumsForTests is { } drop)
         {
             foreach (var f in _db.Files) if (f.Folder >= 0 && drop(f.Folder)) f.Crc = null;
@@ -93,9 +95,11 @@ internal sealed class SevenZipSource : ForeignSource
         byte[] DecodeHeader(SzDatabase packed, SzFolder folder, long size)
         {
             if (folder.IsEncrypted) _encryptedHeaders = true;
-            using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null), guard);
+            var aes = new List<SevenZipAesStream>();
+            using var s = new CountingStream(SevenZipDecoder.Open(_handle, packed, folder, Options.Limits, Name, folder.IsEncrypted ? Key : null, null, aes), guard);
             var bytes = new byte[size];
             s.ReadExactly(bytes);
+            if (folder.IsEncrypted) headerProof &= folder.UnpackCrc is not null && size > 0 && aes.Count > 0 && aes.All(a => a.Delivered > 0);
             return bytes;
         }
     }
@@ -176,14 +180,26 @@ internal sealed class SevenZipSource : ForeignSource
         return map;
     }
 
-    /// <summary>Whether a folder can show that the password is right: one of its files, or the folder, has a CRC.</summary>
-    private bool Checkable(int folder, Dictionary<int, List<int>> byFolder) =>
-        _db.Folders[folder].UnpackCrc is not null || byFolder[folder].Any(i => _db.Files[i].Crc is not null);
+    /// <summary>The file whose CRC can prove the password in a folder: the first with a stored CRC and at least one
+    /// byte (an empty file is the same under every password); -1 when only the folder's own CRC can, over at least one
+    /// byte; null when nothing in the folder can.</summary>
+    private int? ProofFile(int folder, Dictionary<int, List<int>> byFolder)
+    {
+        int first = byFolder[folder].FirstOrDefault(i => _db.Files[i].Crc is not null && _db.Files[i].Size > 0, -1);
+        if (first >= 0) return first;
+        var f = _db.Folders[folder];
+        return f.UnpackCrc is not null && f.UnpackSize > 0 ? -1 : null;
+    }
+
+    /// <summary>Whether a folder can show that the password is right.</summary>
+    private bool Checkable(int folder, Dictionary<int, List<int>> byFolder) => ProofFile(folder, byFolder) is not null;
 
     /// <summary>
     /// Rule 1 for 7z, which has no password verifier: the first selected encrypted folder that has a stored CRC is
-    /// decoded from its start into a discarding sink until the end of its first file with a CRC (the whole folder
-    /// when only the folder has one), and compared. A data error or a mismatch is a wrong password or damage, which
+    /// decoded from its start into a discarding sink until the end of its first file with a CRC and data (the whole
+    /// folder when only the folder has one), and compared. It proves the password only when every AES coder of the
+    /// folder decrypted data on the way (a coder whose output nothing reads proves nothing; the folder's structure
+    /// already puts every coder on the way to its result). A data error or a mismatch is a wrong password or damage, which
     /// 7z cannot tell apart: the next such folder is tried, and when one proves the password the failed one is
     /// reported as damaged when it is read; when every one fails, the password is wrong. When no selected encrypted
     /// folder has any CRC, nothing can prove the password; those entries are then refused.
@@ -194,15 +210,15 @@ internal sealed class SevenZipSource : ForeignSource
         bool failed = false;
         foreach (int folder in encrypted.Select(e => _db.Files[e.Index].Folder).Distinct())
         {
-            if (!Checkable(folder, byFolder)) continue;
+            if (ProofFile(folder, byFolder) is not { } stopAfter) continue;
             var f = _db.Folders[folder];
             if (!KeysWithinBudget(f)) continue;
-            int stopAfter = byFolder[folder].FirstOrDefault(i => _db.Files[i].Crc is not null, -1);
             long total = stopAfter < 0 ? f.UnpackSize : byFolder[folder].TakeWhile(i => i != stopAfter).Sum(i => _db.Files[i].Size) + _db.Files[stopAfter].Size;
+            var aes = new List<SevenZipAesStream>();
             try
             {
                 _ct = op.Token;
-                using var s = new CountingStream(SevenZipDecoder.Open(_handle, _db, f, op.Guard.Limits, Name, Key, op.Read), op.Guard);
+                using var s = new CountingStream(SevenZipDecoder.Open(_handle, _db, f, op.Guard.Limits, Name, Key, op.Read, aes), op.Guard);
                 var buf = new byte[1 << 16];
                 if (stopAfter < 0)
                 {
@@ -210,19 +226,21 @@ internal sealed class SevenZipSource : ForeignSource
                     long done = 0;
                     int n;
                     while ((n = s.Read(buf, 0, buf.Length)) > 0) { crc.Append(buf.AsSpan(0, n)); done += n; op.Progress.Checking(done, total); }
-                    if (crc.GetCurrentHashAsUInt32() == f.UnpackCrc) return true;
-                    failed = true;
-                    continue;
+                    if (crc.GetCurrentHashAsUInt32() != f.UnpackCrc) { failed = true; continue; }
                 }
-                long skipped = 0;
-                foreach (int i in byFolder[folder])
+                else
                 {
-                    var file = _db.Files[i];
-                    using var part = new VerifyingStream(new ExactStream(new NonClosing(s), file.Size, "a file"), file.Size, i == stopAfter ? file.Crc : null, "the file");
-                    int n;
-                    while ((n = part.Read(buf, 0, buf.Length)) > 0) { skipped += n; op.Progress.Checking(skipped, total); }
-                    if (i == stopAfter) return true;
+                    long skipped = 0;
+                    foreach (int i in byFolder[folder])
+                    {
+                        var file = _db.Files[i];
+                        using var part = new VerifyingStream(new ExactStream(new NonClosing(s), file.Size, "a file"), file.Size, i == stopAfter ? file.Crc : null, "the file");
+                        int n;
+                        while ((n = part.Read(buf, 0, buf.Length)) > 0) { skipped += n; op.Progress.Checking(skipped, total); }
+                        if (i == stopAfter) break;
+                    }
                 }
+                if (aes.Count > 0 && aes.All(a => a.Delivered > 0)) return true;
             }
             catch (Exception ex) when (ForeignErrors.IsDecoderFailure(ex)) { failed = true; }
             finally { _ct = default; }

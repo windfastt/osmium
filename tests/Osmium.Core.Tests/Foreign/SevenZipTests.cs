@@ -226,6 +226,61 @@ public class SevenZipTests
         }
     }
 
+    private static readonly byte[] SomeIv = [.. Enumerable.Range(1, 16).Select(i => (byte)i)];
+
+    [Fact]
+    public void AFolderWithACoderOffTheWayToItsResultIsDamaged()
+    {
+        // Copy, AES and Copy: the AES coder reads its own output, so nothing it would decrypt reaches the result, and
+        // a CRC over that result would "prove" any password.
+        using var t = new TempDir();
+        var plain = "plain bytes with a checksum"u8.ToArray();
+        var folder = new SevenZipCraft.Folder(
+            [new(SevenZipCraft.CopyId), new(SevenZipCraft.AesId, SevenZipCraft.AesProps(10, [], SomeIv)), new(SevenZipCraft.CopyId)],
+            [plain], [plain.Length, plain.Length, plain.Length], [SevenZipCraft.Checked(plain)], Binds: [(1, 1), (2, 0)]);
+        string path = ForeignData.Write(t, "loop.7z", SevenZipCraft.Build([folder]));
+        var e = Assert.ThrowsAny<CorruptDataException>(() => Open(path, new ArchiveOpenOptions { Password = () => "wrong" }));
+        Assert.Contains("a folder whose coders are not all connected to its result", e.Message);
+    }
+
+    [Fact]
+    public void AnEmptyFileWithAChecksumProvesNoPassword()
+    {
+        // The empty file's CRC matches under every password, so it cannot vouch for the file after it.
+        using var t = new TempDir();
+        var secret = "data that only the right password decrypts"u8.ToArray();
+        var props = SevenZipCraft.AesProps(10, [], SomeIv);
+        var folder = new SevenZipCraft.Folder([new(SevenZipCraft.AesId, props)], [SevenZipCraft.Encrypt("right", props, secret)], [secret.Length],
+            [(0, 0u), (secret.Length, null)]);
+        string path = ForeignData.Write(t, "empty-first.7z", SevenZipCraft.Build([folder]));
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal(0, r.FilesOk);
+        Assert.Contains(r.Errors, e => e.Contains("encrypted without a stored checksum, so Osmium cannot check the password", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f1.bin")));
+    }
+
+    [Fact]
+    public void AnAesCoderWhoseOutputNothingReadsProvesNoPassword()
+    {
+        // BCJ2 reads its call stream only after a branch opcode; plain text has none, so the AES coder feeding that
+        // stream decrypts nothing and the text's CRC matches under every password. It must not open the second folder,
+        // which has no checksum, to a wrong password.
+        using var t = new TempDir();
+        var text = "plain text without branch opcodes"u8.ToArray();
+        var decoy = new SevenZipCraft.Folder(
+            [new([0x03, 0x03, 0x01, 0x1B], null, NumIn: 4), new(SevenZipCraft.AesId, SevenZipCraft.AesProps(10, [], SomeIv))],
+            [text, [], new byte[5], []], [text.Length, 0], [SevenZipCraft.Checked(text)], Binds: [(1, 1)], PackedIn: [0, 2, 3, 4]);
+        var secret = "data that only the right password decrypts"u8.ToArray();
+        var real = SevenZipCraft.Encrypted("right", SevenZipCraft.AesProps(10, [], SomeIv), secret) with { Files = [(secret.Length, null)] };
+        string path = ForeignData.Write(t, "decoy.7z", SevenZipCraft.Build([decoy, real]));
+        using var s = Open(path, new ArchiveOpenOptions { Password = () => "wrong" });
+        var r = s.Extract(t.Sub("out"), new ArchiveExtractRequest(), null, Ct);
+        Assert.Equal((1, 1, 0), (r.FilesOk, r.SkippedUnsupported, r.Unverified));
+        Assert.Equal("plain text without branch opcodes", File.ReadAllText(Path.Combine(t.Sub("out"), "f0.bin")));
+        Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f1.bin")));
+    }
+
     [Fact]
     public void KeyDerivationForOneArchiveIsBounded()
     {

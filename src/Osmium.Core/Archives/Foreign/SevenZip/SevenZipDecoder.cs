@@ -68,9 +68,10 @@ internal static class SevenZipDecoder
     }
 
     /// <summary>Opens the folder's result stream. <paramref name="key"/> derives the AES key from the coder's
-    /// properties (asking for the password the first time).</summary>
+    /// properties (asking for the password the first time); <paramref name="aes"/>, when given, receives the folder's
+    /// decrypting streams.</summary>
     public static Stream Open(SafeFileHandle handle, SzDatabase db, SzFolder f, ImportLimits limits, string name,
-        Func<byte[], byte[]>? key, Action<long>? onRead)
+        Func<byte[], byte[]>? key, Action<long>? onRead, List<SevenZipAesStream>? aes = null)
     {
         LimitGuard.CheckMemory(name, Memory(f), limits);
         var packed = new Stream[f.PackedStreams.Count];
@@ -113,11 +114,12 @@ internal static class SevenZipDecoder
                     inputs[k] = packed[p];
                 }
             }
-            return Coder(c, inputs, f.UnpackSizes[outIndex], limits, name, key);
+            return Coder(c, inputs, f.UnpackSizes[outIndex], limits, name, key, aes);
         }
     }
 
-    private static Stream Coder(SzCoder c, Stream[] inputs, long outSize, ImportLimits limits, string name, Func<byte[], byte[]>? key)
+    private static Stream Coder(SzCoder c, Stream[] inputs, long outSize, ImportLimits limits, string name, Func<byte[], byte[]>? key,
+        List<SevenZipAesStream>? aes)
     {
         if (c.Id != 0x0303011B && inputs.Length != 1) throw new NotSupportedException($"{name} uses a coder layout Osmium cannot read.");
         // Decoders get their input through a guard that stops them reading on and on past its end.
@@ -164,8 +166,12 @@ internal static class SevenZipDecoder
                 if (inputs.Length != 4) throw SevenZipHeader.Corrupt("BCJ2 layout");
                 return Exact(new Bcj2DecoderStream(inputs[0], inputs[1], inputs[2], inputs[3], outSize));
             case SevenZipHeader.AesId:
+            {
                 if (key is null) throw new PasswordRequiredException();
-                return Exact(new SevenZipAesStream(input, key(c.Props), SevenZipAes.Iv(c.Props)));
+                var decrypting = new SevenZipAesStream(input, key(c.Props), SevenZipAes.Iv(c.Props));
+                aes?.Add(decrypting);
+                return Exact(decrypting);
+            }
             default:
                 throw new NotSupportedException($"{Osmium.Core.Text.DisplayText.Escape(name)} uses a compression method Osmium cannot read ({MethodName(c)}).");
         }
@@ -248,6 +254,9 @@ internal sealed class SevenZipAesStream : ReadOnlyStream
     private int _start, _end;
     private bool _eof;
 
+    /// <summary>The decrypted bytes read from this stream so far.</summary>
+    public long Delivered { get; private set; }
+
     public SevenZipAesStream(Stream inner, byte[] key, byte[] iv)
     {
         _inner = inner;
@@ -278,6 +287,7 @@ internal sealed class SevenZipAesStream : ReadOnlyStream
         int k = Math.Min(buffer.Length, _end - _start);
         _out.AsSpan(_start, k).CopyTo(buffer);
         _start += k;
+        Delivered += k;
         return k;
     }
 

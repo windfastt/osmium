@@ -308,7 +308,57 @@ internal static class SevenZipHeader
                 if (s >= totalIn) throw Corrupt("damaged header");
                 f.PackedStreams.Add(s);
             }
+        CheckStructure(f);
         return f;
+    }
+
+    /// <summary>
+    /// The rule 7-Zip's format sets for a folder: every coder input is fed exactly once, by a bind pair or a packed
+    /// stream; every coder output but the result is read by exactly one bind pair; and every coder is reached from the
+    /// result without a loop. A coder off that way (an AES coder that never decrypts anything) makes the folder damaged.
+    /// </summary>
+    private static void CheckStructure(SzFolder f)
+    {
+        int totalIn = f.TotalIn, totalOut = f.TotalOut;
+        var fed = new bool[totalIn];
+        var read = new bool[totalOut];
+        foreach (var (input, output) in f.BindPairs)
+        {
+            if (fed[input] || read[output]) throw NotConnected();
+            fed[input] = read[output] = true;
+        }
+        foreach (int input in f.PackedStreams)
+        {
+            if (fed[input]) throw NotConnected();
+            fed[input] = true;
+        }
+        if (Array.IndexOf(fed, false) >= 0) throw NotConnected();
+        var coderOfOut = new int[totalOut];
+        var firstIn = new int[f.Coders.Count];
+        for (int c = 0, o = 0, i = 0; c < f.Coders.Count; c++)
+        {
+            firstIn[c] = i;
+            i += f.Coders[c].NumIn;
+            for (int k = 0; k < f.Coders[c].NumOut; k++) coderOfOut[o++] = c;
+        }
+        var state = new byte[f.Coders.Count]; // 0 not reached, 1 being walked, 2 done
+        Walk(coderOfOut[f.MainOut()]);
+        if (Array.IndexOf(state, (byte)0) >= 0) throw NotConnected();
+
+        void Walk(int coder)
+        {
+            if (state[coder] == 1) throw NotConnected();
+            if (state[coder] == 2) return;
+            state[coder] = 1;
+            for (int k = 0; k < f.Coders[coder].NumIn; k++)
+            {
+                int bound = f.BindPairs.FindIndex(b => b.In == firstIn[coder] + k);
+                if (bound >= 0) Walk(coderOfOut[f.BindPairs[bound].Out]);
+            }
+            state[coder] = 2;
+        }
+
+        static CorruptDataException NotConnected() => Corrupt("a folder whose coders are not all connected to its result");
     }
 
     private static void ReadSubStreams(Reader r, SzDatabase db, Parse p)
