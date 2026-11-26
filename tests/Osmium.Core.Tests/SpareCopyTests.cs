@@ -460,6 +460,220 @@ public class SpareCopyTests
         Assert.Empty(unnoticed);
     }
 
+    // ------------------------------------------------------------------ the reader: falling back to the spare copies
+
+    private static void Flip(byte[] b, long at, byte mask = 0x5A) => b[at] ^= mask;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADamagedFileListOpensThroughItsSpareCopy(bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(pw));
+        var tail = SpareArchives.TailOf(path, pw);
+        for (int k = 0; k < 64; k++)
+        {
+            long at = tail.IndexOffset + k * tail.IndexLength / 64;
+            string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => Flip(b, at));
+            var (open, test, spares) = Check(bad, files, pw);
+            Assert.True(spares);
+            Assert.Equal([OsaReader.UsedSpareIndex], open);
+            Assert.Equal([OsaReader.UsedSpareIndex], test); // Test says so too, so that osmium t never just says OK
+        }
+    }
+
+    [Fact]
+    public void WithItsTrailerDamagedTooTheSpareFileListIsFoundByItsFrameHeader()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Flip(b, tail.IndexOffset + tail.IndexLength / 2);
+            Flip(b, tail.TrailerOffset + 1);
+        });
+        var (open, _, spares) = Check(bad, files);
+        Assert.False(spares);
+        Assert.Equal([OsaReader.UsedSpareIndex], open);
+    }
+
+    [Theory]
+    [InlineData("magic", false)]
+    [InlineData("major", false)]
+    [InlineData("crc", false)]
+    [InlineData("magic", true)]
+    [InlineData("major", true)]
+    [InlineData("crc", true)]
+    [InlineData("zeroed", true)]
+    public void ADamagedHeaderOpensThroughItsSpareCopy(string what, bool encrypted)
+    {
+        using var t = new TempDir();
+        string? pw = encrypted ? SpareArchives.Password : null;
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(pw));
+        var tail = SpareArchives.TailOf(path, pw);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            switch (what)
+            {
+                case "magic": Flip(b, 2); break;
+                case "major": b[8] = 2; break;
+                case "crc": Flip(b, tail.HeaderLength - 1); break;
+                default: Array.Clear(b, 0, (int)tail.HeaderLength); break;
+            }
+        });
+        var (open, test, spares) = Check(bad, files, pw);
+        Assert.True(spares);
+        Assert.Equal([OsaReader.UsedSpareHeader], open);
+        Assert.Equal([OsaReader.UsedSpareHeader], test);
+    }
+
+    [Fact]
+    public void ADamagedHeaderAndFileListBothOpenThroughTheirSpareCopies()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(SpareArchives.Password));
+        var tail = SpareArchives.TailOf(path, SpareArchives.Password);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => { Flip(b, 5); Flip(b, tail.IndexOffset + 40); });
+        var (open, _, _) = Check(bad, files, SpareArchives.Password);
+        Assert.Equal([OsaReader.UsedSpareHeader, OsaReader.UsedSpareIndex], open);
+    }
+
+    [Fact]
+    public void WhenBothCopiesOfTheFileListAreDamagedTheErrorIsTheFirstCopys()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Flip(b, tail.IndexOffset + tail.IndexLength - 3); // A's payload
+            Flip(b, tail.SpareOffset + 2);                      // B's frame marker
+        });
+        var e = Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad));
+        Assert.Equal("Block payload is corrupt (hash mismatch).", e.Message);
+    }
+
+    [Fact]
+    public void AnArchiveWithoutSpareCopiesStillFailsWithItsOwnError()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(3, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, new OsaWriterOptions { SpareThreshold = long.MaxValue });
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => Flip(b, tail.IndexOffset + tail.IndexLength - 3));
+        Assert.Equal("Block payload is corrupt (hash mismatch).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad)).Message);
+        string badHeader = SpareArchives.Damage(path, t.Sub("bad-header.osa"), b => Flip(b, 2));
+        Assert.Equal("Not an Osmium archive (bad magic).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(badHeader)).Message);
+    }
+
+    [Fact]
+    public void AWrongPasswordIsNeverTakenForDamage()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low(SpareArchives.Password));
+        var tail = SpareArchives.TailOf(path, SpareArchives.Password);
+        Assert.Throws<WrongPasswordException>(() => OsaReader.Open(path, () => "wrong"));
+        Assert.Throws<PasswordRequiredException>(() => OsaReader.Open(path));
+        // With the header damaged, its copy is used, and the password is still checked against it.
+        string badHeader = SpareArchives.Damage(path, t.Sub("bad-header.osa"), b => Flip(b, 3));
+        Assert.Throws<WrongPasswordException>(() => OsaReader.Open(badHeader, () => "wrong"));
+        // With the file list damaged, a wrong password is still a wrong password, found before the file list is read.
+        string badIndex = SpareArchives.Damage(path, t.Sub("bad-index.osa"), b => Flip(b, tail.IndexOffset + 50));
+        Assert.Throws<WrongPasswordException>(() => OsaReader.Open(badIndex, () => "wrong"));
+    }
+
+    [Fact]
+    public void AFileListOfANewerVersionIsNeverTakenForDamage()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 1500);
+        string path = SpareArchives.Craft(t.Sub("newer.osa"), files, SpareCopies.OffsetValue, newerIndex: true);
+        var e = Assert.ThrowsAny<NewerVersionException>(() => OsaReader.Open(path));
+        Assert.Equal("This archive needs a newer version of Osmium: the index uses method id 63.", e.Message);
+    }
+
+    [Fact]
+    public void AHeaderOfANewerVersionIsNeverTakenForDamage()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        // A critical flag this version does not know, in an intact header: the spare copy (without it) must not be used.
+        string newer = SpareArchives.Damage(path, t.Sub("newer.osa"), b =>
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(12), BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(12)) | 2);
+            int crcAt = (int)tail.HeaderLength - 4;
+            BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(crcAt), Osa.Crc(b.AsSpan(0, crcAt)));
+        });
+        Assert.ThrowsAny<NewerVersionException>(() => OsaReader.Open(newer));
+    }
+
+    [Fact]
+    public void TheHeaderCopyMustBelongToTheArchiveTheFooterNames()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var tail = SpareArchives.TailOf(path);
+        string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b =>
+        {
+            Flip(b, 2); // the header is damaged …
+            long h = tail.HeaderCopyOffset;
+            Flip(b, h + 17); // … and its copy names another archive (with a CRC that checks out)
+            int crcAt = (int)(h + tail.HeaderLength - 4);
+            BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(crcAt), Osa.Crc(b.AsSpan((int)h, (int)tail.HeaderLength - 4)));
+        });
+        Assert.Equal("Not an Osmium archive (bad magic).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad)).Message);
+    }
+
+    [Fact]
+    public void DataBeforeOrAfterAnArchiveIsNotMistakenForDamageTheSpareCopiesRepair()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        var bytes = File.ReadAllBytes(path);
+        File.WriteAllBytes(t.Sub("prefixed.osa"), [.. new byte[1000], .. bytes]);
+        Assert.Equal("Not an Osmium archive (bad magic).", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(t.Sub("prefixed.osa"))).Message);
+        File.WriteAllBytes(t.Sub("followed.osa"), [.. bytes, .. "trailing data"u8]);
+        Assert.Equal(OsaReader.EndDamaged, Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(t.Sub("followed.osa"))).Message);
+    }
+
+    [Fact]
+    public void ADamagedFooterPointsToRecovery()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        long length = new FileInfo(path).Length;
+        foreach (long at in new[] { length - 32, length - 20, length - 6, length - 1 })
+        {
+            string bad = SpareArchives.Damage(path, t.Sub("bad.osa"), b => Flip(b, at));
+            Assert.Equal(OsaReader.EndDamaged, Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(bad)).Message);
+        }
+    }
+
+    [Fact]
+    public void AnOpenArchiveCanBeRenamedAndStillBeRead()
+    {
+        using var t = new TempDir();
+        var files = SpareArchives.Files(2, 2500);
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, Low());
+        using var r = OsaReader.Open(path);
+        File.Move(path, t.Sub("renamed.osa")); // as Explorer would while the Archives page shows the archive
+        Assert.Equal(files.Count, Extractor.Test(r, null, Ct).FilesOk);
+    }
+
     [Fact]
     public void ArchivesWrittenAsByOsmium01HaveMinor0()
     {

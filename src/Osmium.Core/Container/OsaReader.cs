@@ -31,37 +31,64 @@ public sealed class OsaReader : IDisposable
 
     internal const string SpareDamaged = "The spare copy of the file list is damaged; the archive is complete. Copy it to a healthy disk.";
     internal const string SpareHeaderDamaged = "The spare copy of the header is damaged; the archive is complete. Copy it to a healthy disk.";
+    internal const string UsedSpareIndex = "The file list of this archive was damaged; Osmium used its spare copy. Every file can be checked with Test.";
+    internal const string UsedSpareHeader = "The header of this archive was damaged; Osmium used its spare copy.";
+    internal const string EndDamaged = "The end of this archive is damaged. Try Recover files in the app or osmium salvage.";
+
+    /// <summary>How far before the index frame the spare copy of it may start: its own length, plus the header copy
+    /// (at most the longest header and the padding), plus a margin.</summary>
+    private const long SpareSearchMargin = (1 << 20) + (8 << 10);
+
+    private readonly bool _usedSpareIndex, _usedSpareHeader;
 
     /// <summary>Where the spare copies are: B (the copy of the index frame), followed by H, whose trailer this is.</summary>
     private sealed record Spares(long IndexCopyOffset, long HeaderCopyOffset, SpareTrailer Trailer);
 
     private OsaReader(string path, SafeFileHandle handle, ArchiveHeader header, ArchiveKey? key, ArchiveIndex index, long length,
-        MethodRegistry reg, ArchiveFooter footer, Spares? spares, List<string> warnings)
+        MethodRegistry reg, ArchiveFooter footer, Spares? spares, List<string> warnings, bool usedSpareHeader, bool usedSpareIndex)
     {
         Path = path; _handle = handle; Header = header; _key = key; Index = index; FileLength = length; _registry = reg;
-        _footer = footer; _spares = spares; _warnings = warnings;
+        _footer = footer; _spares = spares; _warnings = warnings; _usedSpareHeader = usedSpareHeader; _usedSpareIndex = usedSpareIndex;
     }
 
+    /// <summary>
+    /// Opens an archive. When the index frame or the header is damaged and the archive has spare copies of them
+    /// (container 1.1, FORMAT §4.1), the copy is used and <see cref="Warnings"/> says so; when the copy fails too, the
+    /// error is the original one. A wrong password and a feature of a newer version are never taken for damage.
+    /// </summary>
     /// <param name="password">Called only when the archive is encrypted; return null to cancel.</param>
     public static OsaReader Open(string path, Func<string?>? password = null, MethodRegistry? registry = null)
     {
         registry ??= MethodRegistry.Default;
-        var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
+        // FileShare.Delete: Explorer can still rename or delete an archive that is open; reads go on through the handle.
+        var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess);
         try
         {
-            ArchiveHeader header;
-            ArchiveFooter footer;
-            long length;
-            // A separate stream for header/footer: disposing a FileStream built on 'handle' would close it.
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096))
+            long length = RandomAccess.GetLength(handle);
+            if (length < Osa.FooterSize + 36) throw new CorruptDataException("File is too small to be an Osmium archive.");
+            var warnings = new List<string>();
+            ArchiveHeader? header = null;
+            Exception? headerError = null;
+            try { header = ReadHeader(handle, 0, length); }
+            catch (Exception e) when (IsDamage(e)) { headerError = e; }
+            var footer = ReadFooter(handle, length);
+            if (footer is null)
             {
-                header = ArchiveHeader.Read(fs);
-                footer = ArchiveFooter.Read(fs);
-                length = fs.Length;
+                if (headerError is not null) Rethrow(headerError);
+                throw new CorruptDataException(EndDamaged);
             }
-            if (footer.IdPrefix != BinaryPrimitives.ReadUInt64LittleEndian(header.ArchiveId))
+            var ft = footer.Value;
+            bool usedSpareHeader = false;
+            if (header is null)
+            {
+                header = HeaderFromCopy(handle, ft, length);
+                if (header is null) Rethrow(headerError!);
+                warnings.Add(UsedSpareHeader);
+                usedSpareHeader = true;
+            }
+            if (ft.IdPrefix != BinaryPrimitives.ReadUInt64LittleEndian(header!.ArchiveId))
                 throw new CorruptDataException("Footer does not belong to this archive.");
-            if (footer.IndexOffset < header.Length || footer.IndexOffset + footer.IndexLength + Osa.FooterSize != length)
+            if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
                 throw new CorruptDataException("Index location is invalid (truncated or appended file?).");
 
             ArchiveKey? key = null;
@@ -71,16 +98,128 @@ public sealed class OsaReader : IDisposable
                 key = ArchiveKey.Derive(pw, header.Encryption!.Salt, header.Encryption.Iterations);
                 if (!key.Matches(header.Encryption.Verifier)) throw new WrongPasswordException();
             }
-            var index = ReadIndex(handle, footer.IndexOffset, footer.IndexLength, footer.IndexOffset, header, key, registry);
-            var warnings = new List<string>();
-            var spares = FindSpares(handle, index, footer, header, out bool damaged);
-            if (damaged) warnings.Add(SpareDamaged);
-            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, footer, spares, warnings);
+            ArchiveIndex index;
+            bool usedSpareIndex = false;
+            try
+            {
+                index = ReadIndex(handle, ft.IndexOffset, ft.IndexLength, ft.IndexOffset, header, key, registry);
+            }
+            catch (Exception e) when (IsDamage(e))
+            {
+                index = IndexFromCopy(handle, ft, header, key, registry) ?? Rethrow<ArchiveIndex>(e);
+                warnings.Add(UsedSpareIndex);
+                usedSpareIndex = true;
+            }
+            var spares = FindSpares(handle, index, ft, header, out bool damaged);
+            if (damaged && !usedSpareIndex) warnings.Add(SpareDamaged);
+            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
+                usedSpareHeader, usedSpareIndex);
         }
         catch
         {
             handle.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Damage the spare copies can stand in for: never a wrong password, a missing one, or a feature of a newer
+    /// version (a <see cref="NewerVersionException"/> is a <see cref="CorruptDataException"/>, so it is excluded by name).</summary>
+    private static bool IsDamage(Exception e) =>
+        e is InvalidDataException or EndOfStreamException || (e is CorruptDataException && e is not NewerVersionException);
+
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void Rethrow(Exception e) => System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e);
+
+    private static T Rethrow<T>(Exception e)
+    {
+        Rethrow(e);
+        return default!;
+    }
+
+    /// <summary>The header at <paramref name="offset"/>: 36 fixed bytes, the extensions, the CRC (FORMAT §1).</summary>
+    private static ArchiveHeader ReadHeader(SafeFileHandle handle, long offset, long length)
+    {
+        var fixedPart = new byte[36];
+        if (offset + 36 > length || !TryRead(handle, offset, fixedPart)) throw new CorruptDataException("Unexpected end of archive.");
+        long extLen = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(32));
+        // Checked by ArchiveHeader.Read as well; here so that a damaged length never sizes a buffer.
+        if (extLen > 1 << 20 || offset + 40 + extLen > length) return ArchiveHeader.Read(new MemoryStream(fixedPart));
+        var all = new byte[40 + extLen];
+        if (!TryRead(handle, offset, all)) throw new CorruptDataException("Unexpected end of archive.");
+        return ArchiveHeader.Read(new MemoryStream(all, writable: false));
+    }
+
+    /// <summary>The footer at the end of the file, when its marker and CRC check out.</summary>
+    private static ArchiveFooter? ReadFooter(SafeFileHandle handle, long length)
+    {
+        var b = new byte[Osa.FooterSize];
+        if (!TryRead(handle, length - Osa.FooterSize, b)) return null;
+        if (!b.AsSpan(28, 4).SequenceEqual(Osa.FooterMagic) || Osa.Crc(b.AsSpan(0, 24)) != BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(24)))
+            return null;
+        return new ArchiveFooter(BinaryPrimitives.ReadInt64LittleEndian(b), BinaryPrimitives.ReadInt64LittleEndian(b.AsSpan(8)),
+            BinaryPrimitives.ReadUInt64LittleEndian(b.AsSpan(16)));
+    }
+
+    /// <summary>
+    /// The header copy H, used when the header at offset 0 fails: the footer is intact and places the index frame at
+    /// the end of the file, H's trailer just before it checks out, the header it holds checks out as a header, and the
+    /// archive id is the footer's. Null otherwise. A header copy of a newer version throws, as the header would.
+    /// </summary>
+    private static ArchiveHeader? HeaderFromCopy(SafeFileHandle handle, ArchiveFooter footer, long length)
+    {
+        if (footer.IndexOffset <= 0 || footer.IndexLength <= 0 || footer.IndexOffset + footer.IndexLength + Osa.FooterSize != length) return null;
+        if (ReadTrailer(handle, footer.IndexOffset) is not { Newer: false } t) return null;
+        long at = footer.IndexOffset - t.CopyLength;
+        if (at < 0) return null;
+        ArchiveHeader h;
+        try { h = ReadHeader(handle, at, at + t.HeaderLength); }
+        catch (Exception e) when (IsDamage(e)) { return null; }
+        if (h.Length != t.HeaderLength || BinaryPrimitives.ReadUInt64LittleEndian(h.ArchiveId) != footer.IdPrefix) return null;
+        return h;
+    }
+
+    /// <summary>
+    /// The index from its spare copy B, used when the index frame fails: B is where H's trailer says, or (with the
+    /// trailer damaged) found by its frame header in the bytes before the index frame. It is read with every check
+    /// of the index frame, and must name its own offset as the spare copy's. Null when no copy is usable.
+    /// </summary>
+    private static ArchiveIndex? IndexFromCopy(SafeFileHandle handle, ArchiveFooter footer, ArchiveHeader header, ArchiveKey? key, MethodRegistry registry)
+    {
+        var candidates = new List<long>();
+        if (ReadTrailer(handle, footer.IndexOffset) is { Newer: false } t && footer.IndexOffset - t.CopyLength - footer.IndexLength is var b and >= 0)
+            candidates.Add(b);
+        candidates.AddRange(IndexFrameHeadersBefore(handle, footer, header).Where(c => !candidates.Contains(c)));
+        foreach (long at in candidates)
+        {
+            try
+            {
+                var index = ReadIndex(handle, at, footer.IndexLength, at, header, key, registry);
+                if (index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var v) && v.Length == 8 && BinaryPrimitives.ReadUInt64LittleEndian(v) == (ulong)at)
+                    return index;
+            }
+            catch (Exception e) when (IsDamage(e) || e is NewerVersionException) { }
+        }
+        return null;
+    }
+
+    /// <summary>Offsets, nearest first, of frame headers that check out and could be the spare copy of the index frame:
+    /// the index flag, the index frame number and the index frame's length.</summary>
+    private static IEnumerable<long> IndexFrameHeadersBefore(SafeFileHandle handle, ArchiveFooter footer, ArchiveHeader header)
+    {
+        long hi = footer.IndexOffset - footer.IndexLength - SpareCopies.TrailerSize; // the latest start that leaves room for a trailer
+        long lo = Math.Max(header.Length, footer.IndexOffset - footer.IndexLength - SpareSearchMargin);
+        if (hi < lo) yield break;
+        var window = new byte[hi - lo + Osa.FrameHeaderSize];
+        if (!TryRead(handle, lo, window)) yield break;
+        int found = 0;
+        for (int i = (int)(hi - lo); i >= 0 && found < 8; i--)
+        {
+            var fh = window.AsSpan(i, Osa.FrameHeaderSize);
+            if (!fh[..4].SequenceEqual(Osa.FrameMagic) || Osa.Crc(fh[..24]) != BinaryPrimitives.ReadUInt32LittleEndian(fh[24..])) continue;
+            if ((BinaryPrimitives.ReadUInt32LittleEndian(fh[4..]) & Osa.FrameFlagIndex) == 0 || BinaryPrimitives.ReadUInt64LittleEndian(fh[8..]) != Osa.IndexFrameNumber
+                || BinaryPrimitives.ReadInt64LittleEndian(fh[16..]) != footer.IndexLength - Osa.FrameHeaderSize) continue;
+            found++;
+            yield return lo + i;
         }
     }
 
@@ -143,20 +282,29 @@ public sealed class OsaReader : IDisposable
 
     /// <summary>
     /// Compares the spare copies with what they copy: B with the index frame byte for byte, H's header bytes with the
-    /// header at offset 0, and H's padding with zeros. Returns one warning line per problem (none when the archive has
-    /// no spare copies). Reads the index twice, so it runs in Test, not on every open.
+    /// header at offset 0, and H's padding with zeros. Returns one warning line per problem, including a copy that had
+    /// to stand in for a damaged index frame or header when the archive was opened (none when the archive has no spare
+    /// copies). Reads the index twice, so it runs in Test, not on every open.
     /// </summary>
     public IReadOnlyList<string> VerifySpareCopies()
     {
-        if (!Index.Metadata.ContainsKey(ArchiveIndex.SparesKey)) return [];
-        if (_spares is not { } s) return _warnings.Contains(SpareDamaged) ? [SpareDamaged] : [];
         var problems = new List<string>();
+        if (_usedSpareHeader) problems.Add(UsedSpareHeader);
+        if (_usedSpareIndex) problems.Add(UsedSpareIndex);
+        if (!Index.Metadata.ContainsKey(ArchiveIndex.SparesKey)) return problems;
+        if (_spares is not { } s)
+        {
+            if (_warnings.Contains(SpareDamaged)) problems.Add(SpareDamaged);
+            return problems;
+        }
         try
         {
-            if (!SameBytes(s.IndexCopyOffset, _footer.IndexOffset, _footer.IndexLength)) problems.Add(SpareDamaged);
-            if (s.Trailer.HeaderLength != Header.Length || !SameBytes(s.HeaderCopyOffset, 0, Header.Length)
-                || !Zeros(s.HeaderCopyOffset + s.Trailer.HeaderLength, s.Trailer.PaddingLength))
-                problems.Add(SpareHeaderDamaged);
+            // What stood in for a damaged copy differs from it, as it was already reported.
+            if (!_usedSpareIndex && !SameBytes(s.IndexCopyOffset, _footer.IndexOffset, _footer.IndexLength)) problems.Add(SpareDamaged);
+            bool headerCopyIntact = s.Trailer.HeaderLength == Header.Length
+                && (_usedSpareHeader || SameBytes(s.HeaderCopyOffset, 0, Header.Length))
+                && Zeros(s.HeaderCopyOffset + s.Trailer.HeaderLength, s.Trailer.PaddingLength);
+            if (!headerCopyIntact) problems.Add(SpareHeaderDamaged);
         }
         catch (IOException)
         {
