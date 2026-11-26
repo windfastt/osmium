@@ -108,21 +108,56 @@ public class ExtractSafetyTests
             res.Renames.Select(r => (r.ArchivePath, r.WrittenPath)));
     }
 
-    [Fact]
-    public void ARenamedFileNeverTakesTheNameOfAnotherEntry()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARenamedFileNeverTakesTheNameOfAnotherEntry(bool ignoreCase)
     {
+        // The entry that needs a free name comes first, while the name of the entry after it is still free on disk and
+        // in the plan: only the entries' own names, reserved before anything is planned, keep it off that name.
         using var t = new TempDir();
-        string archive = Write(P(t, "a.osa"), [("report (2).txt", Data("second report")), ("report.txt", Data("the report"))]);
+        var (first, second, existing, renamed) = ignoreCase ? ("A.txt", "a (2).txt", "a.txt", "A (3).txt") : ("report", "report (2)", "report", "report (3)");
+        string archive = Write(P(t, "a.osa"), [(first, Data("the first")), (second, Data("the second"))]);
         string dest = P(t, "out");
         Directory.CreateDirectory(dest);
-        File.WriteAllText(Path.Combine(dest, "report.txt"), "already there");
+        File.WriteAllText(Path.Combine(dest, existing), "already there");
+
+        var res = Extract(archive, dest, new ExtractOptions { NameComparer = ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal });
+        Assert.Equal((2, 1), (res.FilesOk, res.Renamed));
+        Assert.Equal(new Dictionary<string, string> { [existing] = "already there", [second] = "the second", [renamed] = "the first" }, Tree(dest));
+    }
+
+    [Fact]
+    public void AFreeNameIsFreeOnDiskToo()
+    {
+        using var t = new TempDir();
+        string archive = Write(P(t, "a.osa"), [("report.txt", Data("the report")), ("x", Data("file x")), ("x/y.txt", Data("in x"))]);
+        string dest = P(t, "out");
+        Directory.CreateDirectory(Path.Combine(dest, "x (2)"));
+        File.WriteAllText(Path.Combine(dest, "report.txt"), "first");
+        File.WriteAllText(Path.Combine(dest, "report (2).txt"), "second");
 
         var res = Extract(archive, dest);
-        Assert.Equal(1, res.Renamed);
-        var tree = Tree(dest);
-        Assert.Equal("already there", tree["report.txt"]);
-        Assert.Equal("second report", tree["report (2).txt"]);
-        Assert.Equal("the report", tree["report (3).txt"]);
+        Assert.Equal((3, 0), (res.FilesOk, res.FilesFailed));
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["report.txt"] = "first", ["report (2).txt"] = "second", ["report (3).txt"] = "the report", ["x"] = "file x", ["x (3)/y.txt"] = "in x",
+        }, Tree(dest));
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(dest, "x (2)")));
+    }
+
+    [Fact]
+    public void WithoutAComparerNamesAreComparedAsTheFileSystemDoes()
+    {
+        bool ignoreCase = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+        Assert.Same(ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal, TargetNames.DefaultComparer);
+        using var t = new TempDir();
+        string archive = Write(P(t, "a.osa"), [("Notes.txt", Data("first")), ("notes.txt", Data("second"))]);
+        var res = Extract(archive, P(t, "out"));
+        Assert.Equal((2, ignoreCase ? 1 : 0), (res.FilesOk, res.Renamed));
+        Assert.Equal(ignoreCase
+            ? new Dictionary<string, string> { ["Notes.txt"] = "first", ["notes (2).txt"] = "second" }
+            : new Dictionary<string, string> { ["Notes.txt"] = "first", ["notes.txt"] = "second" }, Tree(P(t, "out")));
     }
 
     [Theory]
@@ -154,6 +189,47 @@ public class ExtractSafetyTests
         {
             ["D/z.txt"] = "in D", ["d (2)"] = "file d", ["x"] = "file x", ["x (2)/y.txt"] = "in x",
         }, Tree(P(t, "out")));
+    }
+
+    [Fact]
+    public void AFolderEntryWhoseNameAFileTookGetsAFreeNameAndItsOwnTime()
+    {
+        using var t = new TempDir();
+        string archive = Write(P(t, "a.osa"), [("X", Data("file X")), ("x", null)]);
+        var res = Extract(archive, P(t, "out"), new ExtractOptions { NameComparer = StringComparer.OrdinalIgnoreCase });
+        Assert.Equal((1, 0), (res.FilesOk, res.FilesFailed));
+        Assert.Empty(res.Errors);
+        Assert.Equal(new Dictionary<string, string> { ["X"] = "file X" }, Tree(P(t, "out")));
+        Assert.Equal(["x (2)"], Directory.GetDirectories(P(t, "out")).Select(Path.GetFileName));
+        Assert.Equal(When, Directory.GetLastWriteTimeUtc(P(t, "out", "x (2)")));
+    }
+
+    [Theory]
+    [InlineData(OverwriteMode.Rename)]
+    [InlineData(OverwriteMode.Skip)]
+    public void AFileThatAppearsAtAPlannedNameWhileTheArchiveIsExtractedIsNeverReplaced(OverwriteMode mode)
+    {
+        using var t = new TempDir();
+        var big = new byte[150_000];
+        new Random(7).NextBytes(big);
+        // "a-big.bin" fills the first blocks; "late.txt", planned as a new file, comes in the last one.
+        string archive = Write(P(t, "a.osa"), [("a-big.bin", big), ("late.txt", Data("from the archive"))], blockSize: 64 << 10);
+        string dest = P(t, "out");
+        bool appeared = false;
+        var progress = new SyncProgress(_ =>
+        {
+            if (appeared) return;
+            appeared = true;
+            File.WriteAllText(Path.Combine(dest, "late.txt"), "appeared while the archive was extracted");
+        });
+        ExtractResult res;
+        using (var r = OsaReader.Open(archive))
+            res = Extractor.Extract(r, dest, null, new ExtractOptions { Overwrite = mode, MaxParallelBlocks = 1 }, progress, Ct);
+        Assert.True(appeared);
+        Assert.Equal("appeared while the archive was extracted", File.ReadAllText(Path.Combine(dest, "late.txt")));
+        Assert.Equal((1, 1), (res.FilesOk, res.FilesFailed));
+        Assert.Contains(res.Errors, e => e.StartsWith("late.txt: ", StringComparison.Ordinal));
+        Assert.Empty(Parts(dest));
     }
 
     [Theory]
@@ -417,6 +493,63 @@ public class ExtractSafetyTests
         Assert.Empty(Directory.GetFileSystemEntries(outside));
     }
 
+    [Fact]
+    public void OnlyAReparsePointThatIsANameSurrogateIsRefusedAsALinkEvenInALongPath()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Reparse tags exist on Windows only; the symbolic link tests cover the other systems.");
+        using var t = new TempDir();
+        // A destination longer than 260 characters: the tag is read through the long-path form there.
+        string dest = t.Path;
+        while (dest.Length <= 300) dest = Path.Combine(dest, new string('d', 40));
+        string plain = Path.Combine(dest, "plain"), surrogate = Path.Combine(dest, "surrogate");
+        Directory.CreateDirectory(plain);
+        Directory.CreateDirectory(surrogate);
+        // Tags that no driver handles: one a name surrogate (bit 29), as links are, one not, as cloud placeholders are.
+        const uint PlainTag = 0x00001234, SurrogateTag = 0x20001234;
+        try
+        {
+            if (!ReparseTag(plain, PlainTag, set: true) || !ReparseTag(surrogate, SurrogateTag, set: true))
+                Assert.Skip("A reparse point with a tag of its own could not be set here (it may need administrator rights).");
+            Assert.True(File.GetAttributes(plain).HasFlag(FileAttributes.ReparsePoint));
+            string archive = Write(P(t, "a.osa"), [("plain/a.txt", Data("a")), ("surrogate/b.txt", Data("b"))]);
+
+            var res = Extract(archive, dest);
+            Assert.Equal(1, res.SkippedUnsafe);
+            Assert.Contains(res.Errors, e => e.StartsWith("surrogate/b.txt: ", StringComparison.Ordinal) && e.Contains(TargetNames.LinkRefused, StringComparison.Ordinal));
+            // The other one is an ordinary folder to extraction (whether its file system then lets a file in or not).
+            Assert.DoesNotContain(res.Errors, e => e.StartsWith("plain/", StringComparison.Ordinal) && e.Contains(TargetNames.LinkRefused, StringComparison.Ordinal));
+        }
+        finally
+        {
+            ReparseTag(plain, PlainTag, set: false);
+            ReparseTag(surrogate, SurrogateTag, set: false);
+        }
+    }
+
+    /// <summary>Sets (or removes) a reparse point with a tag of its own on a folder (FSCTL_SET_REPARSE_POINT with a
+    /// REPARSE_GUID_DATA_BUFFER, as tags outside Microsoft's need).</summary>
+    private static bool ReparseTag(string folder, uint tag, bool set)
+    {
+        const uint GenericRead = 0x80000000, GenericWrite = 0x40000000, OpenExisting = 3, BackupSemantics = 0x02000000, OpenReparsePoint = 0x00200000;
+        const uint SetReparsePoint = 0x000900A4, DeleteReparsePoint = 0x000900AC;
+        using var handle = CreateFileW(@"\\?\" + folder, GenericRead | GenericWrite, 7, IntPtr.Zero, OpenExisting, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid) return false;
+        var data = set ? "osmium test"u8.ToArray() : [];
+        var buffer = new byte[24 + data.Length]; // tag, data length, reserved, GUID, data
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buffer, tag);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(4), (ushort)data.Length);
+        new Guid("6f0b4b4e-8a52-4a43-9d1e-2b8f3c6a5d71").TryWriteBytes(buffer.AsSpan(8));
+        data.CopyTo(buffer, 24);
+        return DeviceIoControl(handle, set ? SetReparsePoint : DeleteReparsePoint, buffer, buffer.Length, IntPtr.Zero, 0, out _, IntPtr.Zero);
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle device, uint code, byte[] input, int inputSize, IntPtr output, int outputSize,
+        out int returned, IntPtr overlapped);
+
     // ------------------------------------------------------------------ folders
 
     [Fact]
@@ -460,6 +593,10 @@ public class ExtractSafetyTests
         string dest = P(t, "out");
         Directory.CreateDirectory(dest);
         File.WriteAllText(Path.Combine(dest, "mine.txt"), "the user's own file");
+        // Empty folders that were there before: one the archive writes into, and one of the user's own.
+        string late = Path.Combine(dest, "late"), mine = Path.Combine(dest, "mine-empty");
+        Directory.CreateDirectory(late);
+        Directory.CreateDirectory(mine);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var progress = new SyncProgress(p => { if (p.FilesDone >= 1) cts.Cancel(); });
@@ -469,7 +606,9 @@ public class ExtractSafetyTests
         Assert.Empty(Parts(dest));
         Assert.Equal("the user's own file", File.ReadAllText(Path.Combine(dest, "mine.txt")));
         Assert.True(File.Exists(Path.Combine(dest, "done", "first.bin")), "a finished file stays");
-        Assert.DoesNotContain(Directory.GetDirectories(dest, "*", SearchOption.AllDirectories), d => !Directory.EnumerateFileSystemEntries(d).Any());
+        Assert.True(Directory.Exists(late) && Directory.Exists(mine), "a folder that was there before stays, empty or not");
+        Assert.False(Directory.Exists(Path.Combine(late, "deep")), "a folder this run created inside one that was there is removed");
+        Assert.DoesNotContain(Directory.GetDirectories(dest, "*", SearchOption.AllDirectories), d => d != late && d != mine && !Directory.EnumerateFileSystemEntries(d).Any());
         foreach (var (name, text) in Tree(dest).Where(kv => kv.Key != "mine.txt")) Assert.NotEmpty(text);
     }
 
