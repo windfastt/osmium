@@ -201,7 +201,7 @@ internal static class SpareArchives
 /// </summary>
 public class SpareCopyTests
 {
-    private static OsaWriterOptions Low(string? password = null) => new() { Password = password, SpareThreshold = 0 };
+    private static OsaWriterOptions Low(string? password = null) => new() { Password = password, SpareCopies = SpareCopyPolicy.Always };
 
     [Theory]
     [InlineData(false)]
@@ -238,7 +238,7 @@ public class SpareCopyTests
     public void BlocksOfAtLeastTheThresholdGetSpareCopiesAndSmallerOnesDoNot()
     {
         using var t = new TempDir();
-        var files = SpareArchives.Files(2, 2000);
+        var files = SpareArchives.Files(2, 200_000); // a file list far under 2 % of the blocks
         string probe = SpareArchives.Write(t.Sub("probe.osa"), files, new OsaWriterOptions { SpareThreshold = long.MaxValue });
         long frames;
         using (var r = OsaReader.Open(probe)) frames = r.Blocks.Sum(k => k.FrameLength);
@@ -261,6 +261,78 @@ public class SpareCopyTests
         using var t = new TempDir();
         Assert.Null(SpareArchives.TailOf(SpareArchives.Write(t.Sub("small.osa"), SpareArchives.Files(1, 1_000_000))).Trailer);
         Assert.NotNull(SpareArchives.TailOf(SpareArchives.Write(t.Sub("big.osa"), SpareArchives.Files(1, 1 << 20))).Trailer);
+    }
+
+    [Fact]
+    public void NeverMeansNoSpareCopiesAndAlwaysMeansSpareCopiesWheneverThereIsABlock()
+    {
+        using var t = new TempDir();
+        var big = SpareArchives.Files(1, 1 << 20);
+        Assert.Null(SpareArchives.TailOf(SpareArchives.Write(t.Sub("never.osa"), big, new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Never })).Trailer);
+        Assert.NotNull(SpareArchives.TailOf(SpareArchives.Write(t.Sub("always.osa"), SpareArchives.Files(1, 10), Low())).Trailer);
+        using var w = new OsaWriter(t.Sub("empty.osa"), Low());
+        w.Finish([new ArchiveEntry { Path = "only-a-folder", Kind = EntryKind.Directory }]);
+        Assert.False(w.HasSpareCopies); // no block: nothing to keep a spare file list for
+    }
+
+    /// <summary>10,000 text files of 100–2,000 bytes, as many small files are: their file list is large next to them.</summary>
+    private static async Task<(string Path, Dictionary<string, byte[]> Files)> ManySmallFiles(TempDir t, string name, Planning.BuildOptions options)
+    {
+        string input = t.Sub("small-" + name);
+        var rnd = new Random(20261125);
+        string[] words = ["archive", "block", "frame", "index", "header", "copy", "spare", "file", "folder", "name", "time", "size"];
+        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        for (int i = 0; i < 10_000; i++)
+        {
+            var text = new System.Text.StringBuilder();
+            int target = rnd.Next(100, 2001);
+            while (text.Length < target) text.Append(words[rnd.Next(words.Length)]).Append(rnd.Next(100_000)).Append(i % 7 == 0 ? '\n' : ' ');
+            var data = System.Text.Encoding.ASCII.GetBytes(text.ToString(0, target));
+            string dir = Path.Combine(input, $"dir{i / 100:D2}");
+            Directory.CreateDirectory(dir);
+            File.WriteAllBytes(Path.Combine(dir, $"note-{i:D5}.txt"), data);
+            files[$"small-{name}/dir{i / 100:D2}/note-{i:D5}.txt"] = data;
+        }
+        var plan = await new Planning.Planner(new Planning.PlanOptions { Profile = Planning.Profile.ByName("fast"), MemoryBudget = 1L << 30 })
+            .BuildAsync(Planning.Scanner.Scan([input], ct: Ct), Ct);
+        var r = await Planning.ArchiveBuilder.BuildAsync(plan, options with { OutputPath = t.Sub(name + ".osa"), MemoryBudget = 1L << 30 }, Ct);
+        return (r.Path, files);
+    }
+
+    [Fact]
+    public async Task ManySmallFilesGetNoSpareCopiesUnlessAskedFor()
+    {
+        using var t = new TempDir();
+        var (auto, files) = await ManySmallFiles(t, "auto", new Planning.BuildOptions { OutputPath = "" });
+        var tail = SpareArchives.TailOf(auto);
+        Assert.True(tail.IndexOffset - tail.HeaderLength >= 1 << 20, "the fixture should have at least 1 MiB of blocks");
+        Assert.True(tail.IndexLength * 50 > tail.IndexOffset - tail.HeaderLength, "the fixture should have a file list over 2 % of its blocks");
+        Assert.Null(tail.Trailer);
+        using (var r = OsaReader.Open(auto)) Assert.False(r.HasSpareCopies || r.Index.Metadata.ContainsKey(ArchiveIndex.SparesKey));
+
+        var (always, alwaysFiles) = await ManySmallFiles(t, "always", new Planning.BuildOptions { OutputPath = "", SpareCopies = SpareCopyPolicy.Always });
+        Assert.NotNull(SpareArchives.TailOf(always).Trailer);
+        var read = SpareArchives.ReadAs10(always); // what 0.1.x reads, file by file
+        Assert.Equal(alwaysFiles.Count, read.Count);
+        foreach (var (name, data) in alwaysFiles) Assert.Equal(data, read[name]);
+        Assert.Equal(files.Count, SpareArchives.ReadAs10(auto).Count);
+    }
+
+    [Fact]
+    public async Task AFewLargeFilesGetSpareCopiesByDefault()
+    {
+        using var t = new TempDir();
+        string input = t.Sub("mixed");
+        Directory.CreateDirectory(Path.Combine(input, "sub"));
+        var random = new byte[3 << 20];
+        new Random(1).NextBytes(random);
+        File.WriteAllBytes(Path.Combine(input, "random.bin"), random);
+        File.WriteAllText(Path.Combine(input, "sub", "notes.txt"), string.Concat(Enumerable.Range(0, 2000).Select(i => $"line {i}\n")));
+        var plan = await new Planning.Planner(new Planning.PlanOptions { Profile = Planning.Profile.ByName("fast"), MemoryBudget = 1L << 30 })
+            .BuildAsync(Planning.Scanner.Scan([input], ct: Ct), Ct);
+        var r = await Planning.ArchiveBuilder.BuildAsync(plan, new Planning.BuildOptions { OutputPath = t.Sub("mixed.osa"), MemoryBudget = 1L << 30 }, Ct);
+        using var reader = OsaReader.Open(r.Path);
+        Assert.True(reader.HasSpareCopies);
     }
 
     [Fact]
@@ -702,7 +774,7 @@ public class SpareCopyTests
     {
         using var t = new TempDir();
         string? pw = encrypted ? SpareArchives.Password : null;
-        var (path, files) = await Build(t, "low", new Planning.BuildOptions { OutputPath = "", Password = pw, SpareThreshold = 0, TestFixedArchiveId = new byte[16] });
+        var (path, files) = await Build(t, "low", new Planning.BuildOptions { OutputPath = "", Password = pw, SpareCopies = SpareCopyPolicy.Always, TestFixedArchiveId = new byte[16] });
         var (open, test, spares) = Check(path, files, pw);
         Assert.True(spares);
         Assert.Empty(open);

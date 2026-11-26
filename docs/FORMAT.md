@@ -10,8 +10,8 @@ overflow); `svarint` = zig-zag + LEB128; `bytes` = varint length + raw; `str` = 
 [Header] [Frame 0] [Frame 1] … [Frame n-1] [Spare index frame] [Header copy] [Index frame] [Footer 32 B]   (§4.1)
 ```
 Frames are written in completion order (parallel compression finishes out of order); a block's **frame number** is
-its position in the file. Segments in the index refer to frame numbers. Archives whose block frames total 1 MiB or more
-carry spare copies of the index frame and the header (second line, §4.1); smaller archives do not.
+its position in the file. Segments in the index refer to frame numbers. An archive may carry spare copies of the index
+frame and the header (second line, §4.1); readers never depend on them being there.
 
 ## 1. Header
 
@@ -141,8 +141,11 @@ unless the index points there (§4.1).
 
 ### 4.1 Spare copies (container 1.1)
 
-A writer gives an archive spare copies of its index frame and its header when its block frames (header and body)
-total at least 1 MiB (2^20 bytes):
+An archive of container 1.1 may carry spare copies of its index frame and its header. Whether it does is the writer's
+choice; readers never depend on it. Osmium's writer adds them by default where they cost little: when its block frames
+(header and body) total at least 1 MiB (2^20 bytes) and the index frame is at most 2 % of those bytes. Archives of many
+small files, whose file list is large next to their data, therefore get none unless the writer is asked for them; the
+writer can also be told to add them whenever an archive has a block, or never.
 
 ```
 … [last block frame] [B: copy of the index frame] [H: header copy] [A: index frame] [footer 32 B]
@@ -167,8 +170,9 @@ total at least 1 MiB (2^20 bytes):
 
   So `spares + indexLength + headerLength + paddingLength + 32 = indexOffset`.
 
-The spare copies cost a copy of the index frame plus at least 4 KiB. Archives under the threshold have no spare copies
-and no `spares` key, and still have minor 1.
+The spare copies cost a copy of the index frame plus at least 4 KiB. The index frame's length, which decides whether they
+are worth it, is known before the index is sealed (the tag adds 16 bytes), so the index is sealed once either way. An
+archive without spare copies has no `spares` key, and still has minor 1.
 
 Readers:
 1. **Every open** with an intact A that holds `spares` checks H's trailer (magic, CRC, flags and reserved 0, lengths a

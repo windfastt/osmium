@@ -2,6 +2,18 @@ using System.Buffers.Binary;
 
 namespace Osmium.Core.Container;
 
+/// <summary>When a writer gives an archive spare copies of its index frame and header (FORMAT §4.1). Readers never
+/// depend on it: an archive of container 1.1 may or may not have them.</summary>
+public enum SpareCopyPolicy
+{
+    /// <summary>Where they cost little: the block frames total at least 1 MiB and the index frame is at most 2 % of them.</summary>
+    Auto,
+    /// <summary>Whenever the archive has at least one block.</summary>
+    Always,
+    /// <summary>Never.</summary>
+    Never,
+}
+
 /// <summary>
 /// The spare copies at the end of an archive of container version 1.1 (FORMAT §4.1):
 /// <c>… [last block frame] [B: copy of the index frame] [H: header copy] [A: index frame] [footer]</c>.
@@ -11,8 +23,10 @@ namespace Osmium.Core.Container;
 /// </summary>
 public static class SpareCopies
 {
-    /// <summary>Archives whose block frames total at least this many bytes get spare copies.</summary>
+    /// <summary><see cref="SpareCopyPolicy.Auto"/>: block frames of at least this many bytes in total …</summary>
     public const long Threshold = 1 << 20;
+    /// <summary>… and an index frame of at most 1/<see cref="MaxIndexShare"/> (2 %) of them.</summary>
+    public const int MaxIndexShare = 50;
     /// <summary>H is at least this long, so that B ends at least 4 KiB before A starts.</summary>
     public const int MinHeaderCopyLength = 4096;
     public const int TrailerSize = 32;

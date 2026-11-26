@@ -13,8 +13,11 @@ public sealed record OsaWriterOptions
     public string Creator { get; init; } = "Osmium " + (typeof(OsaWriter).Assembly.GetName().Version?.ToString(3) ?? "0");
     /// <summary>Pipeline used for the index frame.</summary>
     public string IndexPipeline { get; init; } = "zstd(level=19)";
-    /// <summary>Block frames totalling at least this many bytes get spare copies of the index and header (tests lower it).</summary>
-    internal long SpareThreshold { get; init; } = SpareCopies.Threshold;
+    /// <summary>When the archive gets spare copies of its index frame and header (FORMAT §4.1).</summary>
+    public SpareCopyPolicy SpareCopies { get; init; } = SpareCopyPolicy.Auto;
+    /// <summary><see cref="SpareCopyPolicy.Auto"/>: the block frames' total from which spare copies are written (tests
+    /// change it).</summary>
+    internal long SpareThreshold { get; init; } = global::Osmium.Core.Container.SpareCopies.Threshold;
     /// <summary>Tests only: a fixed archive id (16 bytes) instead of a random one, for tests that pin an archive's
     /// layout. Real archives always get a random id.</summary>
     internal byte[]? TestFixedArchiveId { get; init; }
@@ -81,8 +84,8 @@ public sealed class OsaWriter : IDisposable
 
     public bool Encrypted => _key is not null;
 
-    /// <summary>True once <see cref="Finish"/> wrote spare copies of the index frame and the header (block frames of
-    /// at least 1 MiB in total; FORMAT §4.1).</summary>
+    /// <summary>True once <see cref="Finish"/> wrote spare copies of the index frame and the header
+    /// (<see cref="OsaWriterOptions.SpareCopies"/>; FORMAT §4.1).</summary>
     public bool HasSpareCopies { get; private set; }
 
     /// <summary>Appends one compressed block; returns its frame number. Thread-safe.</summary>
@@ -134,9 +137,9 @@ public sealed class OsaWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes the index frame and footer and flushes to disk. When the block frames total at least 1 MiB, the index
-    /// frame is written twice, with the header copy between the two (FORMAT §4.1): the first copy's offset is in the
-    /// index (<see cref="ArchiveIndex.SparesKey"/>), so the index is sealed once and both copies are the same bytes.
+    /// Writes the index frame and footer and flushes to disk. With spare copies (<see cref="OsaWriterOptions.SpareCopies"/>)
+    /// the index frame is written twice, with the header copy between the two (FORMAT §4.1): the first copy's offset is
+    /// in the index (<see cref="ArchiveIndex.SparesKey"/>), so the index is sealed once and both copies are the same bytes.
     /// </summary>
     public void Finish(IEnumerable<ArchiveEntry> entries, IReadOnlyDictionary<string, byte[]>? metadata = null, MethodRegistry? registry = null)
     {
@@ -152,15 +155,32 @@ public sealed class OsaWriter : IDisposable
                     if (s.Frame < 0 || s.Frame >= _blocks.Count || s.Offset + s.Length > _blocks[s.Frame].RawSize)
                         throw new InvalidOperationException($"Entry '{e.Path}' references an invalid block region.");
             if (metadata is not null) foreach (var kv in metadata) index.Metadata[kv.Key] = kv.Value;
-            // The writer owns the spares key: it says where this archive's spare copy is, or that it has none.
-            long spareOffset = _fs.Position;
-            bool spares = _options.SpareThreshold >= 0 && _blocks.Sum(b => b.FrameLength) >= _options.SpareThreshold;
-            if (spares) index.Metadata[ArchiveIndex.SparesKey] = SpareCopies.OffsetValue(spareOffset);
-            else index.Metadata.Remove(ArchiveIndex.SparesKey);
-            var raw = index.Serialize();
+            long spareOffset = _fs.Position, blockFrames = _blocks.Sum(b => b.FrameLength);
+            bool spares = _options.SpareCopies switch
+            {
+                SpareCopyPolicy.Never => false,
+                SpareCopyPolicy.Always => _blocks.Count > 0,
+                _ => _blocks.Count > 0 && _options.SpareThreshold >= 0 && blockFrames >= _options.SpareThreshold,
+            };
             var spec = PipelineSpec.Parse(_options.IndexPipeline, registry);
-            var (desc, payload) = PipelineExecutor.Encode(spec, raw, CodecContext.None);
-            var prefix = new BlockBody(desc, BlockBody.Hash128(raw), payload).SerializePrefix();
+            // The writer owns the spares key: it says where this archive's spare copy is, or that it has none.
+            (byte[] Prefix, byte[] Payload) Encode(bool withSpares)
+            {
+                if (withSpares) index.Metadata[ArchiveIndex.SparesKey] = SpareCopies.OffsetValue(spareOffset);
+                else index.Metadata.Remove(ArchiveIndex.SparesKey);
+                var raw = index.Serialize();
+                var (desc, payload) = PipelineExecutor.Encode(spec, raw, CodecContext.None);
+                return (new BlockBody(desc, BlockBody.Hash128(raw), payload).SerializePrefix(), payload);
+            }
+            var (prefix, payload) = Encode(spares);
+            // Auto: only where the copy costs little next to the data. The frame's length is known before it is sealed
+            // (the tag adds 16 bytes), so the index is never sealed twice.
+            long frameLength = Osa.FrameHeaderSize + prefix.Length + payload.Length + (_key is null ? 0 : 16);
+            if (spares && _options.SpareCopies == SpareCopyPolicy.Auto && frameLength * SpareCopies.MaxIndexShare > blockFrames)
+            {
+                spares = false;
+                (prefix, payload) = Encode(false);
+            }
             // Sealed once: the spare copy repeats the same ciphertext, so no plaintext is encrypted twice.
             var (fh, sealedBody, bodyLen) = BuildFrame(Osa.IndexFrameNumber, Osa.FrameFlagIndex, prefix, payload);
             void WriteIndexFrame()

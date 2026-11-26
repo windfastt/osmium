@@ -163,7 +163,7 @@ public sealed class OsaArchiveSource : IArchiveSource
     }
 
     /// <summary>The archive's properties, as the Archives page shows them. "Spare copy of the file list" is there for
-    /// archives that have one (from 1 MiB of blocks on) and for archives of container 1.0, which never have one.</summary>
+    /// archives that have one and for archives of container 1.0, which never have one.</summary>
     private static List<ArchiveDetail> Describe(OsaReader r)
     {
         var details = Properties(r);

@@ -16,7 +16,7 @@ public class SalvageWithSpareTests
             Assert.Equal(data, File.ReadAllBytes(Path.Combine([destination, .. name.Split('/')])));
     }
 
-    private static OsaWriterOptions WithSpares(string? password = null) => new() { Password = password, SpareThreshold = 0 };
+    private static OsaWriterOptions WithSpares(string? password = null) => new() { Password = password, SpareCopies = SpareCopyPolicy.Always };
 
     [Theory]
     [InlineData(false)]

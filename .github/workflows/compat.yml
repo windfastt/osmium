@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/positive"
           fail() { echo "::error::$1"; exit 1; }
-          mkdir -p "$W/in/mixed/sub/deeper" "$W/in/empty" "$W/in/many" "$W/in/dedup"
+          mkdir -p "$W/in/mixed/sub/deeper" "$W/in/empty" "$W/in/many" "$W/in/dedup" "$W/in/small-random"
           head -c 3M /dev/urandom > "$W/in/mixed/random.bin"            # 3 MiB that do not compress: spare copies
           for i in $(seq 1 200); do echo "line $i of a text file"; done > "$W/in/mixed/notes.txt"
           printf 'short\n' > "$W/in/mixed/sub/short.txt"
@@ -58,16 +58,19 @@ jobs:
           head -c 1M /dev/urandom > "$W/in/dedup/one.bin"
           cp "$W/in/dedup/one.bin" "$W/in/dedup/two.bin"
           cp "$W/in/dedup/one.bin" "$W/in/dedup/three.bin"
+          # 10,000 files of 200 bytes that do not compress: 2 MB of blocks, but a file list well over 2 % of them.
+          python3 -I -c 'import os, sys; [open(os.path.join(sys.argv[1], f"r{i:05d}.bin"), "wb").write(os.urandom(200)) for i in range(10000)]' "$W/in/small-random"
 
-          # name, input folder, pipeline (methods 0.1.1 knows), encrypted
-          cases="mixed-zstd mixed zstd(level=3) no
-          mixed-lzma mixed lzma(dict=16M) no
-          mixed-encrypted mixed zstd(level=3) yes
-          empty empty zstd(level=3) no
-          many many zstd(level=3) no
-          dedup dedup zstd(level=3) no"
+          # name, input folder, pipeline (methods 0.1.1 knows), encrypted, spare copies expected (yes, no, rule)
+          cases="mixed-zstd mixed zstd(level=3) no yes
+          mixed-lzma mixed lzma(dict=16M) no yes
+          mixed-encrypted mixed zstd(level=3) yes yes
+          empty empty zstd(level=3) no rule
+          many many zstd(level=3) no rule
+          dedup dedup zstd(level=3) no yes
+          small-random small-random zstd(level=3) no no"
 
-          while read -r name folder pipeline encrypted; do
+          while read -r name folder pipeline encrypted expected; do
             archive="$W/$name.osa"
             if [ "$encrypted" = yes ]; then
               printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --password-stdin --kdf-iterations 1000 --quiet \
@@ -76,12 +79,12 @@ jobs:
               "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --quiet || fail "$name.osa: this version could not write it"
             fi
 
-            # Spare copies exactly when the blocks total 1 MiB or more, read from the archive's own bytes: the footer
-            # (last 32 bytes) gives the index frame's offset, and the header copy's trailer ends there ("OHDR" first).
-            case "$name" in mixed-*|dedup) required=yes;; *) required=no;; esac
-            python3 -I - "$archive" "$required" <<'PY' || fail "$name.osa: spare copies are not where they belong"
+            # The writer's default rule, read from the archive's own bytes: spare copies exactly when the blocks total
+            # 1 MiB or more and the index frame is at most 2 % of them. The footer (last 32 bytes) gives the index
+            # frame's offset and length; a header copy's trailer ends at that offset ("OHDR" first).
+            python3 -I - "$archive" "$expected" <<'PY' || fail "$name.osa: spare copies are not where the rule puts them"
           import struct, sys
-          path, required = sys.argv[1], sys.argv[2] == "yes"
+          path, expected = sys.argv[1], sys.argv[2]
           b = open(path, "rb").read()
           index_offset, index_length = struct.unpack_from("<qq", b, len(b) - 32)
           header = 40 + struct.unpack_from("<I", b, 32)[0]
@@ -91,8 +94,12 @@ jobs:
               blocks = index_offset - header_copy - index_length - header
           else:
               blocks = index_offset - header
-          print(f"{path}: {blocks:,} bytes of blocks, spare copies: {'yes' if spares else 'no'}")
-          sys.exit(0 if spares == (blocks >= 1 << 20) and (spares or not required) else 1)
+          rule = blocks >= 1 << 20 and index_length * 50 <= blocks
+          print(f"{path}: {blocks:,} bytes of blocks, index frame {index_length:,} bytes, spare copies: {'yes' if spares else 'no'}")
+          ok = spares == rule and (expected == "rule" or spares == (expected == "yes"))
+          if expected == "no":
+              ok = ok and blocks >= 1 << 20  # the case is there for a large file list next to 1 MiB of blocks or more
+          sys.exit(0 if ok else 1)
           PY
 
             out="$W/out-$name"

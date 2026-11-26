@@ -38,7 +38,7 @@ public class OsaSourceTests
     {
         using var t = new TempDir();
         var files = SpareArchives.Files(3, 2000);
-        using (var s = ArchiveSources.Open(SpareArchives.Write(t.Sub("new.osa"), files, new OsaWriterOptions { SpareThreshold = 0 }), ct: Ct))
+        using (var s = ArchiveSources.Open(SpareArchives.Write(t.Sub("new.osa"), files, new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Always }), ct: Ct))
         {
             Assert.Equal(".osa 1.1", s.FormatName);
             Assert.Equal(".osa 1.1", Detail(s, "Format"));
@@ -62,7 +62,7 @@ public class OsaSourceTests
     {
         using var t = new TempDir();
         var files = SpareArchives.Files(3, 2000);
-        string path = SpareArchives.Write(t.Sub("a.osa"), files, new OsaWriterOptions { SpareThreshold = 0 });
+        string path = SpareArchives.Write(t.Sub("a.osa"), files, new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Always });
         var tail = SpareArchives.TailOf(path);
 
         string badIndex = SpareArchives.Damage(path, t.Sub("bad-index.osa"), b => b[tail.IndexOffset + 30] ^= 1);

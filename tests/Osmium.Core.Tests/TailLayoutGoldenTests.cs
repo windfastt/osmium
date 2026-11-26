@@ -15,7 +15,7 @@ public class TailLayoutGoldenTests
 
     private static OsaWriterOptions Fixed(string? password) => new()
     {
-        Password = password, Creator = "Osmium golden", SpareThreshold = 0, TestFixedArchiveId = Id,
+        Password = password, Creator = "Osmium golden", SpareCopies = SpareCopyPolicy.Always, TestFixedArchiveId = Id,
         TestFixedSalt = password is null ? null : Salt, TestFixedSaltAcknowledged = password is not null,
     };
 

@@ -41,8 +41,11 @@ public sealed record BuildOptions
     public bool StorePlanLog { get; init; } = true;
     public PauseGate? Gate { get; init; }
     public Action<BuildProgress>? Progress { get; init; }
+    /// <summary>When the archive gets spare copies of its index frame and header (FORMAT §4.1); by default where they
+    /// cost little.</summary>
+    public SpareCopyPolicy SpareCopies { get; init; } = SpareCopyPolicy.Auto;
     /// <summary>Tests only: see <see cref="OsaWriterOptions.SpareThreshold"/>.</summary>
-    internal long SpareThreshold { get; init; } = SpareCopies.Threshold;
+    internal long SpareThreshold { get; init; } = global::Osmium.Core.Container.SpareCopies.Threshold;
     /// <summary>Tests only: see <see cref="OsaWriterOptions.TestFixedArchiveId"/>.</summary>
     internal byte[]? TestFixedArchiveId { get; init; }
     /// <summary>Tests only, never anywhere else: see <see cref="OsaWriterOptions.TestFixedSalt"/>.</summary>
@@ -74,6 +77,7 @@ public static class ArchiveBuilder
             KdfIterations = o.KdfIterations,
             Experimental = plan.UsesExperimental,
             IndexPipeline = plan.Profile.Level >= ProfileLevel.Ultra ? "lzma(dict=16M)" : "zstd(level=19)",
+            SpareCopies = o.SpareCopies,
             SpareThreshold = o.SpareThreshold,
             TestFixedArchiveId = o.TestFixedArchiveId,
             TestFixedSalt = o.TestFixedSalt,
