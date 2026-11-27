@@ -189,6 +189,40 @@ public class SalvageKdfTests
         Assert.False(Directory.Exists(t.Sub("out")));
     }
 
+    [Theory]
+    [InlineData("argon2id")]
+    [InlineData("pbkdf2")]
+    public void ADestroyedHeaderIsReplacedByItsCopyAndTheFileListComesBack(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), kdf, SpareCopyPolicy.Always);
+        int headerLength = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(path))).Length;
+        string bad = Damage(path, b => Array.Clear(b, 0, headerLength)); // nothing left of the header at offset 0
+        using var seams = new KdfSeams(inspectWipe: false);
+        int asked = 0;
+        var r = Salvage(bad, t.Sub("out"), () => { asked++; return EncryptedArchives.Password; });
+        Assert.Contains(r.Notes, n => n.Contains("its spare copy beside the file list is intact and was used", StringComparison.Ordinal));
+        Assert.True(r.IndexRecovered, r.IndexProblem);
+        AssertRestored(r, t.Sub("out"));
+        Assert.Equal(1, asked);
+        Assert.Equal(kdf == "argon2id" ? 1 : 0, seams.Allocations); // the copy's own settings: Argon2id derives once
+    }
+
+    [Fact]
+    public void AHeaderCopyIsAdmittedBeforeThePasswordToo()
+    {
+        using var t = new TempDir();
+        string path = WriterSafetyTests.Write(t.Sub("a.osa"),
+            new OsaWriterOptions { Password = EncryptedArchives.Password, Kdf = KdfParameters.Argon2id(1, 8 << 10, 1), SpareCopies = SpareCopyPolicy.Always });
+        int headerLength = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(path))).Length;
+        string bad = Damage(path, b => Array.Clear(b, 0, headerLength));
+        int asked = 0;
+        Assert.Throws<KdfMemoryLimitException>(() =>
+            Salvage(bad, t.Sub("out"), () => { asked++; return EncryptedArchives.Password; }, new SalvageOptions { MemoryBudget = 4L << 20 }));
+        Assert.Equal(0, asked);
+        Assert.False(Directory.Exists(t.Sub("out")));
+    }
+
     [Fact]
     public void ReadingsOutsideTheLimitsAreNoCandidates()
     {

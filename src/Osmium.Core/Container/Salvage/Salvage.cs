@@ -366,7 +366,7 @@ internal sealed class SalvageRun : IDisposable
                 continue;
             }
             _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
-            return new KeyMaterial(key, h.ArchiveId, h.Raw);
+            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: h.Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id);
         }
         if (refused) throw new WrongPasswordException();
         problem = "the archive header is damaged, and the spare copy of it that was found does not accept the password, "
