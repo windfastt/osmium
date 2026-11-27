@@ -64,7 +64,14 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   could make it use more memory than its limit; it now reserves for the largest step, and a block whose stored sizes
   or pipeline differ from the file list's is refused before it is decoded.
 - **Passwords on the command line:** a password option without a value, or an empty password, no longer writes an
-  archive without encryption, and `--password-stdin` reads UTF-8 (a byte order mark is ignored).
+  archive without encryption (an empty password is refused in the app too), and `--password-stdin` reads UTF-8 (a
+  byte order mark is ignored). A number option that is too large or not a whole number (`--kdf-iterations`,
+  `--threads`, `--mem`, …) is refused with a message instead of ending the command line with an error report.
+- **Remote workers and encryption:** `osmium a --encrypt --workers …` no longer sends the blocks of an archive
+  encrypted with a typed password to remote workers; as with `--password`, that needs `--allow-remote-encrypted`.
+- **Salvage** never replaces the archive it reads, also when the destination reaches it by another path, and tries at
+  most two copies of an encrypted archive's header, so a damaged or crafted file cannot keep it deriving keys for
+  hours.
 
 ### Added
 - **Spare copy of the file list and header.** Archives of 1 MiB and more whose file list is small next to their data
@@ -73,6 +80,15 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   spare and tells you so; *Test* also checks the spare. The .osa container is now version 1.1: Osmium 0.1.x opens,
   tests and extracts 1.1 archives made with the methods it knows. Archives that contain blocks compressed with the
   methods new in 0.2.0 need 0.2.0; 0.1.x does not open them and says they were made by a newer version.
+- **Argon2id password protection.** Encrypted archives get their key from Argon2id with 1 GiB of memory by default
+  (Settings → Security → Password protection: Standard, Strong, Maximum, or Compatible for archives Osmium 0.1 must
+  open; on the command line `--protection standard|strong|maximum|compatible`). Archives compressed in the app use
+  the protection chosen in Settings. Archives made with earlier versions keep opening. Encryption stays AES-256-GCM.
+- **Hide exact sizes** (Settings → Security, or `--hide-sizes`) pads encrypted blocks so their exact sizes are hidden,
+  at a cost of up to 12 % in size; Osmium 0.1 cannot open such archives.
+- **Opening encrypted archives safely:** an archive whose key derivation would need more memory or time than allowed
+  is refused before the password is asked for, saying which option allows it (`--mem`, `--allow-slow-kdf`,
+  `--allow-weak-protection`); `osmium info` says whether the password was verified.
 - **Open other archive types from the command line.** `osmium l`, `x`, `t` and `info` work with ZIP, 7z, TAR (also
   .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz and .tar.zst) and single compressed files (.gz, .bz2, .xz, .zst).
   Password-protected ZIP (ZipCrypto and AES) and 7z archives are supported. Archives are recognised by their content,
@@ -155,6 +171,13 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   copies do not check out; such an archive is never kept.
 - **CI:** a compatibility check builds Osmium 0.1.1 from its tag and has it test and extract archives made by this
   version.
+- **Encrypted archives:** Osmium refuses archives that claim to be encrypted but are not, that hold unprotected data
+  beside the encrypted parts, or that are protected more weakly than any Osmium preset. Encrypted archives no longer
+  show the Osmium version in the clear. A change to an encrypted archive is reported as damage or a change, never as
+  an archive made by a newer version of Osmium.
+- **File lists are checked as they are read:** a list that declares more entries or blocks than it holds, more entries
+  or deeper paths than the import limits allow, or names that would add up to gigabytes of text is refused before
+  memory is spent on it.
 - **`osmium a`** writes a ZIP file when the name ends in .zip (before, it wrote `name.zip.osa`). Names of types Osmium
   cannot write are refused with a reason.
 - **Single compressed files** extract next to the archive. One without a compression extension extracts as

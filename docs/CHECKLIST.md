@@ -22,7 +22,7 @@ Windows by CI (`--selftest-ui`, installer compile, Windows test run) · ⬜ back
 ## Container (.osa)
 - ✅ Header with critical/ignorable extensions, CRC-protected frames, length-prefixed index records, footer
 - ✅ Blocks written in plan order (reproducible archives); files reference (frame, offset, length) segments
-- ✅ AES-256-GCM encryption of every block body and the index (names hidden), PBKDF2-SHA512 + HKDF, password verifier, header bound into the index AAD
+- ✅ AES-256-GCM encryption of every block body and the index (names hidden), Argon2id (PBKDF2-SHA512 for Compatible) + HKDF, password verifier, header bound into the index AAD
 - ✅ Every single-byte corruption of a test archive is detected (exhaustive test)
 - ✅ Extraction: Windows path rules on every OS, verify-then-rename, Mark-of-the-Web propagation (Windows), overwrite policies
 - ⬜ Salvage tool, recovery records, multi-volume, append/update

@@ -831,6 +831,9 @@ https://jrsoftware.org/
 
 ---
 
+Osmium's implementations of Argon2id and BLAKE2b are its own, written from RFC 9106 and RFC 7693; they contain no
+third-party code.
+
 Formats and trademarks: ZIP, 7z, RAR, TAR, gzip, bzip2, xz and Zstandard are names of file formats. WinZip, WinRAR,
 RAR and 7-Zip are trademarks of their respective owners; Deflate64 and ZIP64 are trademarks of PKWARE, Inc.; Osmium
 is not affiliated with or endorsed by them. Osmium cannot create RAR archives.

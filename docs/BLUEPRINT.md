@@ -68,7 +68,8 @@ Footer     = indexOffset | indexLength | archiveId[0..8] | CRC32 | "OSAE"
 - Forward compatibility: critical/ignorable header flags and extension records; unknown methods disable only the
   affected block.
 - Frame headers carry magic + frame number + CRC, so a lost index can be salvaged by scanning.
-- Encryption: PBKDF2-HMAC-SHA512 → HKDF → AES-256-GCM key + password verifier; the *whole* block body (descriptor,
+- Encryption: Argon2id (kdf 2, 1 GiB, 2 passes, 4 lanes by default; PBKDF2-HMAC-SHA512, kdf 1, for archives Osmium 0.1 must
+  open) → HKDF → AES-256-GCM key + password verifier; the *whole* block body (descriptor,
   hashes, payload) and the index are encrypted, so no plaintext content hash or file name is exposed.
 - Frames are written in completion order (parallel compression); the index maps segments to frame numbers.
 
@@ -362,7 +363,7 @@ runs quick tests or a budgeted deep auto-tune.
 | Malicious archive: path traversal / device names / ADS | Strict path validation (FORMAT §7); extraction root containment check after full-path resolution |
 | Malicious archive: decompression bomb / memory exhaustion | Declared `rawLen` checked against output; per-codec decode-memory estimate checked against a configurable limit **before** decoding (CM table bits, LZMA dictionary, zstd window, PPMd memory); index size and entry counts capped |
 | Corrupted archive | Hash checks at header, footer, index, block and file level; corrupted blocks reported, other files still extract |
-| Password attacks on encrypted archives | AES-256-GCM, PBKDF2-SHA256 600k iterations (configurable), unique salt per archive, file names inside encrypted index |
+| Password attacks on encrypted archives | AES-256-GCM, Argon2id (1 GiB, 2 passes, 4 lanes by default; PBKDF2-HMAC-SHA512 for Compatible), unique salt per archive, file names inside encrypted index, optional size hiding |
 | Known-plaintext confirmation | No plaintext hashes or sizes in inline headers of encrypted archives |
 | LAN attacker vs cluster | Mutual HMAC authentication bound to the ECDH transcript, AES-GCM frames with sequence numbers, discovery HMAC + timestamp + nonce, handshake rate limiting, firewall rule on the Private profile only |
 | Malicious or buggy worker | Every remote block decoded and hash-checked locally; trial spot checks; quarantine; workers never receive file names |

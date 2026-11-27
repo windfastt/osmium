@@ -30,9 +30,10 @@ checks every block before writing it. It runs as a notification-area app with Ex
   Ultra and Insane also tune parameters and may use context mixing, which extracts slowly. Exhaustive is experimental.
 - **Checked before it is written.** By default every block is decoded and compared with its input before it is
   written. Archives are written to a temporary file, read back and only then renamed into place.
-- **Optional password encryption.** AES-256-GCM with a key from PBKDF2-HMAC-SHA512 (600,000 iterations by default).
-  File names, sizes and times are encrypted too; the Osmium version that wrote the archive, the key-derivation
-  settings and the number and sizes of its blocks stay visible. A lost password cannot be recovered.
+- **Optional password encryption.** AES-256-GCM with a key from Argon2id (1 GiB of memory by default;
+  PBKDF2-HMAC-SHA512 for archives that Osmium 0.1 must open). File names, sizes and times are encrypted too; the
+  key-derivation settings and the number and sizes of the blocks stay visible (*Hide exact sizes* pads them). Osmium
+  cannot recover or reset a lost password.
 - **Duplicates stored once:** whole files from Balanced to Ultra, content-defined chunks in Insane and Exhaustive.
 - **Windows integration.** A notification-area app with a progress ring, Explorer menu entries, the `.osa` file
   association and optional watch folders, plus the `osmium` command-line tool, also available as a single file.
@@ -140,7 +141,8 @@ osmium help                                        # every command and option
 ```
 
 `--skip` makes `x` skip files that already exist, and `--overwrite` replaces them. To encrypt on the command line,
-pipe the password to `--password-stdin`; `x`, `t` and `l` ask for it when needed.
+pipe the password to `--password-stdin`; `x`, `t` and `l` ask for it when needed. Encrypted archives use Argon2id;
+`--protection compatible` makes archives that Osmium 0.1 can open.
 
 **Other formats.** Osmium opens, tests and extracts ZIP (also AES-encrypted), 7z, TAR (also .tar.gz/.tgz, .tar.bz2,
 .tar.xz, .tar.zst) and single .gz, .bz2, .xz and .zst files, recognised by their content. Extraction never writes
@@ -245,8 +247,8 @@ The latest release is **0.1.1** (24 November 2026). **0.2.0** is in progress on 
 builds from `main` still report 0.1.1. The work so far includes license texts in every download and `osmium license`,
 the UDP firewall rule, app fixes, better handling of archives from newer versions, the CM2 context-mixing codec for
 x86/x64 code, `osmium salvage` for damaged archives, spare copies of the file list and header, the Recycle Bin option,
-and ZIP, 7z, TAR and single compressed files on the command line; still being built are the new interface and
-Argon2id password protection. See the
+ZIP, 7z, TAR and single compressed files on the command line, and Argon2id password protection; still being built is
+the new interface. See the
 [roadmap](ROADMAP.md) and the unreleased section of the [changelog](CHANGELOG.md).
 
 Limitations today:
