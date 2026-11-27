@@ -246,7 +246,7 @@ pin the bytes Osmium CM and every filter produce for fixed inputs. A `v*` tag pu
 The latest release is **0.1.1** (24 November 2026). **0.2.0** is in progress on `main` and not in any download yet;
 builds from `main` still report 0.1.1. The work so far includes license texts in every download and `osmium license`,
 the UDP firewall rule, app fixes, better handling of archives from newer versions, the CM2 context-mixing codec for
-x86/x64 code, `osmium salvage` for damaged archives, spare copies of the file list and header, the Recycle Bin option,
+x86/x64 code, a cheaper parameter search, `osmium salvage` for damaged archives, spare copies of the file list and header, the Recycle Bin option,
 ZIP, 7z, TAR and single compressed files on the command line, and Argon2id password protection; still being built is
 the new interface. See the
 [roadmap](ROADMAP.md) and the unreleased section of the [changelog](CHANGELOG.md).

@@ -72,6 +72,14 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
 - **Salvage** never replaces the archive it reads, also when the destination reaches it by another path, and tries at
   most two copies of an encrypted archive's header, so a damaged or crafted file cannot keep it deriving keys for
   hours.
+- **Insane and chunk dedup:** a file that repeats a chunk, such as a run of zeros, could not be archived; each
+  repeated chunk is now stored once.
+- **Memory while compressing:** finished blocks waiting to be written were not counted against the memory limit;
+  they now keep their share until they are written, so the next block to be written can always finish. The memory
+  estimate for Zstandard levels 20–22 with large windows follows the level's tables instead of being too low.
+- **Reading the files to compress:** every source is read only while it is the file the scan saw (checked by its file
+  id), duplicates are read from that same file, and pipes and devices are left out of the scan instead of being
+  read. A malformed PE or BMP header can no longer stop planning.
 
 ### Added
 - **Spare copy of the file list and header.** Archives of 1 MiB and more whose file list is small next to their data
@@ -144,6 +152,13 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   settings-editing tests.
 
 ### Changed
+- **Balanced:** large groups are cut into 32 MiB blocks instead of 64 MiB, so they compress and verify in more blocks
+  at once, for an archive about 0.6 % larger (35,392,814 against 35,188,250 bytes on a 124 MiB Windows application
+  folder). Near-identical files or versions that together exceed 32 MiB no longer share a block and compress worse;
+  two versions of a 22 MiB file went from 7.7 MB to 11.7 MB. For such folders, set *Solid block size* to 64 MiB. A
+  single WAV or BMP of up to 64 MiB still gets its audio or image pipeline in one block.
+- **Parameter search:** Ultra and Insane screen each step of their search on a smaller sample first and compress only
+  the promising variations in full, where that cuts the work.
 - **Profiles:** Ultra, Insane and Exhaustive use CM2 instead of Osmium CM; x64 code gets the x86v2 filter, 32-bit x86
   code keeps the x86 filter and is grouped separately. Forbidding `cm` or `x86` in rules or settings also forbids the
   newer member of the family, and `cm.*` parameters apply to CM2. The CM memory setting goes up to 1 GiB (24); the
