@@ -341,6 +341,78 @@ public class ReaderPolicyTests
         }
     }
 
+    // ------------------------------------------------------------------ item 4: "encrypted" is said only once verified
+
+    [Theory]
+    [InlineData("argon2id", "Argon2id, 64 KiB, 1 pass, 1 lane", "Argon2id (64 KiB, 1 pass, 1 lane)")]
+    [InlineData("pbkdf2", "PBKDF2-SHA512, 100,000 iterations", "PBKDF2-SHA512 (100,000 iterations; Osmium 0.1 can open it)")]
+    public void PeekReadsTheHeaderOnlyAndSaysThePasswordIsNotYetChecked(string kdf, string asks, string key)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), kdf, SpareCopyPolicy.Always);
+        using var seams = new KdfSeams(inspectWipe: false);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var p = OsaReader.Peek(path);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1 << 20); // the file list is not read
+        Assert.Equal(0, seams.Allocations); // no key derivation
+        Assert.True(p.ClaimsEncryption);
+        Assert.Equal(EncryptedArchives.Options(kdf).Kdf, p.Kdf);
+        Assert.Equal($"Encrypted: password not yet checked (the header asks for {asks})", p.ProtectionText);
+        using (var r = OsaReader.Open(path, () => Pw))
+            Assert.Equal($"Encrypted: AES-256-GCM, key from {key}; password verified", r.ProtectionText);
+
+        string plainPath = EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions(), 3000);
+        var plain = OsaReader.Peek(plainPath);
+        Assert.Equal((false, (KdfParameters?)null, "Not encrypted"), (plain.ClaimsEncryption, plain.Kdf, plain.ProtectionText));
+        using (var r = OsaReader.Open(plainPath)) Assert.Equal("Not encrypted", r.ProtectionText);
+    }
+
+    [Fact]
+    public void PeekAppliesTheChecksThatNeedNoPassword()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), "argon2id");
+        // the index cap, from the footer
+        string huge = Variant(t, path, "huge", b =>
+        {
+            var footer = b.AsSpan(b.Length - Osa.FooterSize);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(footer[8..], 1L << 40);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(footer[24..], Osa.Crc(footer[..24]));
+        });
+        Assert.Equal(OsaReader.IndexTooLarge, Assert.Throws<CorruptDataException>(() => OsaReader.Peek(huge)).Message);
+        // a header that claims encryption without its settings (record 1 made an ignorable record)
+        string claims = Variant(t, path, "claims", b => EncryptedArchives.EditHeader(b, h => h[36] = 4));
+        Assert.Throws<ModifiedArchiveException>(() => OsaReader.Peek(claims));
+        // a damaged header is read from its copy, as opening does
+        string withCopy = EncryptedArchives.Write(t.Sub("b.osa"), "argon2id", SpareCopyPolicy.Always);
+        string damaged = Variant(t, withCopy, "damaged", b => b[12] ^= 0x04);
+        Assert.True(OsaReader.Peek(damaged).ClaimsEncryption);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void NothingSaysVerifiedUnlessThePasswordWasChecked(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var failures = new List<Exception>
+        {
+            Assert.Throws<WrongPasswordException>(() => OsaReader.Open(path, () => "another password")),
+            Assert.Throws<PasswordRequiredException>(() => OsaReader.Open(path, () => null)),
+            Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(
+                Variant(t, path, "flag", b => EncryptedArchives.EditFrameHeader(b, EncryptedArchives.Frames(path)[1].Offset, SetReservedFrameFlag)), () => Pw)),
+            Assert.Throws<WrongPasswordException>(() => ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => "another password" }, Ct)),
+        };
+        if (kdf == "argon2id") // PBKDF2 cannot stop once started; Argon2id stops between slices
+        {
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            failures.Add(Assert.ThrowsAny<OperationCanceledException>(() =>
+                OsaReader.Open(path, new OsaOpenOptions { Password = () => Pw, Cancellation = cancelled.Token })));
+        }
+        Assert.All(failures, e => Assert.DoesNotContain("verified", e.Message, StringComparison.OrdinalIgnoreCase));
+    }
+
     // ------------------------------------------------------------------ item 7: no product version in the clear
 
     [Theory]

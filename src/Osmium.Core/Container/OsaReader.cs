@@ -9,6 +9,13 @@ namespace Osmium.Core.Container;
 public sealed class PasswordRequiredException() : Exception("This archive is encrypted. A password is required.");
 public sealed class WrongPasswordException() : Exception("Wrong password.");
 
+/// <summary>
+/// What <see cref="OsaReader.Peek"/> read from an archive's header: whether it claims to be encrypted, the key
+/// derivation its header asks for, and a line to show for it ("Encrypted: password not yet checked (…)" or "Not
+/// encrypted"). A claim only: nothing has been checked against a password or authenticated.
+/// </summary>
+public sealed record ArchivePeek(bool ClaimsEncryption, KdfParameters? Kdf, string ProtectionText);
+
 /// <summary>How <see cref="OsaReader.Open(string, OsaOpenOptions)"/> opens an archive.</summary>
 public sealed record OsaOpenOptions
 {
@@ -121,33 +128,9 @@ public sealed class OsaReader : IDisposable
         try
         {
             long length = RandomAccess.GetLength(handle.Handle);
-            if (length < Osa.FooterSize + 36) throw new CorruptDataException("File is too small to be an Osmium archive.");
             var warnings = new List<string>();
-            ArchiveHeader? header = null;
-            Exception? headerError = null;
-            try { header = ReadHeader(handle, 0, length); }
-            catch (Exception e) when (IsDamage(e)) { headerError = e; }
-            var footer = ReadFooter(handle, length);
-            if (footer is null)
-            {
-                if (headerError is not null) Rethrow(headerError);
-                throw new CorruptDataException(EndDamaged);
-            }
-            var ft = footer.Value;
-            // The index frame is read whole before it can be authenticated: its length is capped before anything else.
-            CheckIndexLength(ft);
-            bool usedSpareHeader = false;
-            if (header is null)
-            {
-                header = HeaderFromCopy(handle, ft, length);
-                if (header is null) Rethrow(headerError!);
-                warnings.Add(UsedSpareHeader);
-                usedSpareHeader = true;
-            }
-            if (ft.IdPrefix != BinaryPrimitives.ReadUInt64LittleEndian(header!.ArchiveId))
-                throw new CorruptDataException("Footer does not belong to this archive.");
-            if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
-                throw new CorruptDataException("Index location is invalid (truncated or appended file?).");
+            var (header, ft, usedSpareHeader) = ReadEnds(handle, length);
+            if (usedSpareHeader) warnings.Add(UsedSpareHeader);
 
             // Encrypted archives: every byte is header, frame header, authenticated ciphertext, an exact copy of one of
             // them, zero padding, the header-copy trailer or the footer (FORMAT §5). What else is found is refused before
@@ -254,6 +237,60 @@ public sealed class OsaReader : IDisposable
             throw;
         }
     }
+
+    /// <summary>
+    /// The header and the footer, as every open reads them first: the footer must check out; the index frame's length
+    /// is capped before anything else, as the frame is read whole before it can be authenticated; a damaged header is
+    /// read from its copy H (<paramref name="usedSpareHeader"/>); the footer must name this archive and place the index
+    /// frame at the end of the file.
+    /// </summary>
+    private static (ArchiveHeader Header, ArchiveFooter Footer, bool UsedSpareHeader) ReadEnds(ArchiveFile handle, long length)
+    {
+        if (length < Osa.FooterSize + 36) throw new CorruptDataException("File is too small to be an Osmium archive.");
+        ArchiveHeader? header = null;
+        Exception? headerError = null;
+        try { header = ReadHeader(handle, 0, length); }
+        catch (Exception e) when (IsDamage(e)) { headerError = e; }
+        var footer = ReadFooter(handle, length);
+        if (footer is null)
+        {
+            if (headerError is not null) Rethrow(headerError);
+            throw new CorruptDataException(EndDamaged);
+        }
+        var ft = footer.Value;
+        CheckIndexLength(ft);
+        bool usedSpareHeader = header is null;
+        header ??= HeaderFromCopy(handle, ft, length) ?? Rethrow<ArchiveHeader>(headerError!);
+        if (ft.IdPrefix != BinaryPrimitives.ReadUInt64LittleEndian(header.ArchiveId))
+            throw new CorruptDataException("Footer does not belong to this archive.");
+        if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
+            throw new CorruptDataException("Index location is invalid (truncated or appended file?).");
+        return (header, ft, usedSpareHeader);
+    }
+
+    internal const string NotEncrypted = "Not encrypted";
+
+    /// <summary>
+    /// What an archive says about its protection, from its header and footer alone, with the checks
+    /// <see cref="Open(string, OsaOpenOptions)"/> makes of them first (a damaged header is read from its copy, and the
+    /// file list's length is checked against the cap): no key derivation, no password, nothing of the file list. An
+    /// encrypted archive is "Encrypted: password not yet checked (the header asks for …)": that it is encrypted is
+    /// known only once the password is checked and the file list authenticated (<see cref="ProtectionText"/>).
+    /// </summary>
+    public static ArchivePeek Peek(string path)
+    {
+        using var handle = new ArchiveFile(File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete), null);
+        var (header, _, _) = ReadEnds(handle, RandomAccess.GetLength(handle.Handle));
+        return header.Encryption is { } e
+            ? new ArchivePeek(true, e.Kdf, $"Encrypted: password not yet checked (the header asks for {e.Kdf.Describe()})")
+            : new ArchivePeek(false, null, NotEncrypted);
+    }
+
+    /// <summary>
+    /// "Encrypted: AES-256-GCM, key from …; password verified", or "Not encrypted". An open reader of an encrypted
+    /// archive has checked the password against the verifier and authenticated the file list (<see cref="Open(string, OsaOpenOptions)"/>).
+    /// </summary>
+    public string ProtectionText => Header.Encryption is { } e ? $"Encrypted: AES-256-GCM, key from {e.Kdf.KeyText()}; password verified" : NotEncrypted;
 
     /// <summary>
     /// Damage the spare copies can stand in for: bytes that do not check out, or that cannot be read at all (a bad
