@@ -226,6 +226,20 @@ public sealed class RecycleGateTests : IDisposable
     }
 
     [Fact]
+    public void OnlyFinalPathsWithADriveLetterOrAShareAreAskedForTheirDrive()
+    {
+        Assert.Equal(@"C:\Users\a.txt", FinalPaths.ToDos(@"\\?\C:\Users\a.txt"));
+        Assert.Equal(@"C:\", FinalPaths.ToDos(@"\\?\C:\"));
+        Assert.Equal(@"\\server\share\a.txt", FinalPaths.ToDos(@"\\?\UNC\server\share\a.txt"));
+        Assert.Equal(@"C:\Users\a.txt", FinalPaths.ToDos(@"C:\Users\a.txt"));
+        // A volume without a drive letter: without the prefix this would name a place below the current folder. Its
+        // drive type is unknown, so the item stays.
+        Assert.Null(FinalPaths.ToDos(@"\\?\Volume{0b1c2d3e-0000-0000-0000-000000000000}\a.txt"));
+        Assert.Null(FinalPaths.ToDos(@"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\a.txt"));
+        Assert.Null(FinalPaths.ToDos(@"Volume{0b1c2d3e-0000-0000-0000-000000000000}\a.txt"));
+    }
+
+    [Fact]
     public void AnItemStillInPlaceDidNotMove()
     {
         Directory.CreateDirectory(_folder);

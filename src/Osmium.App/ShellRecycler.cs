@@ -214,7 +214,10 @@ internal sealed partial class ShellRecycler : IRecycler
         }
     }
 
-    /// <summary>The path of the item itself, with every junction, symbolic link and mounted folder resolved.</summary>
+    /// <summary>
+    /// The path of the item itself, with every junction, symbolic link and mounted folder resolved; null when it cannot
+    /// be told, or lies on a volume without a drive letter (<see cref="FinalPaths.ToDos"/>).
+    /// </summary>
     private static unsafe string? FinalPath(string path)
     {
         using var handle = CreateFile(path, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
@@ -226,9 +229,7 @@ internal sealed partial class ShellRecycler : IRecycler
             fixed (char* p = buffer) n = GetFinalPathNameByHandle(handle, p, (uint)buffer.Length, 0); // normalized, drive letter
             if (n == 0) return null;
             if (n >= buffer.Length) { buffer = new char[n]; continue; } // n is the size it needs
-            string final = new(buffer, 0, (int)n);
-            return final.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + final[8..]
-                : final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final[4..] : final;
+            return FinalPaths.ToDos(new string(buffer, 0, (int)n));
         }
     }
 
