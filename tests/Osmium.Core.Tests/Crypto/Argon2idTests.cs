@@ -168,6 +168,11 @@ public class Argon2idHeavyTests
         SkipUnlessMemoryFor(c.MemoryKiB * 1024L);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         Assert.Equal(c.Tag, Argon2idTests.Tag(c, Environment.ProcessorCount));
-        TestContext.Current.TestOutputHelper?.WriteLine($"{c}: {sw.Elapsed.TotalSeconds:F2} s on {Environment.ProcessorCount} processors");
+        double seconds = sw.Elapsed.TotalSeconds;
+        TestContext.Current.TestOutputHelper?.WriteLine($"{c}: {seconds:F2} s on {Environment.ProcessorCount} processors");
+        var p = KdfParameters.Argon2id(c.TimeCost, c.MemoryKiB, c.Lanes);
+        string name = p == KdfPresets.Floor ? "Floor" : p == KdfPresets.Standard ? "Standard" : p == KdfPresets.Strong ? "Strong"
+            : p == KdfPresets.Maximum ? "Maximum" : "one lane";
+        KdfTimingReport.Add("vector", name, p, seconds, 1);
     }
 }
