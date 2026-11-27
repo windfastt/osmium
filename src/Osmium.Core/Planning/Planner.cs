@@ -96,6 +96,8 @@ public sealed class PlanGroup
     public EffectiveRules Rules { get; set; } = new();
     public List<string> Explain { get; } = [];
     public bool Forced { get; set; }
+    /// <summary>How the files are ordered when not by extension, name and path, for the explain log.</summary>
+    public string? Ordering { get; set; }
 }
 
 public sealed class PlanBlock
@@ -174,7 +176,7 @@ public sealed class Planner(PlanOptions o)
         Dedupe(plan, dedup, ct);
 
         // 3. groups and layout
-        BuildGroups(plan);
+        BuildGroups(plan, ct);
         Layout(plan, o.BlockCap ?? p.BlockCap);
 
         // 4. choose a pipeline for each group. Groups are independent, so they are planned concurrently; the trial
@@ -267,9 +269,10 @@ public sealed class Planner(PlanOptions o)
 
     // ------------------------------------------------------------------ grouping
 
-    private void BuildGroups(ArchivePlan plan)
+    private void BuildGroups(ArchivePlan plan, CancellationToken ct)
     {
         var byKey = new Dictionary<string, PlanGroup>();
+        var members = new List<List<GroupMember>>(); // per group, its files in the order below
         var order = Enumerable.Range(0, plan.Files.Count)
             .OrderBy(i => Path.GetExtension(plan.Files[i].Src.RelPath), StringComparer.OrdinalIgnoreCase)
             .ThenBy(i => Path.GetFileName(plan.Files[i].Src.RelPath), StringComparer.OrdinalIgnoreCase)
@@ -289,13 +292,18 @@ public sealed class Planner(PlanOptions o)
                 g = new PlanGroup { Id = plan.Groups.Count, Key = key, Class = f.Class, Rep = f.Analysis, Rules = f.Rules, Forced = f.Rules.Pipeline is not null };
                 byKey[key] = g;
                 plan.Groups.Add(g);
+                members.Add([]);
             }
             if (f.Analysis is not null && (g.Rep is null || f.Src.Size > (g.Rep.Stats.SampledBytes))) g.Rep ??= f.Analysis;
-            foreach (var u in own) { g.Units.Add(u); g.Size += plan.Units[u].Length; }
+            members[g.Id].Add(new GroupMember(i, own));
+            foreach (var u in own) g.Size += plan.Units[u].Length;
             f.Group = g.Id;
         }
+        if (o.Profile.SimilarityOrder) OrderBySimilarity(plan, members, ct);
         foreach (var g in plan.Groups)
         {
+            // A file's own units stay together and in their order (chunk dedup splits a file into several).
+            foreach (var m in members[g.Id]) g.Units.AddRange(m.Units);
             g.Alignment = g.Class switch
             {
                 CompatClass.CodeArm64 => 4,
@@ -303,6 +311,50 @@ public sealed class Planner(PlanOptions o)
                 CompatClass.Structured => Math.Max(1, g.Rep?.Stats.Stride ?? 1),
                 _ => 1,
             };
+        }
+    }
+
+    private readonly record struct GroupMember(int File, List<int> Units);
+
+    /// <summary>
+    /// Reorders the files of every group of at least <see cref="SimilarityOrder.MinFiles"/> files whose classes qualify
+    /// (<see cref="SimilarityOrder.Applies"/>) so that similar files are adjacent. The chain starts from the group's first
+    /// file in name order and breaks ties by that order, so the result depends only on the files' contents and names.
+    /// Groups forced to Store gain nothing and keep their order, as do groups with a file that cannot be read.
+    /// </summary>
+    private void OrderBySimilarity(ArchivePlan plan, List<List<GroupMember>> members, CancellationToken ct)
+    {
+        var eligible = plan.Groups.Where(g =>
+            members[g.Id].Count is >= SimilarityOrder.MinFiles and <= SimilarityOrder.MaxFiles
+            && !(g.Forced && g.Rules.Pipeline!.IsStore)
+            && members[g.Id].All(m => SimilarityOrder.Applies(plan.Files[m.File].Class))).ToList();
+        if (eligible.Count == 0) return;
+        var files = eligible.SelectMany(g => members[g.Id]).Select(m => m.File).ToArray();
+        var signatures = new ulong[files.Length];
+        var unreadable = new bool[files.Length];
+        int hashed = 0;
+        // Each signature depends only on its own file, so computing them in parallel does not change the order.
+        Parallel.For(0, files.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(o.Threads, 1, 8), CancellationToken = ct }, k =>
+        {
+            var src = plan.Files[files[k]].Src;
+            try { signatures[k] = SimilarityOrder.Signature(src.FullPath, src.Size); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { unreadable[k] = true; }
+            o.Progress?.Invoke("Ordering", (double)Interlocked.Increment(ref hashed) / files.Length);
+        });
+        int start = 0;
+        foreach (var g in eligible)
+        {
+            var list = members[g.Id];
+            var range = start..(start + list.Count);
+            start += list.Count;
+            int bad = Array.IndexOf(unreadable, true, range.Start.Value, list.Count);
+            if (bad >= 0)
+            {
+                g.Ordering = $"order: by extension, name and path ({plan.Files[files[bad]].Src.RelPath} could not be read)";
+                continue;
+            }
+            members[g.Id] = [.. SimilarityOrder.Chain(signatures[range]).Select(k => list[k])];
+            g.Ordering = $"order: similarity (SimHash), {list.Count:N0} files";
         }
     }
 
@@ -359,6 +411,7 @@ public sealed class Planner(PlanOptions o)
         long biggestBlock = plan.Blocks.Where(b => b.Group == g.Id).Select(b => b.RawSize).DefaultIfEmpty(0).Max();
         g.Explain.Add($"group {g.Id}: {g.Class}, {g.Units.Count} unit(s), {g.Size:N0} bytes{(g.Rep is null ? "" : ", e.g. " + g.Rep.Format)}");
         foreach (var pr in g.Rules.Provenance.Distinct()) g.Explain.Add("  rule: " + pr);
+        if (g.Ordering is not null) g.Explain.Add("  " + g.Ordering);
 
         if (g.Forced)
         {

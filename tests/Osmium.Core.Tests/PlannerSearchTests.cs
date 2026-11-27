@@ -169,6 +169,9 @@ public class PlannerSearchTests
         for (int i = 0; i < noise.Length; i++) noise[i] = (byte)r.Next();
         File.WriteAllBytes(Path.Combine(dir, "book.txt"), Synthetic.Text(300 << 10));
         File.WriteAllBytes(Path.Combine(dir, "sub", "notes.txt"), Synthetic.Text(40 << 10, seed: 2));
+        // four text files: enough for the similarity order
+        File.WriteAllBytes(Path.Combine(dir, "sub", "draft.txt"), Synthetic.Text(30 << 10, seed: 3));
+        File.WriteAllBytes(Path.Combine(dir, "odd.txt"), Synthetic.HostileText(20 << 10));
         File.WriteAllBytes(Path.Combine(dir, "records.bin"), Synthetic.Records(20_000));
         File.WriteAllBytes(Path.Combine(dir, "code.bin"), Synthetic.X86(120 << 10));
         File.WriteAllBytes(Path.Combine(dir, "tone.wav"), Synthetic.Pcm(30_000, header: true));
@@ -184,10 +187,11 @@ public class PlannerSearchTests
         using var t = new TempDir();
         var dir = MixedFolder(t);
         async Task<string> Plan(int threads) =>
-            Fingerprint(await new Planner(Options(Profile.Max, null, threads: threads)).BuildAsync(Scanner.Scan([dir]), Ct));
+            Fingerprint(await new Planner(Options(Profile.Max with { SimilarityOrder = true }, null, threads: threads)).BuildAsync(Scanner.Scan([dir]), Ct));
         string one = await Plan(1);
         Assert.Equal(one, await Plan(8));
         Assert.True(one.Split('\n').Count(l => l.StartsWith('G')) >= 5, one);
+        Assert.Contains("order: similarity (SimHash)", one);
     }
 
     [Fact]
@@ -198,7 +202,7 @@ public class PlannerSearchTests
         // a step, re-ranks the other candidates on every rung.
         using var t = new TempDir();
         var dir = MixedFolder(t);
-        var profile = Profile.Ultra with { Name = "jitter", Rungs = [16 << 10, 64 << 10] };
+        var profile = Profile.Ultra with { Name = "jitter", Rungs = [16 << 10, 64 << 10], SimilarityOrder = true };
         static long Landscape(PipelineSpec s, byte[] sample) =>
             LzmaLandscape(s, sample) * 1000 + (long)(ScriptedTrials.StableHash($"{s}@{sample.Length}") % 1000);
         async Task<string> Plan(int threads, int salt) => Fingerprint(await new Planner(Options(profile, new ScriptedTrials(Landscape)
@@ -209,5 +213,6 @@ public class PlannerSearchTests
         Assert.Equal(first, await Plan(8, 1));
         Assert.Equal(first, await Plan(3, 2));
         Assert.Contains("search:", first);
+        Assert.Contains("order: similarity (SimHash)", first);
     }
 }

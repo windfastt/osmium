@@ -31,6 +31,10 @@ public sealed record Profile
     public bool Experimental { get; init; }
     /// <summary>Experimental: every CM candidate uses the full model set (orders 5/8, all sparse models).</summary>
     public bool CmAllModels { get; init; }
+    /// <summary>Order the files of a group so that similar files are adjacent (SimHash of sampled 4-grams, greedy
+    /// nearest neighbour) instead of only by extension, name and path. Off in every profile: on the benchmark folders
+    /// it made C headers 2.8 % larger (IMPROVISATION.md §5.4).</summary>
+    public bool SimilarityOrder { get; init; }
 
     public static readonly Profile Store = new()
     {
