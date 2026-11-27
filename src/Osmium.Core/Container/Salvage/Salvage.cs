@@ -74,6 +74,20 @@ internal sealed class SalvageRun : IDisposable
         _src.Dispose();
     }
 
+    private string? _archiveIdentity;
+    private bool _archiveIdentityRead;
+
+    /// <summary>The archive's <see cref="TargetNames.FileIdentity(string)"/>, read once: a file in the destination with
+    /// it is the archive, whatever path reaches it.</summary>
+    private string? ArchiveIdentity
+    {
+        get
+        {
+            if (!_archiveIdentityRead) (_archiveIdentity, _archiveIdentityRead) = (TargetNames.FileIdentity(_archive), true);
+            return _archiveIdentity;
+        }
+    }
+
     public SalvageResult Execute(Func<string?>? password)
     {
         // 1. Header: an unencrypted archive does not need it; an encrypted one needs its salt and archive id.
@@ -718,7 +732,8 @@ internal sealed class SalvageRun : IDisposable
             try { own[e] = PathSafety.Resolve(_dest, e.Path); }
             catch (CorruptDataException ex) { _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, ex.Message)); }
         }
-        var planner = new TargetNames(_dest, names, own.Values, null);
+        // The archive being read, under whatever path the destination reaches it, gets a free name and is never replaced.
+        var planner = new TargetNames(_dest, names, own.Values, null, ArchiveIdentity);
         var planned = new List<FileJob>();
         var folders = new List<(ArchiveEntry Entry, string Path)>();
         foreach (var e in index.Entries) // index order: parents before children
@@ -1041,6 +1056,9 @@ internal sealed class SalvageRun : IDisposable
                     string target = Path.Combine(_dest, primary ? $"block-{f.Number}.bin" : $"block-{f.Number}-at-{f.Offset}.bin");
                     try
                     {
+                        // The archive being read, under whatever path, is never replaced: its name is taken in every mode.
+                        if (File.Exists(target) && ArchiveIdentity is { } id && TargetNames.FileIdentity(target) == id)
+                            target = Extractor.UniqueName(target);
                         if (File.Exists(target))
                         {
                             if (_o.Overwrite == OverwriteMode.Skip)
