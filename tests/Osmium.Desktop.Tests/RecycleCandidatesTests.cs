@@ -553,6 +553,58 @@ public sealed class RecycleCandidatesTests : IDisposable
     }
 
     [Fact]
+    public void AFileReplacedAfterItWasReadKeepsTheFolder()
+    {
+        string folder = Folder("in");
+        Write("in/a.txt");
+        string b = Write("in/b.txt", "more text");
+        var facts = Facts([folder]);
+        string replacement = Write("elsewhere.txt", "MORE TEXT"); // the same size, other contents
+        // The drive is asked before each look at the folder. Between the reading and the last look, another file with
+        // b.txt's size and last-write time takes its place, as a program that saves through a new file does.
+        int asked = 0;
+        Func<string, DriveType> replaces = _ =>
+        {
+            if (++asked == 2)
+            {
+                File.SetLastWriteTimeUtc(replacement, File.GetLastWriteTimeUtc(b));
+                File.Move(replacement, b, overwrite: true);
+            }
+            return DriveType.Fixed;
+        };
+        Assert.Equal("b.txt changed after it was read", RecycleCandidates.Recheck(facts, replaces, Ct)(folder));
+        Assert.Equal(2, asked);
+    }
+
+    [Fact]
+    public void AFileWrittenToAfterItWasReadKeepsTheItem()
+    {
+        string folder = Folder("in");
+        Write("in/a.txt");
+        string b = Write("in/b.txt", "more text");
+        string file = Write("c.txt", "some more text");
+        var facts = Facts([folder, file]);
+        // Between the reading and the last look, the file is written to in place and its last-write time is put back.
+        // File systems keep change times in clock ticks (up to about 16 ms on Windows), so the edit comes well after
+        // the file's last change.
+        Func<string, DriveType> EditsOnTheLastLook(string path)
+        {
+            int asked = 0;
+            return _ =>
+            {
+                if (++asked == 2)
+                {
+                    Thread.Sleep(50);
+                    EditKeepingSizeAndTime(path);
+                }
+                return DriveType.Fixed;
+            };
+        }
+        Assert.Equal("b.txt changed after it was read", RecycleCandidates.Recheck(facts, EditsOnTheLastLook(b), Ct)(folder));
+        Assert.Equal("it changed after it was read", RecycleCandidates.Recheck(facts, EditsOnTheLastLook(file), Ct)(file));
+    }
+
+    [Fact]
     public void AFileThatCannotBeReadStays()
     {
         string file = Write("a.txt");

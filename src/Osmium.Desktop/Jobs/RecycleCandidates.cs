@@ -69,9 +69,10 @@ public sealed record RecycleDecision(IReadOnlyList<InputVerdict> Inputs)
 /// deleted for good; the drive type comes from the caller, so these rules run anywhere.</item>
 /// </list>
 /// Just before an input moves (<see cref="Recheck"/>), the same rules run once more, every file it holds is read
-/// again and must hash to what the archive's index stores for it, and then the listing is taken a last time. Sizes
-/// and times alone would miss an edit that keeps both, and the bytes of a file stored once for several identical files
-/// are read only once while the archive is built.
+/// again and must hash to what the archive's index stores for it, and then the rules run a last time, with every file
+/// still the one that was read and unchanged since (same file id and change time). Sizes and times alone would miss an
+/// edit that keeps both, and the bytes of a file stored once for several identical files are read only once while the
+/// archive is built. What changes after that last look, while the system moves the item, is not seen.
 /// </summary>
 public static class RecycleCandidates
 {
@@ -140,8 +141,10 @@ public static class RecycleCandidates
     /// Judges one input again with the same facts, for the moment just before it moves: null when it may still move,
     /// else the reason it now stays (the archive changed, or the input no longer matches what the archive holds). On
     /// top of the rules of <see cref="Decide"/>, it reads every file the input holds and compares its hash with the one
-    /// the archive's index stores for it, then lists the input once more, so that nothing that appeared, went or changed
-    /// while it was read moves with it. Files are read one at a time through one 1 MiB buffer.
+    /// the archive's index stores for it. Then it applies the rules once more and requires every file to be the same
+    /// file, with the same change time, as when it was opened to be read: a file that appeared, went, was replaced or
+    /// was written to meanwhile keeps the input, even with its size and last-write time put back. Files are read one at
+    /// a time through one 1 MiB buffer.
     /// </summary>
     /// <param name="ct">Stops the reading: the input then stays, because the job was canceled.</param>
     /// <param name="streams">As for <see cref="Decide"/>.</param>
@@ -160,9 +163,12 @@ public static class RecycleCandidates
                 if (full is null) return problem;
                 var contents = new List<Content>();
                 if (Judge(full, rules, contents) is { } reason) return reason;
-                if (CompareContents(contents, ct) is { } differs) return differs;
-                // The last look, after the reading: nothing may have appeared, gone or changed meanwhile.
-                return Judge(full, rules, contents: null);
+                var stamps = new FileStamp[contents.Count];
+                if (CompareContents(contents, stamps, ct) is { } differs) return differs;
+                // The last look, after the reading: the same rules once more (the listing with its sizes and last-write
+                // times, links, placeholders, streams), and each file read must still be the same file, not changed in
+                // any way since it was opened to be read (same file id and change time).
+                return Judge(full, rules, contents: null) ?? CompareStamps(contents, stamps);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return Canceled; }
             catch (Exception e) { return $"it could not be checked again ({e.Message})"; }
@@ -283,23 +289,24 @@ public static class RecycleCandidates
     /// <summary>
     /// Reads each file of <paramref name="contents"/> as it is now and compares its XxHash128 with the hash the
     /// archive's index stores for it, which is what extraction checks the file it writes against. Every file is read on
-    /// its own, also one the archive stores once for several identical files. Returns why the input stays when a file
-    /// differs or cannot be read, null when every file matches.
+    /// its own, also one the archive stores once for several identical files. <paramref name="stamps"/> gets each
+    /// file's stamp, taken before its first byte is read, so that any change from then on shows. Returns why the input
+    /// stays when a file differs or cannot be read, null when every file matches.
     /// </summary>
-    private static string? CompareContents(List<Content> contents, CancellationToken ct)
+    private static string? CompareContents(List<Content> contents, FileStamp[] stamps, CancellationToken ct)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(HashBuffer);
         try
         {
-            foreach (var c in contents)
+            for (int i = 0; i < contents.Count; i++)
             {
+                var c = contents[i];
                 ct.ThrowIfCancellationRequested();
                 UInt128 now;
-                try { now = HashOf(c.Path, buffer, ct); }
+                try { (now, stamps[i]) = HashOf(c.Path, buffer, ct); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
                 {
-                    return c.Rel is null ? $"it could not be read to compare it with the archive ({e.Message})"
-                        : $"{c.Rel} could not be read to compare it with the archive ({e.Message})";
+                    return Unreadable(c, e);
                 }
                 if (now != c.Hash)
                     return c.Rel is null ? "its contents no longer match the archive" : $"the contents of {c.Rel} no longer match the archive";
@@ -309,12 +316,44 @@ public static class RecycleCandidates
         finally { ArrayPool<byte>.Shared.Return(buffer); }
     }
 
-    /// <summary>The XxHash128 of a file's whole contents, read from start to end.</summary>
-    private static UInt128 HashOf(string path, byte[] buffer, CancellationToken ct)
+    /// <summary>
+    /// Why the input stays when a file it holds is no longer the file that was read, or has changed in any way since
+    /// (another file id, or another change time: a write, or its times or attributes set, even back to what they were).
+    /// </summary>
+    private static string? CompareStamps(List<Content> contents, FileStamp[] stamps)
+    {
+        for (int i = 0; i < contents.Count; i++)
+        {
+            var c = contents[i];
+            FileStamp now;
+            try
+            {
+                using var handle = File.OpenHandle(c.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                now = FileFacts.StampOf(handle);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
+            {
+                return Unreadable(c, e);
+            }
+            if (now != stamps[i]) return c.Rel is null ? "it changed after it was read" : $"{c.Rel} changed after it was read";
+        }
+        return null;
+    }
+
+    private static string Unreadable(Content c, Exception e) => c.Rel is null
+        ? $"it could not be read to compare it with the archive ({e.Message})"
+        : $"{c.Rel} could not be read to compare it with the archive ({e.Message})";
+
+    /// <summary>
+    /// The XxHash128 of a file's whole contents, read from start to end, and the file's stamp, taken from the same
+    /// handle before the first byte is read.
+    /// </summary>
+    private static (UInt128 Hash, FileStamp Stamp) HashOf(string path, byte[] buffer, CancellationToken ct)
     {
         // Shared with readers only: on Windows a file that another program has open for writing cannot be opened so.
         // It may be changing, so it stays.
         using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan);
+        var stamp = FileFacts.StampOf(handle);
         var hash = new XxHash128();
         int n;
         for (long at = 0; (n = RandomAccess.Read(handle, buffer, at)) > 0; at += n)
@@ -322,7 +361,7 @@ public static class RecycleCandidates
             ct.ThrowIfCancellationRequested();
             hash.Append(buffer.AsSpan(0, n));
         }
-        return hash.GetCurrentHashAsUInt128();
+        return (hash.GetCurrentHashAsUInt128(), stamp);
     }
 
     /// <summary>

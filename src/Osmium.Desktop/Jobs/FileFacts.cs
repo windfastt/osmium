@@ -1,14 +1,73 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Osmium.Desktop.Jobs;
+
+/// <summary>
+/// Which file a handle is open on, and when it last changed in any way. On Windows: the volume, the file id and the
+/// change time, which every write and every change of the file's times, attributes or name sets (setting the last-write
+/// time back sets it too). On Linux: the device, the inode and the inode's change time (ctime).
+/// </summary>
+internal readonly record struct FileStamp(ulong Volume, UInt128 Id, long Changed);
 
 /// <summary>What the file system knows about a file or folder beyond its listing, for deciding whether it may move.</summary>
 internal static class FileFacts
 {
     /// <summary>The name of the stream Windows keeps the mark of the web in (where a file was downloaded from).</summary>
     public const string ZoneIdentifier = "Zone.Identifier";
+
+    /// <summary>The stamp of the file <paramref name="handle"/> is open on. Throws when the system cannot tell.</summary>
+    public static FileStamp StampOf(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            ulong volume;
+            UInt128 id;
+            var idInfo = new byte[24]; // FILE_ID_INFO: the volume serial number and the 128-bit file id
+            if (GetFileInformationByHandleEx(handle, FileIdInfo, idInfo, idInfo.Length))
+            {
+                volume = BitConverter.ToUInt64(idInfo, 0);
+                id = new UInt128(BitConverter.ToUInt64(idInfo, 16), BitConverter.ToUInt64(idInfo, 8));
+            }
+            else if (GetFileInformationByHandle(handle, out var info))
+            {
+                volume = info.VolumeSerialNumber;
+                id = ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow;
+            }
+            else throw LastError("which file it is could not be told");
+            var basic = new byte[40]; // FILE_BASIC_INFO: creation, last-access, last-write and change times, attributes
+            if (!GetFileInformationByHandleEx(handle, FileBasicInfo, basic, basic.Length)) throw LastError("when it last changed could not be told");
+            return new FileStamp(volume, id, BitConverter.ToInt64(basic, 24));
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            var stat = new byte[256]; // struct statx, the same on every Linux
+            bool added = false;
+            try
+            {
+                handle.DangerousAddRef(ref added);
+                if (statx((int)handle.DangerousGetHandle(), "", AtEmptyPath, StatxIno | StatxCtime, stat) != 0) throw LastError("when it last changed could not be told");
+            }
+            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
+            {
+                throw new IOException("this system does not say when a file last changed", e);
+            }
+            finally
+            {
+                if (added) handle.DangerousRelease();
+            }
+            if ((BitConverter.ToUInt32(stat, 0) & (StatxIno | StatxCtime)) != (StatxIno | StatxCtime))
+                throw new IOException("its file system does not say when it last changed");
+            ulong device = ((ulong)BitConverter.ToUInt32(stat, 136) << 32) | BitConverter.ToUInt32(stat, 140);
+            long changed = BitConverter.ToInt64(stat, 96) * 1_000_000_000 + BitConverter.ToUInt32(stat, 104);
+            return new FileStamp(device, BitConverter.ToUInt64(stat, 32), changed);
+        }
+        throw new IOException("this system does not say when a file last changed");
+    }
+
+    private static IOException LastError(string what) => new($"{what}: {new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
 
     /// <summary>
     /// The names of the named data streams of a file or folder (such as "Zone.Identifier"), never its main contents.
@@ -69,6 +128,27 @@ internal static class FileFacts
         path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path
         : path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path[2..]
         : @"\\?\" + path;
+
+    private const int FileBasicInfo = 0, FileIdInfo = 18;
+    private const int AtEmptyPath = 0x1000;
+    private const uint StatxCtime = 0x80, StatxIno = 0x100;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, [Out] byte[] info, int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
+
+    [DllImport("libc.so.6", SetLastError = true)]
+    private static extern int statx(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, [Out] byte[] buffer);
 
     private const int ErrorHandleEof = 38;
     private const uint FileNamedStreams = 0x0004_0000;
