@@ -103,7 +103,8 @@ internal static class EncryptionRecord
     {
         if (value.IsEmpty) throw new CorruptDataException(InvalidMessage);
         byte kdf = value[0];
-        if (kdf is not ((byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id)) throw new NewerVersionException($"key derivation function {kdf}");
+        if (kdf is not ((byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id))
+            throw new UnknownHeaderFieldException($"key derivation function {kdf}", $"unknown key-derivation method {kdf}");
         var info = ReadFields(value[1..], (KdfAlgorithm)kdf, checkCipher: true, out int consumed);
         int extra = value.Length - 1 - consumed;
         if (kdf == (byte)KdfAlgorithm.Argon2id && extra != 0) throw new CorruptDataException(InvalidMessage);
@@ -131,7 +132,7 @@ internal static class EncryptionRecord
             }
             var salt = r.Raw(SaltBytes).ToArray();
             byte cipher = r.B();
-            if (checkCipher && cipher != Aes256Gcm) throw new NewerVersionException($"cipher {cipher}");
+            if (checkCipher && cipher != Aes256Gcm) throw new UnknownHeaderFieldException($"cipher {cipher}", $"unknown cipher {cipher}");
             var verifier = r.Raw(VerifierBytes).ToArray();
             consumed = r.Position;
             return new EncryptionInfo(p, salt, verifier);
@@ -203,9 +204,10 @@ public sealed class ArchiveHeader
         rest.AsSpan(0, (int)extLen).CopyTo(all.AsSpan(36));
         if (Osa.Crc(all) != BinaryPrimitives.ReadUInt32LittleEndian(rest.AsSpan((int)extLen)))
             throw new CorruptDataException("Archive header is corrupt (CRC mismatch).");
-        // Checked after the CRC: an unknown critical flag in an intact header was set by a newer version.
+        // Checked after the CRC: an unknown critical flag in an intact header was set by a newer version, or by a change
+        // whose CRC was recomputed (nothing in the header is authenticated yet).
         if ((flags & 0xFFFF & ~Osa.KnownCriticalFlags) is var unknown and not 0)
-            throw new NewerVersionException($"archive flag 0x{unknown:X4}");
+            throw new UnknownHeaderFieldException($"archive flag 0x{unknown:X4}", $"unknown archive flag 0x{unknown:X4}");
 
         EncryptionInfo? enc = null;
         string? creator = null;
@@ -228,7 +230,7 @@ public sealed class ArchiveHeader
                     creatorBytes = val.Length;
                     break;
                 default:
-                    if ((type & 1) == 1) throw new NewerVersionException($"archive feature #{type}");
+                    if ((type & 1) == 1) throw new UnknownHeaderFieldException($"archive feature #{type}", $"unknown archive feature #{type}");
                     ignored++; // a newer version's ignorable record: kept out of encrypted archives (FORMAT §5)
                     break;
             }

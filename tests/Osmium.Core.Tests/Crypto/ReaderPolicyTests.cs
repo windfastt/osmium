@@ -376,6 +376,22 @@ public class ReaderPolicyTests
 
     [Theory]
     [MemberData(nameof(Kdfs))]
+    public void AHeaderFlagOfALaterVersionSaysThatItMayAlsoBeAChange(string kdf)
+    {
+        // The header is read before anything can be authenticated: the archive is refused whole, before the password,
+        // and the message names both causes. What the authenticated file list declares keeps the plain message.
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000);
+        string changed = Variant(t, path, "flag", b => EncryptedArchives.EditHeader(b, h => h[12] |= 0x02));
+        int asked = 0;
+        var e = Assert.ThrowsAny<NewerVersionException>(() => OsaReader.Open(changed, () => { asked++; return Pw; }));
+        Assert.Equal("This archive needs a newer version of Osmium, or it was damaged or changed (unknown archive flag 0x0002).", e.Message);
+        Assert.Equal(0, asked);
+        Assert.ThrowsAny<NewerVersionException>(() => ArchiveSources.Open(changed, new ArchiveOpenOptions { Password = () => Pw }, Ct));
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
     public void SalvageTakesAFrameFlagOfALaterVersionInAnEncryptedArchiveForDamage(string kdf)
     {
         using var t = new TempDir();

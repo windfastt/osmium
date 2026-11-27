@@ -102,9 +102,11 @@ public class HeaderKdfTests
     public void UnknownFunctionsAndCiphersNeedANewerVersion()
     {
         var kdf3 = Assert.ThrowsAny<NewerVersionException>(() => Read(Header(Osa.FlagEncrypted, (1, [3, .. Argon2Record()[1..]]))));
-        Assert.Equal("This archive needs a newer version of Osmium: it uses key derivation function 3.", kdf3.Message);
+        // Read before anything can be authenticated, so the message names both causes.
+        Assert.Equal("This archive needs a newer version of Osmium, or it was damaged or changed (unknown key-derivation method 3).", kdf3.Message);
+        Assert.Equal("key derivation function 3", kdf3.Feature);
         var aead2 = Assert.ThrowsAny<NewerVersionException>(() => Read(Header(Osa.FlagEncrypted, (1, Argon2Record(cipher: 2)))));
-        Assert.Equal("This archive needs a newer version of Osmium: it uses cipher 2.", aead2.Message);
+        Assert.Equal("This archive needs a newer version of Osmium, or it was damaged or changed (unknown cipher 2).", aead2.Message);
         // the cipher is known before the fields after it: a newer cipher may have a longer verifier
         Assert.ThrowsAny<NewerVersionException>(() => Read(Header(Osa.FlagEncrypted, (1, Argon2Record(cipher: 2)[..^3]))));
     }

@@ -692,7 +692,7 @@ public class SalvageTests
             for (int i = 0; i < h.Length; i++) b[i] = h[i];
         });
         var e = Assert.ThrowsAny<NewerVersionException>(() => Container.Salvage.Run(bad, t.Sub("out"), null, null, Ct));
-        Assert.Equal("This archive needs a newer version of Osmium: it uses archive flag 0x0002.", e.Message);
+        Assert.Equal("This archive needs a newer version of Osmium, or it was damaged or changed (unknown archive flag 0x0002).", e.Message);
         Assert.False(Directory.Exists(t.Sub("out")));
     }
 

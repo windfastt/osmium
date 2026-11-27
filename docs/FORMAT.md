@@ -67,7 +67,9 @@ with the index (its number, its length, a missing encrypted flag, the index flag
 version does not know was written that way, and the archive is refused as one whose contents are not protected as
 Osmium protects them. A frame that fails authentication is damaged or changed (AES-GCM cannot tell which). Neither is
 ever reported as made by a newer version: in an encrypted archive only the header (§1) and what the authenticated index
-declares (§2.2, §3) can say that. A later version that adds a frame flag to encrypted archives therefore also sets a
+declares (§2.2, §3) can say that. The header is read before anything can be authenticated and anyone can recompute its
+CRC, so a reader that meets a critical flag, a critical record type, a key-derivation method or a cipher it does not
+know in the header says that the archive needs a newer version **or was damaged or changed**, and refuses it whole. A later version that adds a frame flag to encrypted archives therefore also sets a
 critical header flag (§1), so that older readers refuse the archive as newer before they read a frame. A block whose own
 descriptor differs from the index's copy is damage in every archive, even when its own copy names a method this version
 does not know.
