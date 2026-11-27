@@ -60,10 +60,11 @@ public sealed class OsaArchiveSource : IArchiveSource
             KdfMemoryLimit = options.Limits.MemoryBudgetBytes,
             Protection = options.AllowWeakProtection ? ProtectionPolicy.AllowWeak : ProtectionPolicy.Default,
             Cancellation = ct,
+            // Checked while the file list is decoded, before anything is allocated for an entry over the limits.
+            IndexLimits = new IndexLimits { MaxEntries = options.Limits.MaxEntries, MaxPathDepth = options.Limits.MaxPathDepth },
         });
         try
         {
-            CheckEntries(reader.Entries, options.Limits);
             return new OsaArchiveSource(reader, options.Limits);
         }
         catch
@@ -137,18 +138,6 @@ public sealed class OsaArchiveSource : IArchiveSource
         if (string.IsNullOrEmpty(prefix)) return null;
         string folder = prefix + "/";
         return p => p.Length > folder.Length && p.StartsWith(folder, StringComparison.Ordinal) ? p[folder.Length..] : null;
-    }
-
-    private static void CheckEntries(IReadOnlyList<ArchiveEntry> entries, ImportLimits limits)
-    {
-        if (entries.Count > limits.MaxEntries)
-            throw new EntryLimitException($"This archive holds {entries.Count:N0} entries, more than the {limits.MaxEntries:N0} Osmium accepts.");
-        foreach (var e in entries)
-        {
-            int depth = e.Path.Count(c => c == '/') + 1;
-            if (depth > limits.MaxPathDepth)
-                throw new EntryLimitException($"A path in this archive is {depth} folders deep, more than the {limits.MaxPathDepth} Osmium accepts.");
-        }
     }
 
     private void CheckExpansion(long output, ImportLimits limits)

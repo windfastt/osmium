@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.Archives;
 using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
@@ -30,6 +31,8 @@ public sealed record OsaOpenOptions
     /// <summary>Keys derived before for this archive (no password and no derivation are needed when one is here and
     /// matches the header's verifier); a key this open derives is added.</summary>
     public ArchiveKeyCache? KeyCache { get; init; }
+    /// <summary>Limits on the file list, applied while it is decoded (the archive source passes its import limits).</summary>
+    public IndexLimits IndexLimits { get; init; } = IndexLimits.Default;
     /// <summary>Tests: (offset, count) of a read that fails with an I/O error, as a bad sector does.</summary>
     internal Func<long, int, bool>? TestUnreadable { get; init; }
 }
@@ -170,11 +173,11 @@ public sealed class OsaReader : IDisposable
                     key = candidate.Encrypted ? KeyFor(candidate) : null;
                     try
                     {
-                        index = ReadIndex(handle, ft.IndexOffset, ft.IndexLength, ft.IndexOffset, candidate, key, registry);
+                        index = ReadIndex(handle, ft.IndexOffset, ft.IndexLength, ft.IndexOffset, candidate, key, registry, options.IndexLimits);
                     }
                     catch (Exception e) when (IsDamage(e))
                     {
-                        index = IndexFromCopy(handle, ft, candidate, key, registry) ?? Rethrow<ArchiveIndex>(e);
+                        index = IndexFromCopy(handle, ft, candidate, key, registry, options.IndexLimits) ?? Rethrow<ArchiveIndex>(e);
                         usedSpareIndex = true;
                     }
                     header = candidate;
@@ -246,12 +249,13 @@ public sealed class OsaReader : IDisposable
     /// <summary>
     /// Damage the spare copies can stand in for: bytes that do not check out, or that cannot be read at all (a bad
     /// sector), but never a wrong password, a missing one, a feature of a newer version, a refusal of an archive that is
-    /// not protected as Osmium protects archives, or a refusal or question about its key derivation (all of those are
-    /// <see cref="IOException"/>s, so they are excluded by name).
+    /// not protected as Osmium protects archives, a refusal or question about its key derivation, or a file list over
+    /// the limits (all of those are <see cref="IOException"/>s, so they are excluded by name).
     /// </summary>
     private static bool IsDamage(Exception e) =>
         e is InvalidDataException
-        || (e is IOException && e is not (NewerVersionException or ModifiedArchiveException or KdfMemoryLimitException or KdfCostException or WeakProtectionException));
+        || (e is IOException && e is not (NewerVersionException or ModifiedArchiveException or KdfMemoryLimitException or KdfCostException
+            or WeakProtectionException or EntryLimitException));
 
     /// <summary>The open archive file. Every read goes through it, so that a test can make a range unreadable.</summary>
     private sealed class ArchiveFile(SafeFileHandle handle, Func<long, int, bool>? unreadable) : IDisposable
@@ -458,7 +462,8 @@ public sealed class OsaReader : IDisposable
     /// trailer damaged) found by its frame header in the bytes before the index frame. It is read with every check
     /// of the index frame, and must name its own offset as the spare copy's. Null when no copy is usable.
     /// </summary>
-    private static ArchiveIndex? IndexFromCopy(ArchiveFile handle, ArchiveFooter footer, ArchiveHeader header, ArchiveKey? key, MethodRegistry registry)
+    private static ArchiveIndex? IndexFromCopy(ArchiveFile handle, ArchiveFooter footer, ArchiveHeader header, ArchiveKey? key, MethodRegistry registry,
+        IndexLimits limits)
     {
         var candidates = new List<long>();
         if (ReadTrailer(handle, footer.IndexOffset) is { Newer: false } t && footer.IndexOffset - t.CopyLength - footer.IndexLength is var b and >= 0)
@@ -468,7 +473,7 @@ public sealed class OsaReader : IDisposable
         {
             try
             {
-                var index = ReadIndex(handle, at, footer.IndexLength, at, header, key, registry);
+                var index = ReadIndex(handle, at, footer.IndexLength, at, header, key, registry, limits);
                 if (index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var v) && v.Length == 8 && BinaryPrimitives.ReadUInt64LittleEndian(v) == (ulong)at)
                     return index;
             }
@@ -503,12 +508,12 @@ public sealed class OsaReader : IDisposable
     /// <summary>Reads, decrypts, decodes and checks an index frame at <paramref name="offset"/>; its blocks must end by
     /// <paramref name="blocksEnd"/>.</summary>
     private static ArchiveIndex ReadIndex(ArchiveFile handle, long offset, long frameLength, long blocksEnd, ArchiveHeader header,
-        ArchiveKey? key, MethodRegistry registry)
+        ArchiveKey? key, MethodRegistry registry, IndexLimits limits)
     {
         var body = ReadFrame(handle, offset, frameLength, Osa.IndexFrameNumber, header, key, registry, isIndex: true);
         var raw = PipelineExecutor.Decode(body.Descriptor, body.Payload, CodecContext.None);
         if (BlockBody.Hash128(raw) != body.RawHash) throw new CorruptDataException("Archive index is corrupt (hash mismatch).");
-        var index = ArchiveIndex.Deserialize(raw, header.Length, registry);
+        var index = ArchiveIndex.Deserialize(raw, header.Length, registry, limits);
         foreach (var b in index.Blocks)
             if (b.Offset + b.FrameLength > blocksEnd) throw new CorruptDataException("Block table points past the index.");
         return index;
