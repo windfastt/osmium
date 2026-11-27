@@ -163,17 +163,28 @@ public class PlannerSearchTests
 
     // ------------------------------------------------------------------ near ties go to the faster decoder
 
-    /// <summary>CM without filters scores 100 000 on text, the LZMA text candidate <paramref name="gap"/> more, the rest
-    /// twice as much. CM decodes at about 0.6 MB/s, LZMA at about 40.</summary>
-    private static Func<PipelineSpec, byte[], long> CmVersusLzma(double gap) => (s, sample) =>
-        s.Codec.Method.Name == "cm" && !s.Filters.Any() ? 100_000
-        : s.ToString() == Lzma3 ? (long)Math.Round(100_000 * (1 + gap))
-        : 200_000;
-
     private static Profile Tie(bool on, int evals = 0) => Profile.Ultra with
     {
         Name = "tie", Rungs = [64 << 10], SearchEvals = evals, RaceTopTwo = true, PreferFasterDecoder = on,
     };
+
+    /// <summary>The first text candidate: context mixing with the text models, which decodes at about 0.6 MB/s.</summary>
+    private static readonly string TextCm = Candidates.For(CompatClass.Text, null, Tie(true), MethodRegistry.Default)[0].ToString();
+
+    /// <summary>The CM text candidate scores 100 000 on text, the LZMA text candidate <paramref name="gap"/> more
+    /// (LZMA decodes at about 40 MB/s), everything else twice as much.</summary>
+    private static Func<PipelineSpec, byte[], long> CmVersusLzma(double gap) => (s, sample) =>
+        s.ToString() == TextCm ? 100_000
+        : s.ToString() == Lzma3 ? (long)Math.Round(100_000 * (1 + gap))
+        : 200_000;
+
+    [Fact]
+    public void TheTieLandscapeStartsWithContextMixing()
+    {
+        var cm = PipelineSpec.Parse(TextCm, MethodRegistry.Default);
+        Assert.True(MethodIds.IsContextMixing(cm.Codec.Method.Id), TextCm);
+        Assert.Empty(cm.Filters);
+    }
 
     [Theory]
     [InlineData(0.0004, true, true)]   // 0.04 %: a tie, and LZMA decodes much faster than CM
@@ -186,7 +197,8 @@ public class PlannerSearchTests
         var trials = new ScriptedTrials(CmVersusLzma(gap));
         var plan = await PlanFile(t, "book.txt", Book, Options(Tie(on), trials));
         var g = Assert.Single(plan.Groups);
-        string cm = trials.Calls[0].Specs.Single(s => s.StartsWith("cm(", StringComparison.Ordinal));
+        string cm = TextCm;
+        Assert.Equal(cm, trials.Calls[0].Specs[0]);
         Assert.Equal(lzmaWins ? Lzma3 : cm, g.Spec!.ToString());
         // the top-two race gets the best remaining candidate: CM when LZMA won the tie
         Assert.Equal([lzmaWins ? cm : Lzma3], g.Alternates.Select(s => s.ToString()));
@@ -215,7 +227,7 @@ public class PlannerSearchTests
         using var t = new TempDir();
         var trials = new ScriptedTrials((s, sample) => s.ToString() switch
         {
-            var x when x.StartsWith("cm(", StringComparison.Ordinal) => 100_000,
+            var x when x == TextCm => 100_000,
             Ppmd8 => 100_020,
             var x when x == "text+" + Lzma3 => 100_050,
             Lzma3 => 100_080,
@@ -226,8 +238,7 @@ public class PlannerSearchTests
         Assert.Equal(Lzma3, g.Spec!.ToString());
         double Decode(string spec) => PipelineSpec.Parse(spec, MethodRegistry.Default).EstimateDecodeSeconds(g.Size);
         Assert.True(Decode(Lzma3) < Decode("text+" + Lzma3) && Decode("text+" + Lzma3) < Decode(Ppmd8));
-        string cm = trials.Calls[0].Specs.Single(s => s.StartsWith("cm(", StringComparison.Ordinal));
-        Assert.Contains($"  tie: chose {Lzma3} (decodes faster) over {cm} ({0.08:0.00} % smaller)", g.Explain);
+        Assert.Contains($"  tie: chose {Lzma3} (decodes faster) over {TextCm} ({0.08:0.00} % smaller)", g.Explain);
     }
 
     [Fact]
