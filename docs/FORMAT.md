@@ -51,10 +51,26 @@ varint payloadLen
 u32    CRC-32 of all preceding body bytes
 u8[payloadLen] payload
 ```
-Encrypted archives store `AES-256-GCM(body) ‖ tag[16]` instead, with nonce = `u64 frameNumber ‖ u32 0` and
-AAD = `archiveId ‖ u64 frameNumber`. The reader takes the frame number from the **index**, not the frame header, so
-swapped or replayed frames fail authentication. Descriptor, hashes and payload are all inside the ciphertext: no
-plaintext hash of content is ever stored.
+Encrypted archives store `AES-256-GCM(body) ‖ tag[16]` instead, under the key `Kenc` (§5), with:
+- nonce (12 bytes) = `u64 frameNumber ‖ u32 0`;
+- AAD = `archiveId[16] ‖ u64 frameNumber` for a block frame, and `archiveId[16] ‖ u64 frameNumber ‖ header` for the
+  index frame (frame number 2^64−1), where `header` is the header's bytes exactly as stored, from the magic to its
+  CRC (§1). The index frame therefore authenticates the header: its flags, its key-derivation settings and every
+  other record.
+
+The reader takes the frame number from the **index**, not the frame header, so swapped or replayed frames fail
+authentication. Descriptor, hashes and payload are all inside the ciphertext: no plaintext hash of content is ever
+stored.
+
+Frame headers are not authenticated. In an encrypted archive, a frame header whose CRC checks out but that disagrees
+with the index (its number, its length, a missing encrypted flag, the index flag on a block) or that sets a flag this
+version does not know was written that way, and the archive is refused as one whose contents are not protected as
+Osmium protects them. A frame that fails authentication is damaged or changed (AES-GCM cannot tell which). Neither is
+ever reported as made by a newer version: in an encrypted archive only the header (§1) and what the authenticated index
+declares (§2.2, §3) can say that. A later version that adds a frame flag to encrypted archives therefore also sets a
+critical header flag (§1), so that older readers refuse the archive as newer before they read a frame. A block whose own
+descriptor differs from the index's copy is damage in every archive, even when its own copy names a method this version
+does not know.
 
 ### 2.2 Pipeline descriptor
 ```
@@ -261,7 +277,8 @@ index's offsets:
    are never seen. After a frame that does not verify, the scan resumes one byte later, so frames after a missing or
    shortened region are still found; a frame found inside the bytes a damaged frame claimed is marked as such.
 2. A block counts only once decoded: every stage size, then rawHash. A pipeline, frame flag or index of a newer version
-   is reported as needing a newer Osmium, never as damage.
+   is reported as needing a newer Osmium, never as damage, except a frame flag in an encrypted archive: frame headers
+   are not authenticated, so there it is damage (§2.1).
 3. Which archive is this one: its id comes from the header at offset 0, else from the footer at the end of the file. A
    header found after offset 0 (data prepended to the archive) is used only when that footer names the same archive,
    since an archive stored in a block has an intact header too.
@@ -297,7 +314,8 @@ index's offsets:
 ## 9. Reserved identifiers
 So that later versions can add them without clashing, these are reserved; this version never writes them:
 - Frame flag bit 2: an explicit nonce, for archives that can be appended to later. A reader that does not know it says
-  the archive needs a newer version (§2.2).
+  an unencrypted archive needs a newer version (§2.2); in an encrypted archive it comes with a critical header flag,
+  since a frame flag alone is refused there as a change (§2.1).
 - Header extension types 4 and 6 (ignorable) and 3 and 5 (critical, §1).
 - Frame magics `ORDR` and `ORPR` (recovery records) and `OCHK` (checkpoints). Readers skip bytes that no index
   references, so such frames never disturb an older reader.

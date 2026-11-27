@@ -50,6 +50,37 @@ internal static class EncryptedArchives
         File.WriteAllBytes(path, [.. bytes.AsSpan(0, (int)offset), .. fh, .. body, .. footer]);
     }
 
+    /// <summary>
+    /// Decrypts block <paramref name="frame"/>, lets <paramref name="change"/> edit its plaintext body in place, fixes the
+    /// body's CRC and seals it again with the archive's key: it still authenticates, and as its length is the same,
+    /// nothing else in the file moves.
+    /// </summary>
+    public static void ResealBlock(string path, int frame, Action<byte[]> change, string password = Password)
+    {
+        var (offset, length) = Frames(path, password)[frame];
+        var bytes = File.ReadAllBytes(path);
+        var header = ArchiveHeader.Read(new MemoryStream(bytes));
+        using var key = ArchiveKey.Derive(password, header.Encryption!);
+        var body = bytes.AsSpan((int)offset + Osa.FrameHeaderSize, (int)length - Osa.FrameHeaderSize);
+        var plain = key.Open(header.ArchiveId, (ulong)frame, body);
+        change(plain);
+        int prefix = PrefixLength(plain);
+        BinaryPrimitives.WriteUInt32LittleEndian(plain.AsSpan(prefix), Osa.Crc(plain.AsSpan(0, prefix)));
+        key.Seal(header.ArchiveId, (ulong)frame, plain).CopyTo(body);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    /// <summary>The bytes of a plaintext block body before its CRC: descriptor, raw hash, payload hash, payload length.</summary>
+    private static int PrefixLength(byte[] plain)
+    {
+        var r = new IO.BlobReader(plain);
+        r.Bytes(1 << 16);
+        r.Raw(16);
+        r.U64();
+        r.U();
+        return r.Position;
+    }
+
     /// <summary>Replaces the header's EncryptionInfo value with <paramref name="record"/> (of the same length) and fixes the
     /// CRC: the index no longer authenticates, but every check before the password comes first.</summary>
     public static void ReplaceRecord(string path, byte[] record)

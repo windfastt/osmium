@@ -151,9 +151,11 @@ public sealed class OsaReader : IDisposable
             var candidates = new List<ArchiveHeader> { header };
             if (header.Encrypted)
             {
-                // An index frame that is not encrypted under a header that says encrypted is refused before the password
-                // is asked for (a frame header whose CRC fails is damage, left to the spare copy).
-                if (ReadFrameHeader(handle, ft.IndexOffset) is { } ih && (ih.Flags & Osa.FrameFlagEncrypted) == 0) throw new ModifiedArchiveException();
+                // An index frame that is not encrypted under a header that says encrypted, or that sets a flag this
+                // version does not know, is refused before the password is asked for (a frame header whose CRC fails is
+                // damage, left to the spare copy).
+                if (ReadFrameHeader(handle, ft.IndexOffset) is { } ih && ((ih.Flags & Osa.FrameFlagEncrypted) == 0 || UnknownFrameFlags(ih.Flags) != 0))
+                    throw new ModifiedArchiveException();
                 if (header.UnprotectedRoom() is not null) unprotected.Add(new UnprotectedDataException(mayBeDamage: false));
                 var different = CheckHeaderCopy(handle, ft, header, usedSpareHeader, unprotected);
                 RefuseUnlessAllowed(unprotected, allowWeak);
@@ -205,8 +207,9 @@ public sealed class OsaReader : IDisposable
             return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
                 usedSpareHeader, usedSpareIndex)
             {
-                SpareCopyStatus = spares is not null ? SpareCopyStatus.Present : newer ? SpareCopyStatus.Newer
-                    : damaged ? SpareCopyStatus.Damaged : SpareCopyStatus.None,
+                // The trailer is not authenticated: in an encrypted archive it cannot say that a newer version made it.
+                SpareCopyStatus = spares is not null ? SpareCopyStatus.Present : newer && !header.Encrypted ? SpareCopyStatus.Newer
+                    : damaged || newer ? SpareCopyStatus.Damaged : SpareCopyStatus.None,
             };
 
             // The key for this header's settings: the checks that need no password first, then the cached key or the
@@ -384,9 +387,10 @@ public sealed class OsaReader : IDisposable
 
     /// <summary>
     /// In an encrypted archive, the frame header of every block the authenticated index lists: one that checks out must
-    /// have the block's number, the encrypted flag, not the index flag, and the index's length; otherwise the archive
-    /// was made that way (<see cref="ModifiedArchiveException"/>), before anything is listed or written. A frame header
-    /// that does not check out is damage: that block fails when it is read, and the others are not affected.
+    /// have the block's number, the encrypted flag, not the index flag, no flag this version does not know, and the
+    /// index's length; otherwise the archive was made that way (<see cref="ModifiedArchiveException"/>), before anything
+    /// is listed or written. A frame header that does not check out is damage: that block fails when it is read, and the
+    /// others are not affected.
     /// </summary>
     private static void CheckBlockFrameHeaders(ArchiveFile handle, ArchiveIndex index)
     {
@@ -394,10 +398,17 @@ public sealed class OsaReader : IDisposable
         {
             if (ReadFrameHeader(handle, b.Offset) is not { } h) continue;
             if (h.Number != (ulong)b.Frame || (h.Flags & Osa.FrameFlagEncrypted) == 0 || (h.Flags & Osa.FrameFlagIndex) != 0
-                || h.BodyLength != b.FrameLength - Osa.FrameHeaderSize)
+                || UnknownFrameFlags(h.Flags) != 0 || h.BodyLength != b.FrameLength - Osa.FrameHeaderSize)
                 throw new ModifiedArchiveException();
         }
     }
+
+    /// <summary>
+    /// Frame flags this version does not know. Frame headers are not authenticated: in an unencrypted archive such a flag
+    /// was set by a newer version (its CRC checks out), but in an encrypted archive it cannot say so, as anyone can set
+    /// it. A newer version that adds a frame flag to encrypted archives announces it in the header (FORMAT §2.1).
+    /// </summary>
+    internal static uint UnknownFrameFlags(uint flags) => flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex);
 
     /// <summary>An index frame longer than <see cref="Osa.MaxIndexFrameBytes"/> is refused before it is allocated or read
     /// (the footer that says so checks out, so this is not damage).</summary>
@@ -648,9 +659,10 @@ public sealed class OsaReader : IDisposable
         if (header.Encrypted && (flags & Osa.FrameFlagEncrypted) == 0) throw new ModifiedArchiveException();
         if (((flags & Osa.FrameFlagEncrypted) != 0) != header.Encrypted) throw new CorruptDataException("Frame encryption flag mismatch.");
         if (((flags & Osa.FrameFlagIndex) != 0) != isIndex) throw new CorruptDataException("Frame type mismatch.");
-        // The frame header CRC has been checked: a flag this version does not know was set by a newer one.
-        if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) is var unknown and not 0)
-            throw new NewerVersionException($"frame flag 0x{unknown:X}", location);
+        // The frame header CRC has been checked: in an unencrypted archive a flag this version does not know was set by a
+        // newer one; in an encrypted archive the frame header is not authenticated, so the archive was changed.
+        if (UnknownFrameFlags(flags) is var unknown and not 0)
+            throw header.Encrypted ? new ModifiedArchiveException() : new NewerVersionException($"frame flag 0x{unknown:X}", location);
         if (bodyLen != frameLength - Osa.FrameHeaderSize) throw new CorruptDataException("Frame length mismatch.");
         FrameRead?.Invoke(expectedFrame);
         var body = GC.AllocateUninitializedArray<byte>(checked((int)bodyLen));
@@ -662,8 +674,19 @@ public sealed class OsaReader : IDisposable
             read += n;
         }
         byte[] plain = key is null ? body : key.Open(header.ArchiveId, expectedFrame, body, isIndex ? header.Raw : ReadOnlySpan<byte>.Empty);
-        return BlockBody.Parse(plain, reg, location, PaddingAllowed(header, isIndex));
+        try
+        {
+            return BlockBody.Parse(plain, reg, location, PaddingAllowed(header, isIndex));
+        }
+        catch (NewerVersionException) when (!isIndex)
+        {
+            // A block is read only when the index gives it a pipeline this version knows (ReadBody), so a block whose own
+            // copy of its pipeline needs a newer version is not what the index says it is: damage, never a newer version.
+            throw new CorruptDataException(PipelineDiffers(expectedFrame));
+        }
     }
+
+    private static string PipelineDiffers(ulong frame) => $"Block {frame} does not match the file list (its pipeline differs).";
 
     /// <summary>Zero padding after the payload (FORMAT §5): in the index frame of an Argon2id archive only.</summary>
     internal static bool PaddingAllowed(ArchiveHeader header, bool isIndex) =>
@@ -690,7 +713,7 @@ public sealed class OsaReader : IDisposable
         if (b.Descriptor.NewerVersion is { } newer) throw newer.Again();
         var body = ReadFrame(_handle, b.Offset, b.FrameLength, (ulong)frame, Header, _key, _registry, isIndex: false);
         if (!body.Descriptor.Serialize().AsSpan().SequenceEqual(b.Descriptor.Serialize()))
-            throw new CorruptDataException($"Block {frame} does not match the file list (its pipeline differs).");
+            throw new CorruptDataException(PipelineDiffers((ulong)frame));
         return body;
     }
 

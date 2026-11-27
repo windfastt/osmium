@@ -341,6 +341,96 @@ public class ReaderPolicyTests
         }
     }
 
+    // ------------------------------------------------------------------ never "made by a newer version" from bytes that do not authenticate
+
+    private static bool SaysNewerVersion(string text) => text.Contains("newer version", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Frame flag bit 2, reserved for a later version (FORMAT §9), set with the frame header's CRC fixed.</summary>
+    private static void SetReservedFrameFlag(byte[] frameHeader) => frameHeader[4] |= 0x04;
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void AFrameFlagOfALaterVersionInAnEncryptedArchiveIsAChangeNotANewerVersion(string kdf)
+    {
+        // Frame headers are not authenticated, so a flag in one cannot say that a newer version made the archive.
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var original = File.ReadAllBytes(path);
+        long indexOffset = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(original.AsSpan(original.Length - Osa.FooterSize));
+        foreach (long at in new[] { EncryptedArchives.Frames(path)[1].Offset, indexOffset })
+        {
+            string changed = Variant(t, path, "flag", b => EncryptedArchives.EditFrameHeader(b, at, SetReservedFrameFlag));
+            int asked = 0;
+            var e = Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(changed, () => { asked++; return Pw; }));
+            Assert.Equal(M1, e.Message);
+            Assert.Equal(at == indexOffset ? 0 : 1, asked); // the file list's frame header is checked before the password
+            Assert.Throws<ModifiedArchiveException>(() => ArchiveSources.Open(changed, new ArchiveOpenOptions { Password = () => Pw }, Ct));
+        }
+        // The same flag in an unencrypted archive: its frame headers are all a reader has, so a newer version made it.
+        string plain = EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions(), 3000, 3000);
+        var pb = File.ReadAllBytes(plain);
+        EncryptedArchives.EditFrameHeader(pb, System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(pb.AsSpan(pb.Length - Osa.FooterSize)), SetReservedFrameFlag);
+        File.WriteAllBytes(plain, pb);
+        Assert.Throws<NewerVersionException>(() => OsaReader.Open(plain));
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void SalvageTakesAFrameFlagOfALaterVersionInAnEncryptedArchiveForDamage(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        EncryptedArchives.EditFrameHeader(b, EncryptedArchives.Frames(path)[1].Offset, SetReservedFrameFlag);
+        File.WriteAllBytes(path, b);
+        var r = SalvageKdfTests.Salvage(path, t.Sub("out"), () => Pw);
+        Assert.Empty(r.NeedNewerVersion);
+        Assert.Equal(SalvageBlockState.Damaged, r.Blocks[1].State);
+        Assert.Contains(r.Lost, l => l.Path == "f1.bin");
+        Assert.True(File.Exists(Path.Combine(t.Sub("out"), "f0.bin")));
+        Assert.DoesNotContain(r.Summary(), SaysNewerVersion);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void ABlockWhosePipelineIsNotTheFileListsIsDamageNotANewerVersion(string kdf)
+    {
+        // The block authenticates (it is sealed with the archive's key again), but names a method this version does not
+        // know while the file list, which also authenticates, names the one it was made with: the file list decides.
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        int unknown = Enumerable.Range(1, 127).First(id => MethodRegistry.Default.ById(id) is null);
+        EncryptedArchives.ResealBlock(path, 1, plain =>
+        {
+            Assert.Equal((1, true), (plain[1], plain[2] < 0x80)); // one stage, whose method id is one byte
+            plain[2] = (byte)unknown;
+        });
+        using var r = OsaReader.Open(path, () => Pw);
+        Assert.Null(r.NewerVersion);
+        var x = Extractor.Extract(r, t.Sub("out"), null, null, null, Ct);
+        Assert.Equal((2, 1, 0), (x.FilesOk, x.FilesFailed, x.FilesNeedingNewerVersion));
+        Assert.Contains("block 1: Block 1 does not match the file list (its pipeline differs).", x.Errors);
+        Assert.DoesNotContain(x.Errors, SaysNewerVersion);
+    }
+
+    [Fact]
+    public void ASpareCopyTrailerOfALaterVersionInAnEncryptedArchiveIsShownAsDamage()
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, "pbkdf2", spares: SpareCopyPolicy.Always);
+        var tail = SpareArchives.TailOf(path, Pw);
+        string changed = Variant(t, path, "trailer", b =>
+        {
+            var trailer = b.AsSpan((int)tail.TrailerOffset, SpareCopies.TrailerSize);
+            trailer[4] = 1;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(trailer[28..], Osa.Crc(trailer[..28]));
+        });
+        using var r = OsaReader.Open(changed, Allowed());
+        Assert.Equal(SpareCopyStatus.Damaged, r.SpareCopyStatus);
+        using var s = ArchiveSources.Open(changed, new ArchiveOpenOptions { Password = () => Pw, AllowWeakProtection = true }, Ct);
+        Assert.DoesNotContain(s.Details, d => SaysNewerVersion(d.Value));
+    }
+
     [Theory]
     [InlineData("pbkdf2")]
     [InlineData("argon2id")]

@@ -377,10 +377,12 @@ internal sealed class FrameScanner
 
     private void Verify(SalvageFrame f, uint flags)
     {
-        // The header CRC checked out, so a flag this version does not know was set by a newer one (as in OsaReader).
-        if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) is var unknown and not 0)
+        // The header CRC checked out, so in an unencrypted archive a flag this version does not know was set by a newer one
+        // (as in OsaReader). In an encrypted archive frame headers are not authenticated: the flag cannot say so.
+        if (OsaReader.UnknownFrameFlags(flags) is var unknown and not 0)
         {
-            f.NeedsNewerVersion(new NewerVersionException($"frame flag 0x{unknown:X}", Location(f)));
+            if (ArchiveEncrypted) f.Reject(SalvageFrameState.Damaged, $"its frame header sets flag 0x{unknown:X}, which an encrypted archive cannot have (damaged or changed)");
+            else f.NeedsNewerVersion(new NewerVersionException($"frame flag 0x{unknown:X}", Location(f)));
             return;
         }
         if (f.IsIndex != (f.Number == Osa.IndexFrameNumber)) { f.Reject(SalvageFrameState.Damaged, "frame type and frame number disagree"); return; }
