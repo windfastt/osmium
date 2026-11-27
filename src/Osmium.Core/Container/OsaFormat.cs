@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Security.Cryptography;
 using System.Text;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -18,12 +19,36 @@ public static class Osa
     public const ushort Major = 1, Minor = 1;
     public const int FrameHeaderSize = 28;
     public const int FooterSize = 32;
+    /// <summary>The largest index frame (frame header, padded body and tag) of an archive encrypted with Argon2id (kdf 2),
+    /// which a reader reads whole before it can be authenticated. Every other archive (unencrypted, PBKDF2, every archive
+    /// of Osmium 0.1.x) keeps the bound of any frame, <see cref="MaxFrameBytes"/>, as those versions read them.</summary>
+    public const long MaxIndexFrameBytes = 256L << 20;
+    /// <summary>The largest frame body a reader reads: twice the largest block, and what one array can hold.</summary>
+    public static long MaxBlockBodyBytes => Math.Min(2 * BlockLimits.MaxRawSize, Array.MaxLength);
+    /// <summary>The largest frame, header included, of any archive: what a reader checks before it knows the header.</summary>
+    public static long MaxFrameBytes => FrameHeaderSize + MaxBlockBodyBytes;
+
+    private static readonly AsyncLocal<long?> s_testIndexFrameCap = new();
+
+    /// <summary>Tests: a lower <see cref="MaxIndexFrameBytes"/> for the current flow of execution (null: none).</summary>
+    internal static long? TestIndexFrameCap { get => s_testIndexFrameCap.Value; set => s_testIndexFrameCap.Value = value; }
+
+    /// <summary><see cref="MaxIndexFrameBytes"/>, or what a test lowered it to.</summary>
+    internal static long Argon2idIndexFrameCap => TestIndexFrameCap ?? MaxIndexFrameBytes;
+
+    /// <summary>The largest index frame (header included) a reader accepts in an archive with this header:
+    /// <see cref="Argon2idIndexFrameCap"/> when it is encrypted with Argon2id, which this version is the first to write
+    /// (padded blocks exist only there), and <see cref="MaxFrameBytes"/> for every other archive.</summary>
+    internal static long MaxIndexFrameFor(ArchiveHeader header) =>
+        header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id ? Argon2idIndexFrameCap : MaxFrameBytes;
     public const ulong IndexFrameNumber = ulong.MaxValue;
     public const string Extension = ".osa";
 
     public const uint FlagEncrypted = 1u << 0;
     public const uint FlagExperimental = 1u << 16;
-    public const uint KnownCriticalFlags = FlagEncrypted;
+    /// <summary>Critical header flag bit 3: every block frame is padded ("Hide exact sizes"); Argon2id archives only.</summary>
+    public const uint FlagPaddedBlocks = 1u << 3;
+    public const uint KnownCriticalFlags = FlagEncrypted | FlagPaddedBlocks;
 
     public const uint FrameFlagEncrypted = 1u << 0;
     public const uint FrameFlagIndex = 1u << 1;
@@ -31,12 +56,123 @@ public static class Osa
     public static uint Crc(ReadOnlySpan<byte> data) => Crc32.HashToUInt32(data);
 }
 
-public sealed record EncryptionInfo(int Iterations, byte[] Salt, byte[] Verifier);
+/// <summary>
+/// The header's EncryptionInfo record (FORMAT §1, §5): how the key is derived, the 32-byte salt and the 16-byte
+/// password check value. Holds no key.
+/// </summary>
+public sealed record EncryptionInfo(KdfParameters Kdf, byte[] Salt, byte[] Verifier)
+{
+    /// <summary>PBKDF2 with <paramref name="iterations"/>, as Osmium 0.1 writes it.</summary>
+    public EncryptionInfo(int iterations, byte[] salt, byte[] verifier) : this(KdfParameters.Pbkdf2(iterations), salt, verifier) { }
+
+    /// <summary>A copy (<c>with</c>) serializes its own record again.</summary>
+    private EncryptionInfo(EncryptionInfo other)
+    {
+        Kdf = other.Kdf;
+        Salt = other.Salt;
+        Verifier = other.Verifier;
+    }
+
+    /// <summary>PBKDF2 iterations; 0 for Argon2id.</summary>
+    public int Iterations => Kdf.Algorithm == KdfAlgorithm.Pbkdf2Sha512 ? Kdf.Iterations : 0;
+
+    private byte[]? _record;
+
+    /// <summary>The record's value bytes exactly as stored (as read, or as this version writes them): salvage writes
+    /// them again verbatim, and the key cache tells archives apart by them.</summary>
+    internal byte[] RecordBytes { get => _record ??= EncryptionRecord.Write(this); init => _record = value; }
+
+    /// <summary>Bytes after the verifier in a kdf 1 record as read (readers of kdf 1 ignore them; kdf 2 has none).</summary>
+    internal int ExtraBytes { get; init; }
+
+    public override string ToString() => $"EncryptionInfo {{ {Kdf.Describe()} }}";
+}
+
+/// <summary>
+/// The value of header record 1 (FORMAT §1): <c>u8 kdf</c>, then for kdf 1 <c>varint iterations</c>, for kdf 2
+/// <c>varint timeCost · varint memoryKiB · varint lanes</c>, then <c>u8[32] salt · u8 aead · u8[16] verifier</c>.
+/// The header reader and salvage share this parser and its checks.
+/// </summary>
+internal static class EncryptionRecord
+{
+    public const string InvalidMessage = "The encryption settings in this archive's header are invalid.";
+    public const int SaltBytes = 32, VerifierBytes = 16;
+    public const byte Aes256Gcm = 1;
+
+    public static byte[] Write(EncryptionInfo e)
+    {
+        var w = new BlobWriter().B((byte)e.Kdf.Algorithm);
+        switch (e.Kdf.Algorithm)
+        {
+            case KdfAlgorithm.Pbkdf2Sha512: w.U((ulong)e.Kdf.Iterations); break;
+            case KdfAlgorithm.Argon2id: w.U((ulong)e.Kdf.TimeCost).U((ulong)e.Kdf.MemoryKiB).U((ulong)e.Kdf.Lanes); break;
+            default: throw new ArgumentException($"Key derivation function {(byte)e.Kdf.Algorithm} cannot be written.");
+        }
+        if (e.Salt.Length != SaltBytes || e.Verifier.Length != VerifierBytes) throw new ArgumentException("The salt is 32 bytes and the verifier 16.");
+        return w.Raw(e.Salt).B(Aes256Gcm).Raw(e.Verifier).ToArray();
+    }
+
+    /// <summary>
+    /// Record 1 in its reading order (FORMAT §5): the kdf id (unknown: <see cref="NewerVersionException"/>), the fields
+    /// of its layout (missing or malformed: <see cref="CorruptDataException"/>), the cipher id (unknown:
+    /// <see cref="NewerVersionException"/>), for kdf 2 nothing after the verifier, then the hard limits. Allocates only
+    /// the salt and the verifier.
+    /// </summary>
+    public static EncryptionInfo Read(ReadOnlySpan<byte> value)
+    {
+        if (value.IsEmpty) throw new CorruptDataException(InvalidMessage);
+        byte kdf = value[0];
+        if (kdf is not ((byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id))
+            throw new UnknownHeaderFieldException($"key derivation function {kdf}", $"unknown key-derivation method {kdf}");
+        var info = ReadFields(value[1..], (KdfAlgorithm)kdf, checkCipher: true, out int consumed);
+        int extra = value.Length - 1 - consumed;
+        if (kdf == (byte)KdfAlgorithm.Argon2id && extra != 0) throw new CorruptDataException(InvalidMessage);
+        if (info.Kdf.Check() is { Kind: KdfVerdictKind.Invalid } v) throw new CorruptDataException(v.Reason!);
+        return info with { RecordBytes = value.ToArray(), ExtraBytes = extra };
+    }
+
+    /// <summary>
+    /// The fields after the kdf byte, read in the layout of <paramref name="kdf"/>; <paramref name="consumed"/> is how
+    /// many bytes they took. Salvage reads them where they lie in a damaged header and does not check the cipher id
+    /// (there is one). Missing bytes or a malformed varint: <see cref="CorruptDataException"/>. Values beyond an int are
+    /// kept as int.MaxValue, which the limits refuse.
+    /// </summary>
+    public static EncryptionInfo ReadFields(ReadOnlySpan<byte> fields, KdfAlgorithm kdf, bool checkCipher, out int consumed)
+    {
+        try
+        {
+            var r = new BlobReader(fields);
+            KdfParameters p;
+            if (kdf == KdfAlgorithm.Pbkdf2Sha512) p = KdfParameters.Pbkdf2(Clamp(r.U()));
+            else
+            {
+                int t = Clamp(r.U()), m = Clamp(r.U()), lanes = Clamp(r.U());
+                p = KdfParameters.Argon2id(t, m, lanes);
+            }
+            var salt = r.Raw(SaltBytes).ToArray();
+            byte cipher = r.B();
+            if (checkCipher && cipher != Aes256Gcm) throw new UnknownHeaderFieldException($"cipher {cipher}", $"unknown cipher {cipher}");
+            var verifier = r.Raw(VerifierBytes).ToArray();
+            consumed = r.Position;
+            return new EncryptionInfo(p, salt, verifier);
+        }
+        catch (InvalidDataException)
+        {
+            throw new CorruptDataException(InvalidMessage);
+        }
+
+        static int Clamp(ulong v) => v > int.MaxValue ? int.MaxValue : (int)v;
+    }
+}
 
 /// <summary>Archive header (FORMAT §1).</summary>
 public sealed class ArchiveHeader
 {
-    public const int MaxKdfIterations = 20_000_000;
+    internal const string PaddedBlocksNeedArgon2id = "The archive header says its blocks are padded, which only archives encrypted with Argon2id can be.";
+    /// <summary>Block frames are padded ("Hide exact sizes", header flag bit 3).</summary>
+    public bool PaddedBlocks => (Flags & Osa.FlagPaddedBlocks) != 0;
+    /// <summary><see cref="KdfLimits.MaxPbkdf2Iterations"/>.</summary>
+    public const int MaxKdfIterations = KdfLimits.MaxPbkdf2Iterations;
     /// <summary>The exact serialized header bytes (bound into the index's AEAD data).</summary>
     public byte[] Raw { get; private set; } = [];
     /// <summary>The archive's own minor version (offset 10): 0 for archives of Osmium 0.1.x, 1 since 0.2.0.</summary>
@@ -53,12 +189,9 @@ public sealed class ArchiveHeader
     public byte[] Serialize()
     {
         var ext = new BlobWriter();
-        if (Encryption is { } e)
-        {
-            var v = new BlobWriter().B(1).U((ulong)e.Iterations).Raw(e.Salt).B(1).Raw(e.Verifier).ToArray();
-            ext.U(1).Bytes(v);
-        }
+        if (Encryption is { } e) ext.U(1).Bytes(e.RecordBytes);
         if (Creator is not null) ext.U(2).Str(Creator);
+        foreach (var (type, value) in ExtraRecords ?? []) ext.U(type).Bytes(value);
         var extBytes = ext.ToArray();
         var buf = new byte[36 + extBytes.Length + 4];
         Osa.Magic.CopyTo(buf);
@@ -93,12 +226,14 @@ public sealed class ArchiveHeader
         rest.AsSpan(0, (int)extLen).CopyTo(all.AsSpan(36));
         if (Osa.Crc(all) != BinaryPrimitives.ReadUInt32LittleEndian(rest.AsSpan((int)extLen)))
             throw new CorruptDataException("Archive header is corrupt (CRC mismatch).");
-        // Checked after the CRC: an unknown critical flag in an intact header was set by a newer version.
+        // Checked after the CRC: an unknown critical flag in an intact header was set by a newer version, or by a change
+        // whose CRC was recomputed (nothing in the header is authenticated yet).
         if ((flags & 0xFFFF & ~Osa.KnownCriticalFlags) is var unknown and not 0)
-            throw new NewerVersionException($"archive flag 0x{unknown:X4}");
+            throw new UnknownHeaderFieldException($"archive flag 0x{unknown:X4}", $"unknown archive flag 0x{unknown:X4}");
 
         EncryptionInfo? enc = null;
         string? creator = null;
+        int ignored = 0, creators = 0, creatorBytes = 0;
         var r = new BlobReader(rest.AsSpan(0, (int)extLen));
         while (!r.End)
         {
@@ -107,29 +242,56 @@ public sealed class ArchiveHeader
             switch (type)
             {
                 case 1:
-                    var er = new BlobReader(val);
-                    if (er.B() is var kdf and not 1) throw new NewerVersionException($"key derivation function {kdf}");
-                    int iters = er.Int(100_000_000);
-                    if (iters > MaxKdfIterations) throw new CorruptDataException($"Key derivation cost {iters} exceeds the safety limit.");
-                    var salt = er.Raw(32).ToArray();
-                    if (er.B() is var aead and not 1) throw new NewerVersionException($"cipher {aead}");
-                    var verifier = er.Raw(16).ToArray();
-                    enc = new EncryptionInfo(iters, salt, verifier);
+                    // At most one: a later record would otherwise replace an earlier one that salvage reads.
+                    if (enc is not null) throw new CorruptDataException(EncryptionRecord.InvalidMessage);
+                    enc = EncryptionRecord.Read(val);
                     break;
                 case 2:
                     creator = Encoding.UTF8.GetString(val);
+                    creators++;
+                    creatorBytes = val.Length;
                     break;
                 default:
-                    if ((type & 1) == 1) throw new NewerVersionException($"archive feature #{type}");
+                    if ((type & 1) == 1) throw new UnknownHeaderFieldException($"archive feature #{type}", $"unknown archive feature #{type}");
+                    ignored++; // a newer version's ignorable record: kept out of encrypted archives (FORMAT §5)
                     break;
             }
         }
-        if (((flags & Osa.FlagEncrypted) != 0) != (enc is not null)) throw new CorruptDataException("Encryption flag and header disagree.");
+        // The CRC checks out, so a header that claims encryption without its settings was made that way: never damage.
+        if ((flags & Osa.FlagEncrypted) != 0 && enc is null) throw new ModifiedArchiveException();
+        if ((flags & Osa.FlagEncrypted) == 0 && enc is not null) throw new CorruptDataException("Encryption flag and header disagree.");
+        // Padded blocks ("Hide exact sizes") exist only in archives encrypted with Argon2id.
+        if ((flags & Osa.FlagPaddedBlocks) != 0 && enc?.Kdf.Algorithm != KdfAlgorithm.Argon2id) throw new CorruptDataException(PaddedBlocksNeedArgon2id);
         var raw = new byte[36 + extLen + 4];
         all.CopyTo(raw, 0);
         rest.AsSpan((int)extLen).CopyTo(raw.AsSpan(36 + (int)extLen));
-        return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length, Raw = raw };
+        return new ArchiveHeader
+        {
+            Minor = minor, Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length,
+            Raw = raw, IgnoredRecords = ignored, CreatorRecords = creators, CreatorBytes = creatorBytes,
+        };
     }
+
+    /// <summary>Tests only: records written after the ones Osmium writes (see <see cref="OsaWriterOptions.TestExtraHeaderRecords"/>).</summary>
+    internal IReadOnlyList<(ulong Type, byte[] Value)>? ExtraRecords { get; init; }
+
+    /// <summary>Ignorable records of types this version does not know (read, skipped).</summary>
+    internal int IgnoredRecords { get; private init; }
+    /// <summary>How many Creator records the header holds, and the length in bytes of the last.</summary>
+    internal int CreatorRecords { get; private init; }
+    internal int CreatorBytes { get; private init; }
+
+    /// <summary>
+    /// In an encrypted archive, what the header holds beyond what Osmium writes, as plaintext beside the ciphertext
+    /// (FORMAT §5): an ignorable record of an unknown type, more than one Creator record, a Creator record longer than 64
+    /// bytes or with control characters, or bytes after the verifier of a PBKDF2 record. Null when there is none.
+    /// </summary>
+    internal string? UnprotectedRoom() =>
+        IgnoredRecords > 0 ? "an ignorable header record of a type this version does not know"
+        : CreatorRecords > 1 ? "more than one Creator record"
+        : CreatorBytes > 64 || (Creator?.Any(char.IsControl) ?? false) ? "a Creator record that is long or holds control characters"
+        : Encryption is { ExtraBytes: > 0 } ? "bytes after the password check value"
+        : null;
 }
 
 /// <summary>Footer (FORMAT §4).</summary>
@@ -160,27 +322,78 @@ public readonly record struct ArchiveFooter(long IndexOffset, long IndexLength, 
     }
 }
 
-/// <summary>Password-derived keys and AES-256-GCM sealing of frame bodies (FORMAT §5).</summary>
-public sealed class ArchiveKey
+/// <summary>
+/// Password-derived keys and AES-256-GCM sealing of frame bodies (FORMAT §5). The encryption key lives in a pinned
+/// array that <see cref="Dispose"/> zeroes; after that, sealing and opening throw.
+/// </summary>
+public sealed class ArchiveKey : IDisposable
 {
-    public const int DefaultIterations = 600_000;
+    /// <summary>PBKDF2 iterations of Compatible protection (<see cref="KdfPresets.CompatibleIterations"/>).</summary>
+    public const int DefaultIterations = KdfPresets.CompatibleIterations;
     private readonly byte[] _kenc;
+    private volatile bool _disposed;
+    /// <summary>The password check value derived with the key (16 bytes; the header stores it).</summary>
     public byte[] Verifier { get; }
 
     private ArchiveKey(byte[] kenc, byte[] verifier) { _kenc = kenc; Verifier = verifier; }
 
-    public static ArchiveKey Derive(string password, byte[] salt, int iterations)
+    /// <summary>
+    /// Derives the keys for <paramref name="info"/> through <see cref="PasswordKdf"/>: the reader's checks (or, with
+    /// <paramref name="creating"/>, the writer's) come first, then the password text, then one derivation; the master
+    /// key is wiped.
+    /// </summary>
+    public static ArchiveKey Derive(string password, EncryptionInfo info, KdfRun? run = null, bool creating = false)
     {
-        var pw = Encoding.UTF8.GetBytes(password.Normalize(NormalizationForm.FormC));
-        var master = Rfc2898DeriveBytes.Pbkdf2(pw, salt, iterations, HashAlgorithmName.SHA512, 32);
-        var kenc = HKDF.Expand(HashAlgorithmName.SHA256, master, 32, "osmium/v1/aead"u8.ToArray());
-        var ver = HKDF.Expand(HashAlgorithmName.SHA256, master, 16, "osmium/v1/verify"u8.ToArray());
-        CryptographicOperations.ZeroMemory(master);
-        CryptographicOperations.ZeroMemory(pw);
-        return new ArchiveKey(kenc, ver);
+        ArgumentNullException.ThrowIfNull(info);
+        var master = PasswordKdf.DeriveMaster(password, info.Salt, info.Kdf, run ?? new KdfRun(), creating);
+        try { return FromMaster(master); }
+        finally { CryptographicOperations.ZeroMemory(master); }
     }
 
+    /// <summary>PBKDF2 with a bare salt and iteration count, without the reader's minimum (for callers that hold no
+    /// header record).</summary>
+    internal static ArchiveKey Derive(string password, byte[] salt, int iterations) =>
+        Derive(password, new EncryptionInfo(iterations, salt, new byte[EncryptionRecord.VerifierBytes]), new KdfRun { Policy = ProtectionPolicy.AllowWeak });
+
+    /// <summary>Kenc = HKDF-Expand(SHA-256, master, 32, "osmium/v1/aead"); verifier = HKDF-Expand(SHA-256, master, 16,
+    /// "osmium/v1/verify").</summary>
+    internal static ArchiveKey FromMaster(ReadOnlySpan<byte> master)
+    {
+        var kenc = GC.AllocateArray<byte>(32, pinned: true);
+        var verifier = new byte[EncryptionRecord.VerifierBytes];
+        HKDF.Expand(HashAlgorithmName.SHA256, master, kenc, "osmium/v1/aead"u8);
+        HKDF.Expand(HashAlgorithmName.SHA256, master, verifier, "osmium/v1/verify"u8);
+        return new ArchiveKey(kenc, verifier);
+    }
+
+    /// <summary>Compares in constant time.</summary>
     public bool Matches(byte[] verifier) => CryptographicOperations.FixedTimeEquals(Verifier, verifier);
+
+    public bool IsDisposed => _disposed;
+
+    /// <summary>Zeroes the encryption key.</summary>
+    public void Dispose()
+    {
+        _disposed = true;
+        CryptographicOperations.ZeroMemory(_kenc);
+    }
+
+    /// <summary>An independent copy of this key (its own pinned array), for a holder that outlives this one.</summary>
+    internal ArchiveKey Copy()
+    {
+        var kenc = GC.AllocateArray<byte>(32, pinned: true);
+        Kenc.CopyTo(kenc, 0);
+        return new ArchiveKey(kenc, (byte[])Verifier.Clone());
+    }
+
+    private byte[] Kenc
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _kenc;
+        }
+    }
 
     private static void Nonce(Span<byte> nonce, ulong frame)
     {
@@ -204,7 +417,7 @@ public sealed class ArchiveKey
         var output = new byte[plaintext.Length + 16];
         Span<byte> nonce = stackalloc byte[12];
         Nonce(nonce, frame);
-        using var gcm = new AesGcm(_kenc, 16);
+        using var gcm = new AesGcm(Kenc, 16);
         gcm.Encrypt(nonce, plaintext, output.AsSpan(0, plaintext.Length), output.AsSpan(plaintext.Length), Aad(archiveId, frame, headerBytes));
         return output;
     }
@@ -215,18 +428,22 @@ public sealed class ArchiveKey
         var output = new byte[sealedData.Length - 16];
         Span<byte> nonce = stackalloc byte[12];
         Nonce(nonce, frame);
-        using var gcm = new AesGcm(_kenc, 16);
+        using var gcm = new AesGcm(Kenc, 16);
         try
         {
             gcm.Decrypt(nonce, sealedData[..^16], sealedData[^16..], output, Aad(archiveId, frame, headerBytes));
         }
         catch (AuthenticationTagMismatchException)
         {
-            throw new CorruptDataException($"Encrypted frame {frame} failed authentication (corrupted or tampered).");
+            throw new AuthenticationFailedException(frame);
         }
         return output;
     }
 }
+
+/// <summary>An encrypted frame's GCM tag does not check out: damage, or a change, which AES-GCM cannot tell apart.</summary>
+internal sealed class AuthenticationFailedException(ulong frame)
+    : CorruptDataException($"Encrypted frame {frame} failed authentication (corrupted or tampered).");
 
 /// <summary>Plaintext block body (FORMAT §2.1).</summary>
 public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, ReadOnlyMemory<byte> Payload)
@@ -249,20 +466,38 @@ public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, Read
     }
 
     /// <param name="location">"block N" or "the index", for errors about a pipeline that needs a newer version.</param>
-    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry, string? location = null)
+    /// <param name="paddingAllowed">The body may end in zero bytes after the payload (FORMAT §5: the index frame of an
+    /// Argon2id archive, and block frames with header flag bit 3). Every one of them must be zero; without it, the
+    /// payload must end the body exactly.</param>
+    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry, string? location = null, bool paddingAllowed = false)
     {
         var span = body.Span;
         var r = new BlobReader(span);
         var desc = r.Bytes(1 << 16).ToArray();
         var hash = BinaryPrimitives.ReadUInt128LittleEndian(r.Raw(16));
         ulong payloadHash = r.U64();
-        long payloadLen = (long)r.U();
+        ulong payloadLen = r.U();
         int prefixLen = r.Position;
         uint crc = BinaryPrimitives.ReadUInt32LittleEndian(r.Raw(4));
         if (Osa.Crc(span[..prefixLen]) != crc) throw new CorruptDataException("Block header is corrupt (CRC mismatch).");
-        if (payloadLen != span.Length - r.Position) throw new CorruptDataException("Block payload length mismatch.");
-        var payload = body[r.Position..];
+        ulong room = (ulong)(span.Length - r.Position);
+        if (paddingAllowed ? payloadLen > room : payloadLen != room) throw new CorruptDataException("Block payload length mismatch.");
+        var payload = body.Slice(r.Position, (int)payloadLen);
+        if (span[(r.Position + (int)payloadLen)..].ContainsAnyExcept((byte)0)) throw new CorruptDataException("Block padding is not zero.");
         if (XxHash3.HashToUInt64(payload.Span) != payloadHash) throw new CorruptDataException("Block payload is corrupt (hash mismatch).");
         return new BlockBody(BlockDescriptor.Deserialize(desc, registry, location), hash, payload);
+    }
+
+    /// <summary>
+    /// Padmé (FORMAT §5): <paramref name="length"/> rounded up so that its low E − S bits are zero, with E = ⌊log2 L⌋ and
+    /// S = ⌊log2 E⌋ + 1. At most about 12 % more; the result leaks only O(log log L) bits of the length.
+    /// </summary>
+    public static long PaddedLength(long length)
+    {
+        if (length < 2) return length;
+        int e = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)length);
+        int s = 32 - System.Numerics.BitOperations.LeadingZeroCount((uint)e); // ⌊log2 e⌋ + 1, e ≥ 1
+        long mask = (1L << (e - s)) - 1;
+        return (length + mask) & ~mask;
     }
 }

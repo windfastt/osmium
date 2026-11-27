@@ -1,4 +1,5 @@
 using Osmium.Core.Container;
+using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Archives;
@@ -44,14 +45,26 @@ public sealed class OsaArchiveSource : IArchiveSource
     public IReadOnlyList<ArchiveDetail> Details { get; }
     public IReadOnlyList<string> Warnings => Reader.Warnings;
 
-    /// <summary>Opens an .osa archive (<see cref="ArchiveSources.Open"/> does this for .osa files).</summary>
+    /// <summary>
+    /// Opens an .osa archive (<see cref="ArchiveSources.Open"/> does this for .osa files). The key derivation of an
+    /// encrypted archive may use the memory limit of <see cref="ArchiveOpenOptions.Limits"/>; above it, or above the work
+    /// of the strongest preset, it throws <see cref="KdfMemoryLimitException"/> or <see cref="KdfCostException"/>
+    /// before the password is asked for (the caller may ask the user and open again with a higher memory limit).
+    /// </summary>
     public static OsaArchiveSource Open(string path, ArchiveOpenOptions options, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var reader = OsaReader.Open(path, options.Password);
+        var reader = OsaReader.Open(path, new OsaOpenOptions
+        {
+            Password = options.Password,
+            KdfMemoryLimit = options.Limits.MemoryBudgetBytes,
+            Protection = options.AllowWeakProtection ? ProtectionPolicy.AllowWeak : ProtectionPolicy.Default,
+            Cancellation = ct,
+            // Checked while the file list is decoded, before anything is allocated for an entry over the limits.
+            IndexLimits = new IndexLimits { MaxEntries = options.Limits.MaxEntries, MaxPathDepth = options.Limits.MaxPathDepth },
+        });
         try
         {
-            CheckEntries(reader.Entries, options.Limits);
             return new OsaArchiveSource(reader, options.Limits);
         }
         catch
@@ -127,18 +140,6 @@ public sealed class OsaArchiveSource : IArchiveSource
         return p => p.Length > folder.Length && p.StartsWith(folder, StringComparison.Ordinal) ? p[folder.Length..] : null;
     }
 
-    private static void CheckEntries(IReadOnlyList<ArchiveEntry> entries, ImportLimits limits)
-    {
-        if (entries.Count > limits.MaxEntries)
-            throw new EntryLimitException($"This archive holds {entries.Count:N0} entries, more than the {limits.MaxEntries:N0} Osmium accepts.");
-        foreach (var e in entries)
-        {
-            int depth = e.Path.Count(c => c == '/') + 1;
-            if (depth > limits.MaxPathDepth)
-                throw new EntryLimitException($"A path in this archive is {depth} folders deep, more than the {limits.MaxPathDepth} Osmium accepts.");
-        }
-    }
-
     private void CheckExpansion(long output, ImportLimits limits)
     {
         if (!limits.AllowLargeExpansion && output > limits.ExpansionFloorBytes && output > limits.MaxExpansionRatio * FileLength)
@@ -181,7 +182,7 @@ public sealed class OsaArchiveSource : IArchiveSource
     private static List<ArchiveDetail> Properties(OsaReader r) =>
     [
         new("Format", $".osa {Osa.Major}.{r.Header.Minor}"),
-        new("Created by", r.Header.Creator ?? "?"),
+        new("Created by", r.Creator ?? "?"),
         new("Profile", r.Index.MetaString("profile") ?? "?"),
         new("Files", $"{r.Entries.Count(e => !e.IsDirectory):N0}"),
         new("Folders", $"{r.Entries.Count(e => e.IsDirectory):N0}"),
@@ -191,6 +192,14 @@ public sealed class OsaArchiveSource : IArchiveSource
         new("Extraction", $"~{Duration(TimeSpan.FromSeconds(r.EstimatedDecodeSeconds))} single-core"),
         new("Memory per block", $"up to {Bytes(r.MaxBlockDecodeMemory)}"),
         new("Encrypted", r.Header.Encrypted ? "yes" : "no"),
+        // An open source has checked the password and authenticated the file list.
+        .. r.Header.Encryption is { } e
+            ? new ArchiveDetail[]
+            {
+                new("Encryption", "AES-256-GCM, key from " + e.Kdf.KeyText()), new("Password", "verified"),
+                new("Exact sizes hidden", r.Header.PaddedBlocks ? "yes" : "no"),
+            }
+            : [],
         new("Experimental features", r.Header.Experimental ? "yes" : "no"),
     ];
 

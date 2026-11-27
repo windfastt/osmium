@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Runtime.ExceptionServices;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -51,39 +52,64 @@ internal readonly record struct FrameHeader(long Offset, uint Flags, ulong Numbe
 /// The key, archive id and header bytes that authenticate an encrypted archive's frames. The index frame binds the exact
 /// header bytes; when the header is damaged, <paramref name="OtherHeaderBytes"/> are rebuilt candidates to try for it.
 /// </summary>
-internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null);
+/// <param name="PadsIndex">The key derivation is Argon2id (kdf 2), whose index frame is padded (FORMAT §5).</param>
+/// <param name="PadsBlocks">Block frames may be padded: the header or its copy has flag bit 3 ("Hide exact sizes"), or,
+/// with neither known, the key derivation is Argon2id (a frame that authenticates was written by the key's holder).</param>
+internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null,
+    bool PadsIndex = false, bool PadsBlocks = false);
 
 /// <summary>
-/// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1) whatever happened to the
+/// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1, §8) whatever happened to the
 /// marker, version, flags, lengths, record types and algorithm ids around them: the archive id at offset 16, and the
-/// iterations, salt and verifier in the first extension record. They are used only once they authenticate a frame.
+/// key-derivation settings, salt and verifier in the first extension record, whose type, length and kdf id take one
+/// byte each (offsets 36 to 38). They are used only once they authenticate a frame.
 /// </summary>
-internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, int EncryptionRecordEnd, byte[] Head)
+/// <param name="KdfByteIntact">The kdf byte read 1 or 2, so only its layout was read; otherwise the fields were read in
+/// both layouts, each a candidate of its own.</param>
+internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, int EncryptionRecordEnd, byte[] Head, bool KdfByteIntact)
 {
-    public static KeyFields? Read(SalvageSource src)
+    /// <summary>The header bytes salvage reads: the fixed part, the record's three bytes, the longest settings (three
+    /// 10-byte varints), salt, cipher id and verifier, a creator record of up to 127 bytes and the CRC.</summary>
+    private const int HeadBytes = 36 + 3 + 30 + 32 + 1 + 16 + 2 + 127 + 4;
+
+    /// <summary>
+    /// The candidates: the layout of the kdf byte when it reads 1 or 2, else Argon2id first (what Osmium writes since
+    /// 0.2.0), then PBKDF2. A reading outside the limits a reader accepts is no candidate.
+    /// </summary>
+    public static List<KeyFields> Read(SalvageSource src)
     {
-        if (src.Length < 36 + 3 + 1 + 32 + 1 + 16) return null;
-        var head = src.Read(0, (int)Math.Min(src.Length, 36 + 3 + 10 + 32 + 1 + 16 + 2 + 127 + 4));
-        try
+        var found = new List<KeyFields>();
+        if (src.Length < 36 + 3 + 1 + 32 + 1 + 16) return found;
+        var head = src.Read(0, (int)Math.Min(src.Length, HeadBytes));
+        byte kdf = head[38];
+        bool intact = kdf is (byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id;
+        var layouts = intact ? [(KdfAlgorithm)kdf] : new[] { KdfAlgorithm.Argon2id, KdfAlgorithm.Pbkdf2Sha512 };
+        foreach (var layout in layouts)
         {
-            var r = new BlobReader(head.AsSpan(36 + 3)); // record type, record length and kdf id: one byte each
-            ulong iterations = r.U();
-            if (iterations is 0 or > ArchiveHeader.MaxKdfIterations) return null;
-            var salt = r.Raw(32).ToArray();
-            r.B(); // cipher id
-            var verifier = r.Raw(16).ToArray();
-            return new KeyFields(head.AsSpan(16, 16).ToArray(), new EncryptionInfo((int)iterations, salt, verifier), 36 + 3 + r.Position, head);
+            EncryptionInfo info;
+            int consumed;
+            try { info = EncryptionRecord.ReadFields(head.AsSpan(39), layout, checkCipher: false, out consumed); }
+            catch (CorruptDataException) { continue; }
+            if (info.Kdf.Check().Kind == KdfVerdictKind.Invalid) continue;
+            // The record as the writer made it: these bytes as they lie, with the kdf id of this layout and the only
+            // cipher there is (either byte may be what was damaged).
+            var record = new byte[1 + consumed];
+            record[0] = (byte)layout;
+            head.AsSpan(39, consumed).CopyTo(record.AsSpan(1));
+            record[^(EncryptionRecord.VerifierBytes + 1)] = EncryptionRecord.Aes256Gcm;
+            found.Add(new KeyFields(head.AsSpan(16, 16).ToArray(), info with { RecordBytes = record }, 39 + consumed, head, intact));
         }
-        catch (InvalidDataException)
-        {
-            return null;
-        }
+        return found;
     }
 
     /// <summary>
-    /// The header as a writer makes it from these fields, with the creator text found where it lies when the header
-    /// ends at <paramref name="headerEnd"/> (where the first frame starts): candidates for the bytes the index binds.
-    /// The minor version is the one stored in the damaged header, this version's, or 0 (archives of Osmium 0.1.x).
+    /// The header as a writer makes it from these fields: candidates for the bytes the index binds, each costing one
+    /// authentication of the index and no key derivation. The record is the one read from the damaged header, byte for
+    /// byte. The minor version is the one stored in the damaged header, this version's, or 0 (archives of Osmium 0.1.x);
+    /// no Creator record first (as this version writes encrypted headers), then the creator text found where it lies
+    /// when the header ends at <paramref name="headerEnd"/> (where the first frame starts), as earlier versions wrote
+    /// it; and every flag set this version writes: encrypted, with "Hide exact sizes" (bit 3, Argon2id only), each
+    /// with and without experimental features. At most 2 × 2 × 2 candidates per minor version.
     /// </summary>
     public IEnumerable<byte[]> Rebuilds(byte[] archiveId, long headerEnd)
     {
@@ -91,10 +117,14 @@ internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, in
         string? creator = creatorLength >= 0 && creatorLength < 128 && headerEnd <= Head.Length
             ? System.Text.Encoding.UTF8.GetString(Head, (int)creatorAt, (int)creatorLength) : null;
         var minors = new[] { BinaryPrimitives.ReadUInt16LittleEndian(Head.AsSpan(10)), Osa.Minor, (ushort)0 }.Distinct();
+        uint[] flagSets = Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id
+            ? [Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagPaddedBlocks]
+            : [Osa.FlagEncrypted];
         foreach (ushort minor in minors)
-            foreach (string? c in creator is null ? new string?[] { null } : [creator, null])
-                foreach (uint flags in new[] { Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental })
-                    yield return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
+            foreach (string? c in creator is null ? new string?[] { null } : [null, creator])
+                foreach (uint flagSet in flagSets)
+                    foreach (uint flags in new[] { flagSet, flagSet | Osa.FlagExperimental })
+                        yield return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
     }
 }
 
@@ -212,6 +242,10 @@ internal sealed record HeaderProbe(ArchiveHeader? Header, long Offset, ArchiveHe
 /// </summary>
 internal sealed class FrameScanner
 {
+    /// <summary>Why a frame that is not encrypted is not written from an encrypted archive (the notes say why the
+    /// archive counts as encrypted).</summary>
+    internal const string PlaintextInEncrypted = "not encrypted: not protected as Osmium protects encrypted archives; not written";
+
     private const int ChunkSize = 1 << 20;
     /// <summary>Longest possible block-body prefix: descriptor (≤ 64 KiB, 3-byte length) + hashes + varint + CRC.</summary>
     private const int MaxPrefix = 3 + (1 << 16) + 16 + 8 + 10 + 4;
@@ -358,10 +392,12 @@ internal sealed class FrameScanner
 
     private void Verify(SalvageFrame f, uint flags)
     {
-        // The header CRC checked out, so a flag this version does not know was set by a newer one (as in OsaReader).
-        if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) is var unknown and not 0)
+        // The header CRC checked out, so in an unencrypted archive a flag this version does not know was set by a newer one
+        // (as in OsaReader). In an encrypted archive frame headers are not authenticated: the flag cannot say so.
+        if (OsaReader.UnknownFrameFlags(flags) is var unknown and not 0)
         {
-            f.NeedsNewerVersion(new NewerVersionException($"frame flag 0x{unknown:X}", Location(f)));
+            if (ArchiveEncrypted) f.Reject(SalvageFrameState.Damaged, $"its frame header sets flag 0x{unknown:X}, which an encrypted archive cannot have (damaged or changed)");
+            else f.NeedsNewerVersion(new NewerVersionException($"frame flag 0x{unknown:X}", Location(f)));
             return;
         }
         if (f.IsIndex != (f.Number == Osa.IndexFrameNumber)) { f.Reject(SalvageFrameState.Damaged, "frame type and frame number disagree"); return; }
@@ -369,6 +405,12 @@ internal sealed class FrameScanner
         if (f.BodyLength < 0 || f.BodyLength > MaxBody || f.BodyLength > Array.MaxLength)
         {
             f.Reject(SalvageFrameState.Damaged, "invalid frame length");
+            return;
+        }
+        // The cap of the file list of an Argon2id archive (other archives keep the bound of any frame, checked above).
+        if (f.IsIndex && f.Encrypted && Key is { PadsIndex: true } && f.FrameLength > Osa.Argon2idIndexFrameCap)
+        {
+            f.Reject(SalvageFrameState.Damaged, "larger than the 256 MiB the file list of an Argon2id archive may have");
             return;
         }
         long available = _src.Length - f.Offset - Osa.FrameHeaderSize;
@@ -379,9 +421,7 @@ internal sealed class FrameScanner
         }
         if (f.Encrypted != ArchiveEncrypted)
         {
-            f.Reject(SalvageFrameState.Ignored, ArchiveEncrypted
-                ? "not encrypted, so it cannot be authenticated as part of this encrypted archive"
-                : "encrypted, but this archive is not");
+            f.Reject(SalvageFrameState.Ignored, ArchiveEncrypted ? PlaintextInEncrypted : "encrypted, but this archive is not");
             return;
         }
         if (!f.Encrypted)
@@ -397,17 +437,28 @@ internal sealed class FrameScanner
         var plain = TryOpen(f);
         if (plain is null)
         {
+            f.FailedAuthentication = true;
             f.Reject(SalvageFrameState.Damaged, "authentication failed (damaged or tampered)");
             return;
         }
-        if (!TryParsePrefix(plain, plain.Length, out var p, out string why)) { f.Reject(SalvageFrameState.Damaged, why); return; }
-        if (XxHash3.HashToUInt64(plain.AsSpan(p.PayloadOffset)) != p.PayloadHash)
+        bool padded = PaddingAllowed(f);
+        if (!TryParsePrefix(plain, plain.Length, out var p, out string why, padded)) { f.Reject(SalvageFrameState.Damaged, why); return; }
+        if (plain.AsSpan(p.PayloadOffset + (int)p.PayloadLength).ContainsAnyExcept((byte)0))
+        {
+            f.Reject(SalvageFrameState.Damaged, "its padding is not zero");
+            return;
+        }
+        if (XxHash3.HashToUInt64(plain.AsSpan(p.PayloadOffset, (int)p.PayloadLength)) != p.PayloadHash)
         {
             f.Reject(SalvageFrameState.Damaged, "payload hash mismatch");
             return;
         }
         Accept(f, p);
     }
+
+    /// <summary>Zero padding after the payload, with the reader's rules: the index frame of an Argon2id archive, and its
+    /// block frames when they may be padded (<see cref="KeyMaterial.PadsBlocks"/>).</summary>
+    internal bool PaddingAllowed(SalvageFrame f) => f.Encrypted && (f.IsIndex ? Key is { PadsIndex: true } : Key is { PadsBlocks: true });
 
     /// <summary>Checks a plain frame's body without holding it in memory: prefix CRC, then the payload hash in chunks.</summary>
     private void VerifyPlain(SalvageFrame f)
@@ -469,7 +520,7 @@ internal sealed class FrameScanner
     private readonly record struct BodyPrefix(byte[] Descriptor, UInt128 RawHash, ulong PayloadHash, long PayloadLength, int PayloadOffset);
 
     /// <summary>Parses the block-body prefix (FORMAT §2.1) and checks its CRC and the payload length.</summary>
-    private static bool TryParsePrefix(ReadOnlySpan<byte> data, long bodyLength, out BodyPrefix prefix, out string why)
+    private static bool TryParsePrefix(ReadOnlySpan<byte> data, long bodyLength, out BodyPrefix prefix, out string why, bool paddingAllowed = false)
     {
         prefix = default;
         try
@@ -482,7 +533,8 @@ internal sealed class FrameScanner
             int prefixLen = r.Position;
             uint crc = BinaryPrimitives.ReadUInt32LittleEndian(r.Raw(4));
             if (Osa.Crc(data[..prefixLen]) != crc) { why = "block header CRC mismatch"; return false; }
-            if (payloadLen != (ulong)(bodyLength - r.Position)) { why = "payload length does not match the frame length"; return false; }
+            ulong room = (ulong)(bodyLength - r.Position);
+            if (paddingAllowed ? payloadLen > room : payloadLen != room) { why = "payload length does not match the frame length"; return false; }
             prefix = new BodyPrefix(desc, rawHash, payloadHash, (long)payloadLen, r.Position);
             why = "";
             return true;
@@ -513,21 +565,32 @@ internal sealed class FrameScanner
         return null;
     }
 
+    /// <summary>Bodies read in all to confirm one candidate key: they are read before anything authenticates them.</summary>
+    internal const long ConfirmBudget = 256L << 20;
+
     /// <summary>
-    /// Tries a candidate key on the first encrypted block frames. True when one authenticates, false when some were
-    /// tried and none did, null when there was nothing to try.
+    /// Tries a candidate key on encrypted block frames: of the first 64 whose headers check out, the smallest first, at
+    /// most 8 and at most <see cref="ConfirmBudget"/> bytes of bodies. True when one authenticates, false when some
+    /// were tried and none did, null when there was nothing to try.
     /// </summary>
     public bool? Authenticates(ArchiveKey key, byte[] archiveId)
     {
-        int tried = 0;
+        var usable = new List<FrameHeader>();
         long pos = 0;
-        while (tried < 8 && NextFrameHeader(pos, out var fh))
+        while (usable.Count < 64 && NextFrameHeader(pos, out var fh))
         {
             pos = fh.Offset + 1;
-            bool usable = (fh.Flags & Osa.FrameFlagEncrypted) != 0 && (fh.Flags & Osa.FrameFlagIndex) == 0
-                && fh.BodyLength >= 16 && fh.BodyLength <= MaxBody && fh.BodyLength <= _src.Length - fh.Offset - Osa.FrameHeaderSize;
-            if (!usable) continue;
+            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0 && (fh.Flags & Osa.FrameFlagIndex) == 0
+                && fh.BodyLength >= 16 && fh.BodyLength <= Osa.MaxBlockBodyBytes && fh.BodyLength <= _src.Length - fh.Offset - Osa.FrameHeaderSize)
+                usable.Add(fh);
+        }
+        int tried = 0;
+        long spent = 0;
+        foreach (var fh in usable.OrderBy(h => h.BodyLength).ThenBy(h => h.Offset))
+        {
+            if (tried == 8 || spent + fh.BodyLength > ConfirmBudget) break;
             tried++;
+            spent += fh.BodyLength;
             var body = _src.Read(fh.Offset + Osa.FrameHeaderSize, (int)fh.BodyLength);
             try
             {
@@ -547,7 +610,7 @@ internal sealed class FrameScanner
     {
         var body = _src.Read(f.Offset + Osa.FrameHeaderSize, (int)f.BodyLength);
         var plain = f.Encrypted ? Key!.Key.Open(Key.ArchiveId, f.Number, body, f.IsIndex ? Key.HeaderBytes : []) : body;
-        var parsed = BlockBody.Parse(plain, _registry, Location(f));
+        var parsed = BlockBody.Parse(plain, _registry, Location(f), PaddingAllowed(f));
         if (parsed.RawHash != f.RawHash) throw new CorruptDataException("the frame changed while it was being salvaged");
         var raw = PipelineExecutor.Decode(parsed.Descriptor, parsed.Payload, new CodecContext { Token = ct });
         if (BlockBody.Hash128(raw) != parsed.RawHash) throw new CorruptDataException("decoded content does not match its hash");

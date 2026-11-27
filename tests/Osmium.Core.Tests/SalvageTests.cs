@@ -362,23 +362,31 @@ public class SalvageTests
     }
 
     [Fact]
-    public async Task AnEncryptedArchiveWithADamagedHeaderYieldsItsBlocksWhenTheKeyFieldsSurvive()
+    public void AnEncryptedArchiveWithADamagedHeaderYieldsItsBlocksWhenTheKeyFieldsSurvive()
     {
+        // Encrypted archives have no Creator record since 0.2.0; one made earlier has it (its file list binds it), and
+        // damage to its text is what no rebuild of the header can undo.
         using var t = new TempDir();
-        var path = await Build(t, Password);
-        var l = Read(path, Password);
+        var options = Crypto.EncryptedArchives.Options("pbkdf2-weak") with { TestExtraHeaderRecords = [(2, "Osmium 0.1.1"u8.ToArray())] };
+        string path = Crypto.EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), options, 3000, 3000);
+        var l = Read(path, Crypto.EncryptedArchives.Password);
         int creator = File.ReadAllBytes(path).AsSpan(0, (int)l.HeaderLength).IndexOf("Osmium "u8);
         Assert.True(creator > 36);
         var bad = Damage(t, path, b => b[creator + 1] ^= 0x20); // the creator string, not the key fields
 
-        var res = Salvage(t, bad, Password);
+        var res = Salvage(t, bad, Crypto.EncryptedArchives.Password);
         Assert.Equal(2, res.ExitCode);
         Assert.False(res.HeaderIntact);
         Assert.Null(res.KeyProblem);
         Assert.Contains(res.Notes, n => n.Contains("authenticate the frames", StringComparison.Ordinal));
         // the index is sealed together with the exact header bytes, so it cannot be authenticated any more
         Assert.Contains("authenticated together with the archive header", res.IndexProblem);
-        AssertBlockFiles(t, l, res, Enumerable.Range(0, l.Blocks.Count));
+        Assert.False(res.IndexRecovered);
+        for (int k = 0; k < 2; k++)
+        {
+            Assert.Equal(SalvageBlockState.Verified, Assert.Single(res.Blocks, b => b.Number == k).State);
+            Assert.Equal(Crypto.EncryptedArchives.Content(k, 3000 - k), File.ReadAllBytes(Path.Combine(t.Sub("out"), $"block-{k}.bin")));
+        }
     }
 
     [Fact]
@@ -397,7 +405,8 @@ public class SalvageTests
     }
 
     // Header of the encrypted test archives (1,000 iterations, a 2-byte varint): extLen at 32; record type, length and
-    // kdf id at 36-38; iterations 39-40; salt 41-72; cipher id 73; verifier 74-89; creator type and length at 90-91.
+    // kdf id at 36-38; iterations 39-40; salt 41-72; cipher id 73; verifier 74-89; the CRC at 90-93 (an encrypted
+    // header has no Creator record).
     [Theory]
     [InlineData(1)]
     [InlineData(9)]
@@ -500,10 +509,12 @@ public class SalvageTests
         });
 
         var res = Salvage(t, bad);
-        Assert.Equal(0, res.ExitCode);
-        Assert.False(res.Encrypted);
-        Assert.Equal(SalvageFrameState.Ignored, res.Frames[0].State);
-        AssertFilesRecovered(t, l, res);
+        // A frame that cannot be checked without the key is never ignored: the archive counts as encrypted.
+        Assert.Equal(2, res.ExitCode);
+        Assert.True(res.Encrypted);
+        Assert.Empty(res.Written);
+        Assert.Contains(res.Notes, n => n.Contains($"an encrypted frame was found at offset {l.HeaderLength:N0}, outside the blocks of the file list at its end", StringComparison.Ordinal));
+        Assert.Contains($"an encrypted frame was found at offset {l.HeaderLength:N0}, outside the blocks of the file list at its end", File.ReadAllText(res.ReportPath!));
     }
 
     // ------------------------------------------------------------------ (g) encryption
@@ -692,7 +703,7 @@ public class SalvageTests
             for (int i = 0; i < h.Length; i++) b[i] = h[i];
         });
         var e = Assert.ThrowsAny<NewerVersionException>(() => Container.Salvage.Run(bad, t.Sub("out"), null, null, Ct));
-        Assert.Equal("This archive needs a newer version of Osmium: it uses archive flag 0x0002.", e.Message);
+        Assert.Equal("This archive needs a newer version of Osmium, or it was damaged or changed (unknown archive flag 0x0002).", e.Message);
         Assert.False(Directory.Exists(t.Sub("out")));
     }
 

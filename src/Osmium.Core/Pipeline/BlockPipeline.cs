@@ -121,17 +121,40 @@ public class CorruptDataException(string message, Exception? inner = null) : IOE
 /// feature) because a newer version made it. The message says so instead of calling the archive corrupt. Derives from
 /// <see cref="CorruptDataException"/>, so existing handlers still catch it.
 /// </summary>
-public class NewerVersionException(string feature, string? location = null)
-    : CorruptDataException($"This archive needs a newer version of Osmium: {location ?? "it"} uses {feature}.")
+public class NewerVersionException : CorruptDataException
 {
+    public NewerVersionException(string feature, string? location = null)
+        : this(feature, location, $"This archive needs a newer version of Osmium: {location ?? "it"} uses {feature}.") { }
+
+    private protected NewerVersionException(string feature, string? location, string message) : base(message)
+    {
+        Feature = feature;
+        Location = location;
+    }
+
     /// <summary>What this version does not know, e.g. "method id 8" or "parameter cm.models=8191".</summary>
-    public string Feature => feature;
+    public string Feature { get; }
 
     /// <summary>Where it is used, e.g. "block 3" or "the index"; null when not known.</summary>
-    public string? Location => location;
+    public string? Location { get; }
 
     /// <summary>A new exception with the same details, for throwing again (an exception object is not shared between throws).</summary>
     internal virtual NewerVersionException Again() => new(Feature, Location);
+}
+
+/// <summary>
+/// A header field this version does not know: a critical flag or record type, a key-derivation method or a cipher
+/// (FORMAT §1, §5). The header is read before anything can be authenticated, and its CRC can be recomputed by anyone,
+/// so such a field may come from a newer version or from a change to the archive; the message names both. What the
+/// authenticated file list declares keeps the plain message of <see cref="NewerVersionException"/>.
+/// </summary>
+public sealed class UnknownHeaderFieldException(string feature, string description)
+    : NewerVersionException(feature, null, $"This archive needs a newer version of Osmium, or it was damaged or changed ({description}).")
+{
+    /// <summary>What the message says in brackets, e.g. "unknown key-derivation method 3".</summary>
+    public string Description => description;
+
+    internal override NewerVersionException Again() => new UnknownHeaderFieldException(Feature, Description);
 }
 
 public sealed class UnknownMethodException(int id, string? location = null) : NewerVersionException($"method id {id}", location)

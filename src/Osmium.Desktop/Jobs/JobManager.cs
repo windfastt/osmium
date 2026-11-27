@@ -102,12 +102,19 @@ public sealed class JobManager : IDisposable
     public event Action<bool>? BusyChanged;
     public Func<string, string?>? PasswordPrompt { get; set; }
 
-    /// <summary>Reads the index of a written archive (path, password): what it holds, for moving the originals.</summary>
-    internal Func<string, Func<string?>, IReadOnlyList<ArchiveEntry>> ReadIndex { get; set; } = static (path, password) =>
+    /// <summary>Reads the index of a written archive (path, password): what it holds, for moving the originals. Its key
+    /// derivation may use the Memory limit setting, as the compression did.</summary>
+    internal Func<string, Func<string?>, IReadOnlyList<ArchiveEntry>> ReadIndex { get; set; }
+
+    /// <summary>The Memory limit setting, or the automatic budget: for compressing, and for checking passwords.</summary>
+    internal static long MemoryBudget(OsmiumSettings s) =>
+        s.Performance.MemoryLimitMiB > 0 ? (long)s.Performance.MemoryLimitMiB << 20 : MemoryBudgets.Default();
+
+    private IReadOnlyList<ArchiveEntry> ReadIndexOf(string path, Func<string?> password)
     {
-        using var archive = OsaReader.Open(path, password);
+        using var archive = OsaReader.Open(path, new OsaOpenOptions { Password = password, KdfMemoryLimit = MemoryBudget(_settings()) });
         return archive.Entries;
-    };
+    }
 
     /// <param name="recycler">Moves the originals of compress jobs to the Recycle Bin when the setting asks for it;
     /// without one, originals always stay.</param>
@@ -117,6 +124,7 @@ public sealed class JobManager : IDisposable
         _globalRules = globalRules;
         _historyFile = historyFile;
         _recycler = recycler;
+        ReadIndex = ReadIndexOf;
         LoadHistory();
         _loop = Task.Run(LoopAsync);
     }
@@ -281,7 +289,7 @@ public sealed class JobManager : IDisposable
             Profile = profile,
             Rules = rules,
             Threads = s.Performance.Threads > 0 ? s.Performance.Threads : Environment.ProcessorCount,
-            MemoryBudget = s.Performance.MemoryLimitMiB > 0 ? (long)s.Performance.MemoryLimitMiB << 20 : MemoryBudgets.Default(),
+            MemoryBudget = MemoryBudget(s),
             Dedup = s.Compression.Dedup switch { DedupSetting.Off => DedupMode.Off, DedupSetting.Files => DedupMode.Files, DedupSetting.Chunks => DedupMode.Chunks, _ => null },
             BlockCap = s.Compression.BlockSizeMiB > 0 ? (long)s.Compression.BlockSizeMiB << 20 : null,
             DecodeSpeedWeight = (int)s.Compression.DecodeSpeedWeight,
@@ -298,6 +306,13 @@ public sealed class JobManager : IDisposable
         // Read once: the whole job uses the settings in effect when it started, and the originals move only if the
         // blocks were verified with exactly this value.
         bool verify = s.Compression.VerifyBlocks, recycle = s.Compression.RecycleOriginals;
+        // The password protection of an encrypted archive, checked before anything is scanned, as the writer will check
+        // it: an empty password, a hand-edited setting out of range, or more memory than the Memory limit stops the job
+        // here, not after the scan, the workers and the plan.
+        var kdf = r.Password is null ? null : s.Security.Kdf();
+        bool padBlocks = kdf is not null && s.Security.PadBlocks();
+        if (r.Password is not null)
+            ArchiveBuilder.CheckProtection(new BuildOptions { OutputPath = r.Output, Password = r.Password, Kdf = kdf, PadBlocks = padBlocks, MemoryBudget = MemoryBudget(s) });
         j.Phase = "Scanning";
         var scan = Scanner.Scan(r.Inputs, new ScanOptions { Excludes = s.Compression.Excludes, IncludeHidden = s.Compression.IncludeHidden }, ct);
         var po = BuildPlanOptions(s, r, _globalRules(), m => { lock (j.Log) j.Log.Add(m); }) with
@@ -334,7 +349,8 @@ public sealed class JobManager : IDisposable
             {
                 OutputPath = r.Output,
                 Password = r.Password,
-                KdfIterations = s.Security.KdfIterations,
+                Kdf = kdf,
+                PadBlocks = padBlocks,
                 VerifyBlocks = verify,
                 Overwrite = r.Overwrite,
                 Threads = po.Threads + (cluster?.RemoteSlots ?? 0),
@@ -471,7 +487,13 @@ public sealed class JobManager : IDisposable
         var r = j.Request;
         string archive = r.Inputs[0];
         j.Phase = "Opening";
-        using var reader = OsaReader.Open(archive, () => r.Password ?? PasswordPrompt?.Invoke(archive));
+        // The key derivation may use the Memory limit setting, as compressing does, so an archive the app made opens in it.
+        using var reader = OsaReader.Open(archive, new OsaOpenOptions
+        {
+            Password = () => r.Password ?? PasswordPrompt?.Invoke(archive),
+            KdfMemoryLimit = MemoryBudget(_settings()),
+            Cancellation = ct,
+        });
         // Extracting a selection: only the chosen entries, and with a base folder only what lies below it, relative to it.
         Func<ArchiveEntry, bool>? selection = null;
         Func<string, string?>? mapPath = null;

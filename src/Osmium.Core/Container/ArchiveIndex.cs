@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using Osmium.Core.Archives;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -29,12 +30,25 @@ public sealed record BlockInfo(int Frame, long Offset, long FrameLength, long Ra
     public long PackedSize => FrameLength - Osa.FrameHeaderSize;
 }
 
+/// <summary>What a reader accepts in a file list, checked as it is decoded (FORMAT §3).</summary>
+public sealed record IndexLimits
+{
+    /// <summary>The most entries; the format allows 2^26.</summary>
+    public long MaxEntries { get; init; } = 1 << 26;
+    /// <summary>The most '/'-separated components in a path; the format sets none.</summary>
+    public int MaxPathDepth { get; init; } = int.MaxValue;
+    public static IndexLimits Default { get; } = new();
+}
+
 /// <summary>Archive index (FORMAT §3).</summary>
 public sealed class ArchiveIndex
 {
     public const int Version = 1;
     /// <summary>Metadata key of container 1.1: the offset of the spare copy of the index frame (<see cref="SpareCopies"/>).</summary>
     public const string SparesKey = "spares";
+    /// <summary>Metadata key: what made the archive (<see cref="OsaWriterOptions.Creator"/>), written by the writer in
+    /// every archive since 0.2.0; encrypted archives keep it only here (FORMAT §5).</summary>
+    public const string CreatorKey = "creator";
     public const FileAttributes StoredAttributes = (FileAttributes)0x2027;
 
     public List<BlockInfo> Blocks { get; } = [];
@@ -91,14 +105,39 @@ public sealed class ArchiveIndex
         return w.ToArray();
     }
 
-    public static ArchiveIndex Deserialize(ReadOnlySpan<byte> data, long headerLength, MethodRegistry registry)
+    /// <summary>The fewest bytes a block record can take: its length and five fields of at least one byte each.</summary>
+    private const int MinBlockRecord = 6;
+    /// <summary>The fewest bytes an entry record can take: its length, the two path lengths, the kind and the field mask.</summary>
+    private const int MinEntryRecord = 5;
+    /// <summary>The fewest bytes a segment can take: frame, offset and length.</summary>
+    private const int MinSegment = 3;
+    /// <summary>The fewest bytes a metadata item can take: the lengths of its key and its value.</summary>
+    private const int MinMetadataItem = 2;
+
+    /// <summary>
+    /// The most path text a file list of <paramref name="length"/> bytes may decode to. A path may repeat up to 32 KiB of
+    /// the one before it in a few bytes, so without this a small file list could decode to more text than memory holds;
+    /// 64 bytes of text per byte of file list is far more than real archives need, and it is never less than 64 MiB
+    /// nor more than 1 GiB.
+    /// </summary>
+    internal static long MaxPathText(int length) => Math.Clamp(64L * length, 64L << 20, 1L << 30);
+
+    /// <summary>
+    /// Decodes a file list. Every count is checked against the bytes that are left before anything is allocated for
+    /// it, and against <paramref name="limits"/> before the first item is read; every path against the limits before it
+    /// is added. Over a limit: <see cref="EntryLimitException"/>; a count or length the bytes cannot hold:
+    /// <see cref="CorruptDataException"/>.
+    /// </summary>
+    public static ArchiveIndex Deserialize(ReadOnlySpan<byte> data, long headerLength, MethodRegistry registry, IndexLimits? limits = null)
     {
+        limits ??= IndexLimits.Default;
         var r = new BlobReader(data);
         int ver = r.Int(1000);
         if (ver > Version) throw new NewerVersionException($"index version {ver}");
         if (ver != Version) throw new CorruptDataException($"Unsupported index version {ver}.");
         var idx = new ArchiveIndex();
         int nb = r.Int(1 << 24);
+        if ((long)nb * MinBlockRecord > r.Remaining) throw new CorruptDataException("The file list declares more blocks than it holds.");
         long offset = headerLength;
         for (int i = 0; i < nb; i++)
         {
@@ -118,6 +157,9 @@ public sealed class ArchiveIndex
             offset += frameLen;
         }
         int ne = r.Int(1 << 26);
+        if (ne > limits.MaxEntries) throw new EntryLimitException($"This archive holds {ne:N0} entries, more than the {limits.MaxEntries:N0} Osmium accepts.");
+        if ((long)ne * MinEntryRecord > r.Remaining) throw new CorruptDataException("The file list declares more entries than it holds.");
+        long pathText = 0, maxPathText = MaxPathText(data.Length);
         byte[] prev = [];
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (int i = 0; i < ne; i++)
@@ -126,10 +168,15 @@ public sealed class ArchiveIndex
             int shared = r2.Int(32768);
             int suffix = r2.Int(32768);
             if (shared > prev.Length || shared + suffix > 32768) throw new CorruptDataException("Corrupt path encoding in index.");
+            pathText += shared + suffix;
+            if (pathText > maxPathText) throw new CorruptDataException("The file list holds more path text than Osmium accepts.");
             var p = new byte[shared + suffix];
             prev.AsSpan(0, shared).CopyTo(p);
             r2.Raw(suffix).CopyTo(p.AsSpan(shared));
             prev = p;
+            // '/' is one byte in UTF-8 and never part of another character, so the bytes give the depth.
+            if (limits.MaxPathDepth < int.MaxValue && p.AsSpan().Count((byte)'/') + 1 is var depth && depth > limits.MaxPathDepth)
+                throw new EntryLimitException($"A path in this archive is {depth} folders deep, more than the {limits.MaxPathDepth} Osmium accepts.");
             var kind = (EntryKind)r2.B();
             if (kind is not (EntryKind.File or EntryKind.Directory)) throw new CorruptDataException("Unknown entry kind.");
             ulong present = r2.U();
@@ -137,12 +184,14 @@ public sealed class ArchiveIndex
             DateTime? c = (present & 2) != 0 ? SafeFileTime((long)r2.U64()) : null;
             FileAttributes? a = (present & 4) != 0 ? (FileAttributes)(int)r2.U() & StoredAttributes : null;
             long size = 0;
-            var segs = new List<Segment>();
+            List<Segment> segs = [];
             UInt128 hash = 0;
             if (kind == EntryKind.File)
             {
                 size = r2.Long();
                 int ns = r2.Int(1 << 24);
+                if ((long)ns * MinSegment > r2.Remaining) throw new CorruptDataException("A file in the file list declares more segments than it holds.");
+                segs = new List<Segment>(ns);
                 long sum = 0;
                 for (int s = 0; s < ns; s++)
                 {
@@ -168,6 +217,7 @@ public sealed class ArchiveIndex
             });
         }
         int nm = r.Int(1 << 16);
+        if ((long)nm * MinMetadataItem > r.Remaining) throw new CorruptDataException("The file list declares more metadata than it holds.");
         for (int i = 0; i < nm; i++) idx.Metadata[r.Str(1024)] = r.Bytes(1 << 28).ToArray();
         return idx;
     }

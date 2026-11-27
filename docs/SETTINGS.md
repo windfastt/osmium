@@ -4,7 +4,7 @@ Generated from the `[Setting]` metadata in `src/Osmium.Desktop/Settings/OsmiumSe
 definitions — the Settings page and the Tune dialog render exactly these. Stored in `%APPDATA%\Osmium\settings.json`
 (portable mode: `.\data\settings.json`).
 
-**63 settings in 11 categories**, plus 46 codec/filter parameters usable in pipelines, rules and the Tune dialog.
+**65 settings in 11 categories**, plus 46 codec/filter parameters usable in pipelines, rules and the Tune dialog.
 
 ## General
 
@@ -96,9 +96,11 @@ Encryption defaults.
 
 | Setting | Default | Range / choices | Notes |
 |---|---|---|---|
-| **Encrypt new archives by default**<br>AES-256-GCM; file names are encrypted too. | off |  |  |
-| **Key-derivation iterations**<br>PBKDF2-SHA512 cost. Higher = slower brute force (and slower to open). | 600000 | 100,000 – 20,000,000 | advanced |
+| **Encrypt new archives by default**<br>Ticks Encrypt on the Compress page. Explorer quick-compress and watch folders do not encrypt. | off |  |  |
+| **Password protection**<br>How much work every password guess costs, for new encrypted archives. Standard: Argon2id with 1 GiB of memory, about a second to open. Strong: 2 GiB, about three times as long. Maximum: 4 GiB, about six times as long; PCs with less than 8 GB of memory may not open it. Compatible: PBKDF2, which Osmium 0.1 can open, but guessing is far cheaper. | Standard | Standard · Strong · Maximum · Compatible |  |
+| **PBKDF2 iterations**<br>For Compatible protection only. Higher = slower guessing and slower to open. | 600000 | 100,000 – 20,000,000 | advanced, shown when `Protection=Compatible` |
 | **Remember passwords until Osmium exits**<br> | off |  |  |
+| **Hide exact sizes**<br>Pads encrypted blocks so their exact sizes are hidden, at a cost of up to 12 % in size. Osmium 0.1 cannot open such archives. The file list of an encrypted archive is always padded, except with Compatible protection. | off |  | shown when `!Protection=Compatible` |
 
 ## Integration
 

@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO.Hashing;
+using System.Runtime.ExceptionServices;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -24,6 +26,13 @@ public static class Salvage
     /// <exception cref="WrongPasswordException">The header is intact and the password does not match it.</exception>
     /// <exception cref="NewerVersionException">The header is intact but uses a format feature of a newer version.</exception>
     /// <exception cref="CorruptDataException">The file holds no Osmium archive data at all.</exception>
+    /// <exception cref="WeakProtectionException">The archive is protected more weakly than any Osmium preset and
+    /// <see cref="SalvageOptions.Protection"/> does not allow it (before the password is asked for).</exception>
+    /// <exception cref="KdfMemoryLimitException">Its key derivation needs more than <see cref="SalvageOptions.MemoryBudget"/>.</exception>
+    /// <exception cref="KdfCostException">Its key derivation takes more work than the strongest preset, and
+    /// <see cref="SalvageOptions.AllowSlowKdf"/> is not set.</exception>
+    /// <exception cref="ModifiedArchiveException">The archive says it is encrypted, but frames where its authenticated
+    /// index places blocks are not, or none of its blocks authenticates. Nothing is written.</exception>
     public static SalvageResult Run(string archivePath, string destination, Func<string?>? password = null,
         SalvageOptions? options = null, CancellationToken ct = default)
     {
@@ -59,7 +68,25 @@ internal sealed class SalvageRun : IDisposable
         _scanner = new FrameScanner(_src, o.Registry, o.Progress, ct);
     }
 
-    public void Dispose() => _src.Dispose();
+    public void Dispose()
+    {
+        _scanner.Key?.Key.Dispose(); // the key is zeroed when salvage ends
+        _src.Dispose();
+    }
+
+    private string? _archiveIdentity;
+    private bool _archiveIdentityRead;
+
+    /// <summary>The archive's <see cref="TargetNames.FileIdentity(string)"/>, read once: a file in the destination with
+    /// it is the archive, whatever path reaches it.</summary>
+    private string? ArchiveIdentity
+    {
+        get
+        {
+            if (!_archiveIdentityRead) (_archiveIdentity, _archiveIdentityRead) = (TargetNames.FileIdentity(_archive), true);
+            return _archiveIdentity;
+        }
+    }
 
     public SalvageResult Execute(Func<string?>? password)
     {
@@ -68,7 +95,7 @@ internal sealed class SalvageRun : IDisposable
         var probe = _probe = HeaderProbe.Find(_src, anyFrame ? first.Offset : _src.Length);
         if (probe.Header is null && !anyFrame)
             throw new CorruptDataException($"No Osmium archive data was found in '{_archive}': it has no intact header and no frame.");
-        bool encrypted = probe.Header?.Encrypted ?? EndIndexEncrypted(probe) ?? DamagedHeaderEncrypted() ?? (anyFrame && FramesLookEncrypted());
+        var (encrypted, encryptedBecause) = Encryption(probe, anyFrame);
         _scanner.ArchiveEncrypted = encrypted;
         if (encrypted)
         {
@@ -80,6 +107,13 @@ internal sealed class SalvageRun : IDisposable
         // 2. Every frame from the start of the file, verified on the way: where a header was found does not decide where
         // this archive's frames are (an archive stored in a block has a header of its own).
         var frames = _scanner.ScanAll(0);
+        if (encrypted && frames.Any(f => f.State == SalvageFrameState.Ignored && f.Problem == FrameScanner.PlaintextInEncrypted))
+            _notes.Add($"The archive counts as encrypted ({encryptedBecause}), so frames that are not encrypted were not written: "
+                + "they are not protected as Osmium protects encrypted archives. "
+                + (encryptedBecause == PasswordGivenReason
+                    ? "If the archive was not encrypted, salvage it again without a password."
+                    : "If the archive was encrypted, salvage it with its password. If you know it was not, it was changed on purpose, "
+                        + "and salvage cannot recover it safely."));
 
         // 3. The index, if one is intact.
         long headerLength = probe.Header?.Length ?? (anyFrame ? first.Offset : 0);
@@ -162,10 +196,10 @@ internal sealed class SalvageRun : IDisposable
     }
 
     /// <summary>
-    /// Without the header, the index frame that the footer at the end of the file points to says whether the archive is
-    /// encrypted: both are protected by a CRC, and an archive stored in a block cannot place its footer there.
+    /// Without the header, the index frame that the footer at the end of the file points to, whose frame header checks
+    /// out: both are protected by a CRC, and an archive stored in a block cannot place its footer there.
     /// </summary>
-    private bool? EndIndexEncrypted(HeaderProbe probe)
+    private (long Offset, long Length, bool Encrypted)? EndIndexFrame(HeaderProbe probe)
     {
         if (probe.EndFooter is not { } ft || ft.IndexLength < Osa.FrameHeaderSize) return null;
         // The index frame sits right before the footer, or where the footer says when nothing before it has moved.
@@ -173,9 +207,36 @@ internal sealed class SalvageRun : IDisposable
         {
             if (_scanner.ReadFrameHeader(at) is { } fh && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0
                 && fh.BodyLength == ft.IndexLength - Osa.FrameHeaderSize)
-                return (fh.Flags & Osa.FrameFlagEncrypted) != 0;
+                return (at, ft.IndexLength, (fh.Flags & Osa.FrameFlagEncrypted) != 0);
         }
         return null;
+    }
+
+    /// <summary>
+    /// The bytes that the blocks of a plaintext index frame occupy, when its body checks out and decodes: they end where
+    /// its spare copy B begins (when the index names one and H's trailer says where) or where it begins. Null when it
+    /// does not decode.
+    /// </summary>
+    private List<(long Start, long End)>? PlaintextIndexBlocks((long Offset, long Length, bool Encrypted) end)
+    {
+        if (end.Encrypted || end.Length > Osa.MaxFrameBytes) return null;
+        try
+        {
+            var body = _src.Read(end.Offset + Osa.FrameHeaderSize, (int)(end.Length - Osa.FrameHeaderSize));
+            var parsed = BlockBody.Parse(body, _o.Registry, "the index");
+            var raw = PipelineExecutor.Decode(parsed.Descriptor, parsed.Payload, new CodecContext { Token = _ct });
+            if (BlockBody.Hash128(raw) != parsed.RawHash) return null;
+            var index = ArchiveIndex.Deserialize(raw, 0, _o.Registry);
+            long blocksEnd = end.Offset;
+            if (index.Metadata.ContainsKey(ArchiveIndex.SparesKey) && end.Offset >= SpareCopies.TrailerSize
+                && SpareTrailer.Read(_src.Read(end.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+                && end.Offset - t.CopyLength - end.Length is var spare and >= 0)
+                blocksEnd = spare;
+            long span = index.Blocks.Count == 0 ? 0 : index.Blocks[^1].Offset + index.Blocks[^1].FrameLength;
+            long origin = blocksEnd - span;
+            return [.. index.Blocks.Select(b => (origin + b.Offset, origin + b.Offset + b.FrameLength))];
+        }
+        catch (Exception e) when (e is not (OperationCanceledException or OutOfMemoryException)) { return null; }
     }
 
     /// <summary>The encryption flag of a damaged header whose marker survived.</summary>
@@ -187,73 +248,185 @@ internal sealed class SalvageRun : IDisposable
     }
 
     /// <summary>
-    /// With neither header nor footer, whether the archive is encrypted is read from its frame headers: a majority of
-    /// the first sixteen, each claimed body skipped so that the frames of an archive stored in a block do not vote.
+    /// Whether the archive is encrypted, and what says so. An intact header decides. Without one, the archive counts as
+    /// encrypted when anything says so: an intact copy of its header (FORMAT §4.1), the index frame the footer at the
+    /// end of the file points to, a damaged header whose marker survived, a password given before salvage started, or
+    /// an encrypted frame. An encrypted frame inside the bytes of a block that a plaintext index frame at the end lists
+    /// does not count (an unencrypted archive whose damage uncovers an encrypted archive stored in one of its blocks is
+    /// still salvaged); one outside them does, so a plaintext file list put beside an encrypted archive's frames cannot
+    /// make salvage write what it lists. No frame that is not encrypted is written from an encrypted archive (FORMAT §8).
     /// </summary>
-    private bool FramesLookEncrypted()
+    private const string PasswordGivenReason = "a password was given";
+
+    private (bool Encrypted, string? Because) Encryption(HeaderProbe probe, bool anyFrame)
     {
-        int encrypted = 0, plain = 0;
-        long pos = 0;
-        while (encrypted + plain < 16 && _scanner.NextFrameHeader(pos, out var fh))
+        if (probe.Header is { } h) return (h.Encrypted, h.Encrypted ? "its header says so" : null);
+        if (IntactHeaderCopies(probe).Any(c => c.Encrypted)) return (true, "a copy of its header says so");
+        var end = EndIndexFrame(probe);
+        if (end is { Encrypted: true }) return (true, "the file list at its end is encrypted");
+        if (DamagedHeaderEncrypted() == true) return (true, "its damaged header says so");
+        if (_o.PasswordGiven) return (true, PasswordGivenReason);
+        var listed = end is { } e ? PlaintextIndexBlocks(e) : null;
+        if (!anyFrame || FirstEncryptedFrame(listed) is not { } at) return (false, null);
+        return (true, listed is null ? $"an encrypted frame was found at offset {at:N0}"
+            : $"an encrypted frame was found at offset {at:N0}, outside the blocks of the file list at its end");
+    }
+
+    /// <summary>The first frame header that checks out and says encrypted, outside the bytes of the blocks in
+    /// <paramref name="listed"/>; each claimed body is skipped, so that the frames of an archive stored in an intact block
+    /// are not seen.</summary>
+    private long? FirstEncryptedFrame(List<(long Start, long End)>? listed)
+    {
+        for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
         {
-            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0) encrypted++;
-            else plain++;
+            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0 && !(listed is not null && Inside(listed, fh.Offset))) return fh.Offset;
             long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
             pos = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length ? end : fh.Offset + 1;
         }
-        return encrypted > plain;
+        return null;
+
+        // The blocks of an index follow one another in the file: the last one that starts at or before the offset.
+        static bool Inside(List<(long Start, long End)> blocks, long at)
+        {
+            int lo = 0, hi = blocks.Count - 1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >>> 1;
+                if (blocks[mid].Start <= at) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            return hi >= 0 && at < blocks[hi].End;
+        }
+    }
+
+    private List<ArchiveHeader>? _headerCopies;
+
+    /// <summary>
+    /// The header copies H (FORMAT §4.1) that check out as headers, beside index frames found by their frame headers
+    /// (bodies skipped, so that an archive stored in a block has no say while its frame header is intact), whose archive
+    /// id agrees with the footer at the end of the file when there is one. Read once.
+    /// </summary>
+    private List<ArchiveHeader> IntactHeaderCopies(HeaderProbe probe)
+    {
+        if (_headerCopies is not null) return _headerCopies;
+        var copies = new List<ArchiveHeader>();
+        for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
+        {
+            long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
+            bool fits = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length;
+            if (fits && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0)
+                foreach (var (start, trailer) in HeaderCopiesBeside(fh.Offset, end - fh.Offset))
+                {
+                    ArchiveHeader h;
+                    try { h = ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)trailer.HeaderLength), writable: false)); }
+                    catch (Exception e) when (e is IOException or InvalidDataException) { continue; } // a newer version's, too
+                    if (copies.Any(c => c.Raw.AsSpan().SequenceEqual(h.Raw))) continue;
+                    if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(h.ArchiveId) != ft.IdPrefix) continue;
+                    copies.Add(h);
+                }
+            pos = fits ? end : fh.Offset + 1;
+        }
+        return _headerCopies = copies;
     }
 
     // ------------------------------------------------------------------ key
 
+    /// <summary>A way to derive this archive's key: the settings, the archive id, and the key fields read for them.</summary>
+    /// <param name="Settled">The kdf id is known (an intact or repaired header, or a kdf byte that reads 1 or 2): a refusal
+    /// of its settings ends salvage. A reading of a damaged kdf byte that would be refused only counts as one that does
+    /// not authenticate.</param>
+    private sealed record KeyCandidate(EncryptionInfo Info, byte[] ArchiveId, KeyFields? Fields, bool Settled);
+
     private KeyMaterial? ResolveKey(HeaderProbe probe, long firstFrame, Func<string?>? password, out string? problem)
     {
         problem = null;
+        var run = new KdfRun { MemoryLimitBytes = _o.MemoryBudget, Policy = _o.Protection, AllowSlow = _o.AllowSlowKdf, Cancellation = _ct };
         if (probe.Header is { Encryption: { } enc } h)
         {
-            var key = ArchiveKey.Derive(Ask(password), enc.Salt, enc.Iterations);
-            if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
-            return new KeyMaterial(key, h.ArchiveId, h.Raw);
+            // Every check of the settings comes before the password is asked for.
+            PasswordKdf.Admit(enc.Kdf, run);
+            string pw = Ask(password);
+            PasswordKdf.CheckPasswordText(pw, creating: false);
+            var key = ArchiveKey.Derive(pw, enc, run);
+            if (!key.Matches(enc.Verifier))
+            {
+                key.Dispose();
+                throw new WrongPasswordException();
+            }
+            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: enc.Kdf.Algorithm == KdfAlgorithm.Argon2id, PadsBlocks: h.PaddedBlocks);
         }
         // Container 1.1 keeps an intact copy of the header beside the copies of the index (FORMAT §4.1).
         string? copyProblem = null;
-        if (probe.Header is null && KeyFromHeaderCopy(probe, password, out copyProblem) is { } fromCopy) return fromCopy;
-        // The format keeps the salt and archive id only in the header. A damaged header may still hold them intact:
-        // they are used only if they authenticate frames (GCM), or the password verifier confirms them. They are read
-        // from the header with its CRC recomputed when that parses, else from their fixed places.
-        var fields = probe.Header is not null ? null : KeyFields.Read(_src);
-        if (probe.Header is null && (probe.Repaired?.Encryption ?? fields?.Encryption) is { } renc)
+        if (probe.Header is null && KeyFromHeaderCopy(probe, password, run, out copyProblem) is { } fromCopy) return fromCopy;
+        // A damaged header may still hold the key fields intact: they are used only if they authenticate frames (GCM),
+        // or the password verifier confirms them. They are read from the header with its CRC recomputed when that
+        // parses, else from their fixed places; when the kdf byte itself is damaged, in both layouts.
+        var fields = probe.Header is not null ? [] : KeyFields.Read(_src);
+        var candidates = new List<KeyCandidate>();
+        if (probe.Header is null && probe.Repaired?.Encryption is { } repairedInfo)
+            candidates.Add(new(repairedInfo, probe.Repaired.ArchiveId, fields.FirstOrDefault(f => f.Encryption.Kdf.Algorithm == repairedInfo.Kdf.Algorithm), Settled: true));
+        else if (probe.Header is null)
+            candidates.AddRange(fields.Select(f => new KeyCandidate(f.Encryption, f.ArchiveId, f, f.KdfByteIntact)));
+        if (candidates.Count == 0)
         {
-            byte[] id = probe.Repaired?.Encryption is not null ? probe.Repaired.ArchiveId : fields!.ArchiveId;
-            var key = ArchiveKey.Derive(Ask(password), renc.Salt, renc.Iterations);
-            bool verifierMatches = key.Matches(renc.Verifier);
-            // The footer at the end of the file keeps the first 8 bytes of the archive id too.
-            var ids = new List<byte[]> { id };
-            if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(id) != ft.IdPrefix)
+            problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
+                + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
+                + "encrypted salvage needs an intact header";
+            return null;
+        }
+
+        // Every candidate is admitted before the password is asked for.
+        var admitted = new List<KeyCandidate>();
+        Exception? firstRefusal = null;
+        foreach (var c in candidates)
+        {
+            try
             {
-                var patched = (byte[])id.Clone();
+                PasswordKdf.Admit(c.Info.Kdf, run);
+                admitted.Add(c);
+            }
+            catch (Exception e) when (!c.Settled && e is KdfMemoryLimitException or KdfCostException or WeakProtectionException)
+            {
+                firstRefusal ??= e;
+            }
+        }
+        if (admitted.Count == 0) ExceptionDispatchInfo.Throw(firstRefusal!);
+
+        string password0 = Ask(password);
+        PasswordKdf.CheckPasswordText(password0, creating: false);
+        bool anyVerifierMatched = false;
+        foreach (var c in admitted)
+        {
+            var key = ArchiveKey.Derive(password0, c.Info, run);
+            bool verifierMatches = key.Matches(c.Info.Verifier);
+            anyVerifierMatched |= verifierMatches;
+            // The footer at the end of the file keeps the first 8 bytes of the archive id too.
+            var ids = new List<byte[]> { c.ArchiveId };
+            if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(c.ArchiveId) != ft.IdPrefix)
+            {
+                var patched = (byte[])c.ArchiveId.Clone();
                 BinaryPrimitives.WriteUInt64LittleEndian(patched, ft.IdPrefix);
                 ids.Add(patched);
             }
-            foreach (var candidate in ids)
+            foreach (var id in ids)
             {
-                bool? authenticates = _scanner.Authenticates(key, candidate);
+                bool? authenticates = _scanner.Authenticates(key, id);
                 if (authenticates != true && !(authenticates is null && verifierMatches)) continue;
                 _notes.Add("The archive header is damaged, but the key-derivation data and archive id read from it authenticate the frames.");
                 // The index binds the exact header bytes: try the header as found and as a writer would have made it.
                 var rebuilt = new List<byte[]>();
                 if (probe.Repaired is { } repaired) rebuilt.Add(repaired.Raw);
-                if (fields is not null) rebuilt.AddRange(fields.Rebuilds(candidate, firstFrame));
-                return new KeyMaterial(key, candidate, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList());
+                if (c.Fields is { } f) rebuilt.AddRange(f.Rebuilds(id, firstFrame));
+                // The header's flags are not known: in an Argon2id archive, blocks that authenticate may be padded.
+                bool argon2id = c.Info.Kdf.Algorithm == KdfAlgorithm.Argon2id;
+                return new KeyMaterial(key, id, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList(), argon2id, PadsBlocks: argon2id);
             }
-            problem = verifierMatches
-                ? "the archive header is damaged: the password matches it, but the archive id needed to authenticate the frames does not"
-                : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
-            return null;
+            key.Dispose();
+            if (verifierMatches) break; // the password and these settings belong together: another reading cannot be them
         }
-        problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
-            + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
-            + "encrypted salvage needs an intact header";
+        problem = anyVerifierMatched
+            ? "the archive header is damaged: the password matches it, but the archive id needed to authenticate the frames does not"
+            : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
         return null;
 
         static string Ask(Func<string?>? pw) => pw?.Invoke() ?? throw new PasswordRequiredException();
@@ -266,40 +439,34 @@ internal sealed class SalvageRun : IDisposable
     /// used only when its archive id agrees with the footer at the end of the file, when there is one; when that footer
     /// vouches for it, a password it does not accept is wrong. It is used once frames authenticate under it.
     /// </summary>
-    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, out string? problem)
+    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, KdfRun run, out string? problem)
     {
         problem = null;
-        var copies = new List<ArchiveHeader>();
-        for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
-        {
-            long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
-            bool fits = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length;
-            if (fits && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0)
-                foreach (var (start, trailer) in HeaderCopiesBeside(fh.Offset, end - fh.Offset))
-                {
-                    ArchiveHeader h;
-                    try { h = ArchiveHeader.Read(new MemoryStream(_src.Read(start, (int)trailer.HeaderLength), writable: false)); }
-                    catch (Exception e) when (e is IOException or InvalidDataException) { continue; } // a newer version's, too
-                    if (h.Encryption is null || copies.Any(c => c.Raw.AsSpan().SequenceEqual(h.Raw))) continue;
-                    if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(h.ArchiveId) != ft.IdPrefix) continue;
-                    copies.Add(h);
-                }
-            pos = fits ? end : fh.Offset + 1;
-        }
+        // Only the last two: the copy beside the file list at the end of the file and the one beside its spare copy. A
+        // file can carry any number of copies, each with settings of its own, and each would cost a key derivation.
+        var copies = IntactHeaderCopies(probe).Where(h => h.Encryption is not null).TakeLast(2).ToList();
         if (copies.Count == 0) return null;
+        // A copy checks out as a header, so its settings are settled: a refusal of them ends salvage, before the password.
+        foreach (var h in copies) PasswordKdf.Admit(h.Encryption!.Kdf, run);
         string pw = password?.Invoke() ?? throw new PasswordRequiredException();
+        PasswordKdf.CheckPasswordText(pw, creating: false);
         bool refused = false;
         foreach (var h in copies.AsEnumerable().Reverse()) // the last one first: the copy beside the index at the end
         {
-            var key = ArchiveKey.Derive(pw, h.Encryption!.Salt, h.Encryption.Iterations);
-            if (!key.Matches(h.Encryption.Verifier))
+            var key = ArchiveKey.Derive(pw, h.Encryption!, run);
+            if (!key.Matches(h.Encryption!.Verifier))
             {
+                key.Dispose();
                 refused |= probe.EndFooter is not null;
                 continue;
             }
-            if (_scanner.Authenticates(key, h.ArchiveId) == false) continue;
+            if (_scanner.Authenticates(key, h.ArchiveId) == false)
+            {
+                key.Dispose();
+                continue;
+            }
             _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
-            return new KeyMaterial(key, h.ArchiveId, h.Raw);
+            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: h.Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id, PadsBlocks: h.PaddedBlocks);
         }
         if (refused) throw new WrongPasswordException();
         problem = "the archive header is damaged, and the spare copy of it that was found does not accept the password, "
@@ -542,6 +709,7 @@ internal sealed class SalvageRun : IDisposable
         var byNumber = frames.Where(f => !f.IsIndex && f.Number < (ulong)n).ToLookup(f => (int)f.Number);
         var chosen = new SalvageFrame?[n];
         for (int k = 0; k < n; k++) chosen[k] = Match(index.Blocks[k], byNumber[k], baseOffset);
+        if (_scanner.ArchiveEncrypted) RefuseUnprotectedBlocks(index, frames, chosen, baseOffset);
         foreach (var f in frames.Where(f => !f.IsIndex && f.Number >= (ulong)n && f.State is SalvageFrameState.Verified or SalvageFrameState.NeedsNewerVersion))
             f.Reject(SalvageFrameState.Ignored, "the index lists no block with this number");
 
@@ -566,7 +734,8 @@ internal sealed class SalvageRun : IDisposable
             try { own[e] = PathSafety.Resolve(_dest, e.Path); }
             catch (CorruptDataException ex) { _lost.Enqueue(new(e.IsDirectory ? e.Path + "/" : e.Path, ex.Message)); }
         }
-        var planner = new TargetNames(_dest, names, own.Values, null);
+        // The archive being read, under whatever path the destination reaches it, gets a free name and is never replaced.
+        var planner = new TargetNames(_dest, names, own.Values, null, ArchiveIdentity);
         var planned = new List<FileJob>();
         var folders = new List<(ArchiveEntry Entry, string Path)>();
         foreach (var e in index.Entries) // index order: parents before children
@@ -701,6 +870,22 @@ internal sealed class SalvageRun : IDisposable
                 _lost.Enqueue(new(j.Entry.Path, ex.Message));
             }
         }
+    }
+
+    /// <summary>
+    /// As the reader does when it opens an encrypted archive (FORMAT §5): where the authenticated index places a block,
+    /// a frame header that checks out, with the block's number and length, but without the encrypted flag (or with the
+    /// index flag), was made that way; and when no block authenticates while some failed authentication, the archive
+    /// only claims to be encrypted. Either ends salvage before anything is written.
+    /// </summary>
+    private static void RefuseUnprotectedBlocks(ArchiveIndex index, List<SalvageFrame> frames, SalvageFrame?[] chosen, long baseOffset)
+    {
+        var at = frames.Where(f => f.EnclosingOffset is null).ToLookup(f => f.Offset);
+        foreach (var b in index.Blocks)
+            if (at[baseOffset + b.Offset].Any(f => f.Number == (ulong)b.Frame && f.FrameLength == b.FrameLength && (!f.Encrypted || f.IsIndex)))
+                throw new ModifiedArchiveException();
+        if (index.Blocks.Count > 0 && chosen.All(c => c is null) && frames.Any(f => !f.IsIndex && f.FailedAuthentication))
+            throw new ModifiedArchiveException();
     }
 
     /// <summary>
@@ -873,6 +1058,9 @@ internal sealed class SalvageRun : IDisposable
                     string target = Path.Combine(_dest, primary ? $"block-{f.Number}.bin" : $"block-{f.Number}-at-{f.Offset}.bin");
                     try
                     {
+                        // The archive being read, under whatever path, is never replaced: its name is taken in every mode.
+                        if (File.Exists(target) && ArchiveIdentity is { } id && TargetNames.FileIdentity(target) == id)
+                            target = Extractor.UniqueName(target);
                         if (File.Exists(target))
                         {
                             if (_o.Overwrite == OverwriteMode.Skip)

@@ -1,8 +1,11 @@
 name: Compatibility
 
 # Osmium 0.1.1, built from its own tag, must open, test and extract bit for bit every archive this version writes with
-# the methods 0.1.1 knows, spare copies of the file list included; it must refuse, and say why, an archive with blocks
-# made with a method that is new since. ZIP files this version writes must pass unzip and 7-Zip.
+# the methods 0.1.1 knows, spare copies of the file list included, and encrypted archives with Compatible protection;
+# it must refuse, and say why, an archive with blocks made with a method that is new since, and an encrypted archive
+# with the default protection (Argon2id), with or without its exact sizes hidden, writing nothing. This version must
+# extract the encrypted archives of 0.1.1.
+# ZIP files this version writes must pass unzip and 7-Zip.
 
 on:
   pull_request:
@@ -73,8 +76,11 @@ jobs:
           while read -r name folder pipeline encrypted expected; do
             archive="$W/$name.osa"
             if [ "$encrypted" = yes ]; then
-              printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --password-stdin --kdf-iterations 1000 --quiet \
-                || fail "$name.osa: this version could not write it"
+              # Compatible protection (PBKDF2, kdf 1) is what 0.1.1 can open; 100,000 iterations is the least Osmium writes.
+              printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --password-stdin \
+                --protection compatible --kdf-iterations 100000 --quiet || fail "$name.osa: this version could not write it"
+              python3 -I -c 'import sys; b = open(sys.argv[1], "rb").read(); sys.exit(0 if b[36] == 1 and b[38] == 1 else 1)' "$archive" \
+                || fail "$name.osa: it is not protected with PBKDF2 (kdf 1)"
             else
               "$NEW" a "$archive" "$W/in/$folder" --pipeline "$pipeline" --quiet || fail "$name.osa: this version could not write it"
             fi
@@ -138,6 +144,73 @@ jobs:
 
           "$NEW" x "$W/new-methods.osa" "$W/new-out" || fail "new-methods.osa: this version did not extract it"
           diff -r "$W/in/program" "$W/new-out/program" || fail "new-methods.osa: what this version extracted differs from the source"
+
+      - name: Encrypted archives with the default protection (Argon2id), and with exact sizes hidden, are refused by 0.1.1, with its reason
+        run: |
+          set -euo pipefail
+          NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/argon2id"
+          fail() { echo "::error::$1"; exit 1; }
+          mkdir -p "$W/in/sub"
+          seq 1 20000 > "$W/in/numbers.txt"
+          head -c 300K /dev/urandom > "$W/in/sub/random.bin"
+          # Written by this version's command line with the default protection and nothing else set about it (with
+          # --hide-sizes: "Hide exact sizes" too).
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$W/default.osa" "$W/in" --profile fast --pipeline "zstd(level=3)" --password-stdin --quiet \
+            || fail "default.osa: this version could not write it"
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$W/hidden.osa" "$W/in" --profile fast --pipeline "zstd(level=3)" --password-stdin --hide-sizes --quiet \
+            || fail "hidden.osa: this version could not write it"
+          # Both headers ask for Argon2id (kdf 2), Standard (2 passes, 1 GiB, 4 lanes). The default has flags 0x0001, no
+          # flag of its own; with exact sizes hidden, flag bit 3 is set too (0x0009).
+          for case in default:1 hidden:9; do
+            name="${case%%:*}" flags="${case##*:}"
+            python3 -I - "$W/$name.osa" "$flags" <<'PY' || fail "$name.osa: its header is not Argon2id Standard with flags 0x000$flags"
+          import struct, sys
+          b = open(sys.argv[1], "rb").read()
+          flags = struct.unpack_from("<I", b, 12)[0]
+          print(f"flags 0x{flags:04x}, record 1: {b[36:44].hex(' ')}")
+          sys.exit(0 if flags == int(sys.argv[2]) and b[36:44] == bytes([1, 0x37, 2, 2, 0x80, 0x80, 0x40, 4]) else 1)
+          PY
+          done
+
+          check_refused() {
+            local name="$1" message="$2"
+            for cmd in x t l info; do
+              out="$W/old-out-$name-$cmd" code=0
+              if [ "$cmd" = x ]; then
+                printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" x "$W/$name.osa" "$out" --password-stdin > "$W/old-$name-$cmd.txt" 2> "$W/old-$name-$cmd.err" || code=$?
+              else
+                printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" "$cmd" "$W/$name.osa" --password-stdin > "$W/old-$name-$cmd.txt" 2> "$W/old-$name-$cmd.err" || code=$?
+              fi
+              cat "$W/old-$name-$cmd.err"
+              [ "$code" -eq 1 ] || fail "$name.osa: osmium $cmd of 0.1.1 exited with $code, not 1"
+              [ "$(cat "$W/old-$name-$cmd.err")" = "error: $message" ] \
+                || fail "$name.osa: osmium $cmd of 0.1.1 did not say \"error: $message\""
+              if [ -e "$out" ]; then fail "$name.osa: osmium $cmd of 0.1.1 wrote something"; fi
+            done
+          }
+          check_refused default "Unsupported key-derivation function."
+          check_refused hidden "Archive uses features this version does not understand."
+
+          for name in default hidden; do
+            printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" x "$W/$name.osa" "$W/new-out-$name" --password-stdin || fail "$name.osa: this version did not extract it"
+            diff -r "$W/in" "$W/new-out-$name/in" || fail "$name.osa: what this version extracted differs from the source"
+          done
+
+      - name: Encrypted archives of 0.1.1 are extracted by this version, bit for bit
+        run: |
+          set -euo pipefail
+          NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/old-to-new"
+          fail() { echo "::error::$1"; exit 1; }
+          mkdir -p "$W/in/sub"
+          for i in $(seq 1 300); do echo "line $i of an old archive"; done > "$W/in/notes.txt"
+          head -c 2M /dev/urandom > "$W/in/sub/random.bin"
+          # 0.1.1's own default: PBKDF2 with 600,000 iterations.
+          printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" a "$W/old.osa" "$W/in" --password-stdin --quiet || fail "old.osa: Osmium 0.1.1 could not write it"
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" t "$W/old.osa" --password-stdin || fail "old.osa: this version did not test it"
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" x "$W/old.osa" "$W/out" --password-stdin || fail "old.osa: this version did not extract it"
+          hashes() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
+          cmp <(hashes "$W/in") <(hashes "$W/out/in") || fail "old.osa: SHA-256 of the extracted files differ"
+          echo "old.osa: this version tested and extracted the encrypted archive of 0.1.1 exactly"
 
       - name: ZIP files of this version, checked by unzip and 7-Zip
         run: |
