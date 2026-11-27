@@ -166,8 +166,8 @@ public sealed class Planner(PlanOptions o)
             if (f.Rules.Exclude) { Log($"excluded {f.Src.RelPath} ({string.Join("; ", f.Rules.Provenance)})"); continue; }
             if (forced is not null && f.Rules.Pipeline is null) f.Rules.Pipeline = forced;
             f.Class = f.Analysis?.Class ?? CompatClass.Binary;
-            long cap = o.BlockCap ?? p.BlockCap;
-            if (f.Class is CompatClass.Audio or CompatClass.Image && f.Src.Size > cap) f.Class = CompatClass.Structured;
+            // Audio and image filters work on one file in one block; a file too large for that is treated as records.
+            if (f.Class is CompatClass.Audio or CompatClass.Image && f.Src.Size > MediaBlockCap(o.BlockCap ?? p.BlockCap)) f.Class = CompatClass.Structured;
             plan.Files.Add(f);
         }
 
@@ -359,13 +359,25 @@ public sealed class Planner(PlanOptions o)
         }
     }
 
+    /// <summary>The largest block, given the profile's (or the job's) block cap: it leaves enough headroom in the memory
+    /// budget for raw, filtered and compressed copies and for verification.</summary>
+    private long BlockCap(long profileCap) =>
+        Math.Clamp(Math.Min(profileCap, Math.Max(16L << 20, o.MemoryBudget / 6)), 1L << 16, BlockLimits.MaxRawSize);
+
+    /// <summary>The largest single audio or image file kept in one block for its own filter: at least 64 MiB, so that a
+    /// profile with small blocks still gives a song or a large picture its audio or image pipeline, within the same
+    /// memory headroom as any block.</summary>
+    private long MediaBlockCap(long profileCap) => BlockCap(Math.Max(profileCap, MediaMinBlock));
+
+    private const long MediaMinBlock = 64L << 20;
+
     private void Layout(ArchivePlan plan, long profileCap)
     {
-        // Keep enough headroom for raw + filtered + compressed copies and verification.
-        long memCap = Math.Max(16L << 20, o.MemoryBudget / 6);
-        long cap = Math.Clamp(Math.Min(profileCap, memCap), 1L << 16, BlockLimits.MaxRawSize);
+        long blockCap = BlockCap(profileCap), mediaCap = MediaBlockCap(profileCap);
         foreach (var g in plan.Groups)
         {
+            // Audio and image files are their own groups, each in one block (see the reclassification above).
+            long cap = g.Class is CompatClass.Audio or CompatClass.Image && g.Key.StartsWith("own:", StringComparison.Ordinal) ? mediaCap : blockCap;
             PlanBlock? cur = null;
             foreach (int u in g.Units)
             {

@@ -148,6 +148,27 @@ public class PlannerTests
         Assert.Equal(ch, pcm.Params.Get("channels", -1));
     }
 
+    [Theory]
+    [InlineData(2L << 30, true)]    // 40 MiB is more than Balanced's 32 MiB blocks, but a song keeps its audio pipeline
+    [InlineData(192L << 20, false)] // unless the memory budget cannot hold it in one block
+    public async Task LargeWavKeepsItsAudioPipelineAboveTheBlockSize(long memory, bool audio)
+    {
+        using var t = new TempDir();
+        var path = t.Sub("song.wav");
+        File.WriteAllBytes(path, Synthetic.Pcm(10_500_000, header: true));
+        var plan = await new Planner(new PlanOptions { Profile = Profile.Balanced, MemoryBudget = memory, Threads = 2 })
+            .BuildAsync(Scanner.Scan([path], ct: Ct), Ct);
+        var g = Assert.Single(plan.Groups);
+        Assert.True(g.Size > Profile.Balanced.BlockCap && g.Size < 64L << 20, $"{g.Size:N0} bytes");
+        Assert.Equal(audio ? CompatClass.Audio : CompatClass.Structured, g.Class);
+        if (audio)
+        {
+            Assert.Contains(g.Spec!.Filters, f => f.Method.Name == "pcm16");
+            Assert.Equal(g.Size, Assert.Single(plan.Blocks).RawSize);
+        }
+        else Assert.DoesNotContain(g.Spec!.Filters, f => f.Method.Name == "pcm16");
+    }
+
     [Fact]
     public async Task BmpGetsTheImagePredictorWithParsedGeometry()
     {
