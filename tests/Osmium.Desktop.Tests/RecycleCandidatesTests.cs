@@ -591,6 +591,78 @@ public sealed class RecycleCandidatesTests : IDisposable
     }
 
     [Fact]
+    public void DataInAnAlternateStreamKeepsTheItem()
+    {
+        string file = Write("a.txt");
+        string marked = Write("downloaded.txt");
+        string folder = Folder("in");
+        string inner = Write("in/sub/b.txt");
+        string tagged = Folder("tagged");
+        Write("tagged/c.txt");
+        string unlisted = Write("unlisted.txt");
+        string plain = Folder("plain");
+        Write("plain/d.txt");
+        // The named streams each path has, as the file system would list them.
+        var streams = new Dictionary<string, string[]>
+        {
+            [file] = ["notes"],
+            [marked] = ["Zone.Identifier"], // the mark of the web alone: it moves
+            [inner] = ["Zone.Identifier", "summary"],
+            [tagged] = ["thumbnail"], // a stream on the folder itself
+        };
+        Func<string, IReadOnlyList<string>> probe = p =>
+            p == unlisted ? throw new IOException("the drive did not answer") : streams.GetValueOrDefault(p, []);
+        var facts = Facts([file, marked, folder, tagged, unlisted, plain]);
+        var d = RecycleCandidates.Decide(facts, Fixed, probe);
+        Assert.Equal([marked, plain], d.Move);
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: a.txt:notes", Reason(d, file));
+        Assert.Equal($"it holds data in an alternate stream that the archive does not keep: {Path.Combine("sub", "b.txt")}:summary", Reason(d, folder));
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: tagged:thumbnail", Reason(d, tagged));
+        Assert.Equal("the alternate streams of unlisted.txt could not be listed (the drive did not answer)", Reason(d, unlisted));
+
+        // The last check applies the same rule, so a stream added since the decision keeps the item too.
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct, probe);
+        Assert.Null(recheck(marked));
+        Assert.Null(recheck(plain));
+        streams[Path.GetFullPath(Path.Combine(plain, "d.txt"))] = ["notes"];
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: d.txt:notes", recheck(plain));
+    }
+
+    [Fact]
+    public void DataInAnAlternateStreamKeepsTheItemOnWindows()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("alternate data streams are kept by Windows file systems only");
+        string file = Write("a.txt");
+        string marked = Write("downloaded.txt");
+        string folder = Folder("in");
+        string inner = Write("in/sub/b.txt");
+        string tagged = Folder("tagged");
+        Write("tagged/c.txt");
+        string plain = Folder("plain");
+        Write("plain/d.txt");
+        try
+        {
+            File.WriteAllText(file + ":notes", "kept in no archive");
+            File.WriteAllText(marked + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+            File.WriteAllText(inner + ":summary", "kept in no archive");
+            File.WriteAllText(tagged + ":thumbnail", "kept in no archive");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"the drive of the temporary folder keeps no alternate streams ({e.Message})");
+        }
+        var facts = Facts([file, marked, folder, tagged, plain]);
+        var d = RecycleCandidates.Decide(facts, Fixed);
+        Assert.Equal([marked, plain], d.Move);
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: a.txt:notes", Reason(d, file));
+        Assert.Equal($"it holds data in an alternate stream that the archive does not keep: {Path.Combine("sub", "b.txt")}:summary", Reason(d, folder));
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: tagged:thumbnail", Reason(d, tagged));
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
+        Assert.Null(recheck(marked));
+        Assert.Equal("it holds data in an alternate stream that the archive does not keep: a.txt:notes", recheck(file));
+    }
+
+    [Fact]
     public void KeepAllKeepsEveryInputWithTheReason()
     {
         string file = Write("a.txt");

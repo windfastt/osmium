@@ -62,7 +62,9 @@ public sealed record RecycleDecision(IReadOnlyList<InputVerdict> Inputs)
 /// and a fresh listing that includes hidden, system and excluded files finds exactly the files the archive holds
 /// below it (same relative paths, sizes and last-write times) and otherwise only folders: no links, junctions or
 /// cloud placeholders, and not the archive itself. A folder then moves as one item. Either way, Osmium's extractor
-/// must accept every name involved (<see cref="PathSafety.Validate"/>): an entry it refuses would not come back.</item>
+/// must accept every name involved (<see cref="PathSafety.Validate"/>): an entry it refuses would not come back. And
+/// neither the item nor anything in it holds data in a named stream (Windows' alternate data streams), which the
+/// archive does not keep; only the mark of the web (Zone.Identifier) may be left behind.</item>
 /// <item>It is on a fixed local drive. Removable and network drives have no Recycle Bin, so their files would be
 /// deleted for good; the drive type comes from the caller, so these rules run anywhere.</item>
 /// </list>
@@ -110,11 +112,12 @@ public static class RecycleCandidates
     /// The verdict for each input. <paramref name="driveType"/> tells the type of the drive that holds a path; only
     /// <see cref="DriveType.Fixed"/> lets an input move.
     /// </summary>
-    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType)
+    /// <param name="streams">The names of the named data streams of a file or folder; by default what the file system
+    /// says (Windows keeps them, other systems none).</param>
+    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, Func<string, IReadOnlyList<string>>? streams = null)
     {
         if (JobBlocker(facts) is { } blocker) return RecycleDecision.KeepAll(facts.Inputs, blocker);
-        var archived = new Archived(facts.ArchivedFiles, facts.ArchivedDirs);
-        string archive = Path.GetFullPath(facts.Build!.Path);
+        var rules = new Rules(facts, driveType, streams);
         var inputs = facts.Inputs.Select(i => (Given: i, Normal: Normalize(i))).ToList();
         var overlaps = new Overlaps(inputs.Where(i => i.Normal.Full is not null).Select(i => i.Normal.Full!));
         var verdicts = new List<InputVerdict>(inputs.Count);
@@ -126,7 +129,7 @@ public static class RecycleCandidates
                 continue;
             }
             string? reason;
-            try { reason = overlaps.Of(full) ?? Judge(full, archive, archived, driveType, contents: null); }
+            try { reason = overlaps.Of(full) ?? Judge(full, rules, contents: null); }
             catch (Exception e) { reason = $"it could not be checked ({e.Message})"; } // whatever went wrong, the input stays
             verdicts.Add(new InputVerdict(full, reason));
         }
@@ -141,11 +144,12 @@ public static class RecycleCandidates
     /// while it was read moves with it. Files are read one at a time through one 1 MiB buffer.
     /// </summary>
     /// <param name="ct">Stops the reading: the input then stays, because the job was canceled.</param>
-    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default)
+    /// <param name="streams">As for <see cref="Decide"/>.</param>
+    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default,
+        Func<string, IReadOnlyList<string>>? streams = null)
     {
         if (JobBlocker(facts) is { } blocker) return _ => blocker;
-        var archived = new Archived(facts.ArchivedFiles, facts.ArchivedDirs);
-        string archive = Path.GetFullPath(facts.Build!.Path);
+        var rules = new Rules(facts, driveType, streams);
         return input =>
         {
             try
@@ -155,10 +159,10 @@ public static class RecycleCandidates
                 var (full, problem) = Normalize(input);
                 if (full is null) return problem;
                 var contents = new List<Content>();
-                if (Judge(full, archive, archived, driveType, contents) is { } reason) return reason;
+                if (Judge(full, rules, contents) is { } reason) return reason;
                 if (CompareContents(contents, ct) is { } differs) return differs;
                 // The last look, after the reading: nothing may have appeared, gone or changed meanwhile.
-                return Judge(full, archive, archived, driveType, contents: null);
+                return Judge(full, rules, contents: null);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return Canceled; }
             catch (Exception e) { return $"it could not be checked again ({e.Message})"; }
@@ -203,20 +207,41 @@ public static class RecycleCandidates
     /// Applies the rules to one input. When it passes and <paramref name="contents"/> is given, that list gets every file
     /// the input holds, each with the hash the archive's index stores for it.
     /// </summary>
-    private static string? Judge(string full, string archive, Archived archived, Func<string, DriveType> driveType, List<Content>? contents)
+    private static string? Judge(string full, Rules rules, List<Content>? contents)
     {
         FileSystemInfo item = File.Exists(full) ? new FileInfo(full) : new DirectoryInfo(full);
         if (!item.Exists) return "it is no longer there";
-        var drive = driveType(full);
+        var drive = rules.DriveOf(full);
         if (drive != DriveType.Fixed) return $"it is on {DriveName(drive)}, which has no Recycle Bin";
         if ((item.Attributes & FileAttributes.ReparsePoint) != 0) return "it is a link (a junction, symbolic link or cloud file)";
         if ((item.Attributes & CloudPlaceholder) != 0) return "it is a cloud placeholder whose contents are not on this PC";
-        return item is FileInfo file ? JudgeFile(full, file, archive, archived, contents) : JudgeFolder(full, (DirectoryInfo)item, archive, archived, contents);
+        if (StreamProblem(full, item.Name, rules) is { } streams) return streams;
+        return item is FileInfo file ? JudgeFile(full, file, rules, contents) : JudgeFolder(full, (DirectoryInfo)item, rules, contents);
     }
 
-    private static string? JudgeFile(string full, FileInfo file, string archive, Archived archived, List<Content>? contents)
+    /// <summary>
+    /// Why an item stays because of its named data streams: one holds data the archive does not keep (only the mark of
+    /// the web may be left behind: extraction gives every file the archive's own), or they cannot be listed.
+    /// </summary>
+    /// <param name="name">The item as the reason names it: its name, or its path below the input.</param>
+    private static string? StreamProblem(string path, string name, Rules rules)
     {
-        if (string.Equals(full, archive, PathComparison)) return "it is the archive";
+        IReadOnlyList<string> streams;
+        try { streams = rules.Streams(path); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            return $"the alternate streams of {name} could not be listed ({e.Message})";
+        }
+        foreach (var stream in streams)
+            if (!string.Equals(stream, FileFacts.ZoneIdentifier, StringComparison.OrdinalIgnoreCase))
+                return $"it holds data in an alternate stream that the archive does not keep: {name}:{stream}";
+        return null;
+    }
+
+    private static string? JudgeFile(string full, FileInfo file, Rules rules, List<Content>? contents)
+    {
+        var archived = rules.Archived;
+        if (string.Equals(full, rules.Archive, PathComparison)) return "it is the archive";
         if (!archived.Files.TryGetValue(full, out var held)) return "it is not in the archive" + Describe(file.Attributes);
         if (held is null || file.Length != held.Scanned.Size || file.LastWriteTimeUtc != held.Scanned.ModifiedUtc) return "it changed after it was read";
         if (PathSafety.Validate(held.Scanned.RelPath) is { } unsafeName) return $"Osmium cannot extract it under its name ({unsafeName})";
@@ -224,14 +249,15 @@ public static class RecycleCandidates
         return null;
     }
 
-    private static string? JudgeFolder(string full, DirectoryInfo dir, string archive, Archived archived, List<Content>? contents)
+    private static string? JudgeFolder(string full, DirectoryInfo dir, Rules rules, List<Content>? contents)
     {
+        var archived = rules.Archived;
         if (!archived.Dirs.TryGetValue(full, out var root)) return "it is not in the archive";
         if (PathSafety.Validate(root.RelPath) is { } unsafeRoot) return $"Osmium cannot extract it under its name ({unsafeRoot})";
-        if (IsInside(archive, full)) return "the archive is inside it";
+        if (IsInside(rules.Archive, full)) return "the archive is inside it";
         var found = new List<(string Rel, FileInfo Info)>();
         var folders = new List<string>();
-        if (Walk(dir, found, folders) is { } problem) return problem;
+        if (Walk(dir, rules, found, folders) is { } problem) return problem;
         string prefix = full + Path.DirectorySeparatorChar;
         var listed = new HashSet<string>(StringComparer.Ordinal);
         var held = new List<Content>(found.Count);
@@ -301,9 +327,10 @@ public static class RecycleCandidates
 
     /// <summary>
     /// Lists every file and folder below <paramref name="root"/>, hidden and system ones included, without following
-    /// anything. Returns why the folder must stay when it holds a link or cloud placeholder or cannot be read completely.
+    /// anything. Returns why the folder must stay when it holds a link, a cloud placeholder or data in an alternate
+    /// stream, or cannot be read completely.
     /// </summary>
-    private static string? Walk(DirectoryInfo root, List<(string Rel, FileInfo Info)> found, List<string> folders)
+    private static string? Walk(DirectoryInfo root, Rules rules, List<(string Rel, FileInfo Info)> found, List<string> folders)
     {
         var options = new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = false, RecurseSubdirectories = false, ReturnSpecialDirectories = false };
         var pending = new Stack<(DirectoryInfo Dir, string Rel)>();
@@ -321,6 +348,7 @@ public static class RecycleCandidates
                 string rel = next.Rel.Length == 0 ? child.Name : next.Rel + Path.DirectorySeparatorChar + child.Name;
                 if ((child.Attributes & FileAttributes.ReparsePoint) != 0) return $"it holds a link (a junction, symbolic link or cloud file): {rel}";
                 if ((child.Attributes & CloudPlaceholder) != 0) return $"it holds a cloud placeholder whose contents are not on this PC: {rel}";
+                if (StreamProblem(child.FullName, rel, rules) is { } streams) return streams;
                 if (child is DirectoryInfo sub)
                 {
                     folders.Add(rel);
@@ -350,6 +378,17 @@ public static class RecycleCandidates
     /// <summary>A file an input holds, by its full path, and the hash the archive's index stores for it.</summary>
     /// <param name="Rel">Its path below the input; null when it is the input itself.</param>
     private readonly record struct Content(string Path, string? Rel, UInt128 Hash);
+
+    /// <summary>What every input of a job is judged against.</summary>
+    private sealed class Rules(RecycleFacts facts, Func<string, DriveType> driveType, Func<string, IReadOnlyList<string>>? streams)
+    {
+        /// <summary>The archive's full path.</summary>
+        public string Archive { get; } = Path.GetFullPath(facts.Build!.Path);
+        public Archived Archived { get; } = new(facts.ArchivedFiles, facts.ArchivedDirs);
+        public Func<string, DriveType> DriveOf { get; } = driveType;
+        /// <summary>The names of the named data streams of a file or folder.</summary>
+        public Func<string, IReadOnlyList<string>> Streams { get; } = streams ?? FileFacts.NamedStreams;
+    }
 
     /// <summary>The scan's records of what the archive holds, by full path.</summary>
     private sealed class Archived
