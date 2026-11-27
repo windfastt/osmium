@@ -143,9 +143,12 @@ All notable changes to Osmium. Versions follow [Semantic Versioning](https://sem
   An input moves only when the job finished with every block verified and no warnings, the archive holds it unchanged
   under a name Osmium can extract, a folder holds nothing that was not archived (hidden, system and excluded files
   count) and no links or cloud placeholders, the archive is not inside it, and it is on a fixed local drive. Each
-  input is checked again just before it moves; Windows is never allowed to delete anything permanently or to take
-  along items it was not given (such as a web page's `_files` folder). The job log names what moved and why the rest
-  stayed; the job summary, history and notification count both.
+  input is checked again just before it moves: every file it holds is read again and must match the hash the archive
+  stores for it, so an edit that keeps a file's size and time, or a change to one of several identical files the
+  archive stores once, keeps the input where it is, as does canceling the job during this check. Windows is never
+  allowed to delete anything permanently or to take along items it was not given (such as a web page's `_files`
+  folder). The job log names what moved and why the rest stayed; the job summary, history and notification count
+  both.
 - **Tests:** golden vectors that pin the output of every Osmium CM model set and every filter, planner tests with
   scripted trial results (successive halving, parameter search, Store preference, the top-two race, thread-count
   independence), sampling and memory-limit tests, tests for archives from a newer version, cluster-key parsing and
