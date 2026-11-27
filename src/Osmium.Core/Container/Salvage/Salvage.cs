@@ -95,7 +95,11 @@ internal sealed class SalvageRun : IDisposable
         var frames = _scanner.ScanAll(0);
         if (encrypted && frames.Any(f => f.State == SalvageFrameState.Ignored && f.Problem == FrameScanner.PlaintextInEncrypted))
             _notes.Add($"The archive counts as encrypted ({encryptedBecause}), so frames that are not encrypted were not written: "
-                + "they are not protected as Osmium protects encrypted archives.");
+                + "they are not protected as Osmium protects encrypted archives. "
+                + (encryptedBecause == PasswordGivenReason
+                    ? "If the archive was not encrypted, salvage it again without a password."
+                    : "If the archive was encrypted, salvage it with its password. If you know it was not, it was changed on purpose, "
+                        + "and salvage cannot recover it safely."));
 
         // 3. The index, if one is intact.
         long headerLength = probe.Header?.Length ?? (anyFrame ? first.Offset : 0);
@@ -178,10 +182,10 @@ internal sealed class SalvageRun : IDisposable
     }
 
     /// <summary>
-    /// Without the header, the index frame that the footer at the end of the file points to says whether the archive is
-    /// encrypted: both are protected by a CRC, and an archive stored in a block cannot place its footer there.
+    /// Without the header, the index frame that the footer at the end of the file points to, whose frame header checks
+    /// out: both are protected by a CRC, and an archive stored in a block cannot place its footer there.
     /// </summary>
-    private bool? EndIndexEncrypted(HeaderProbe probe)
+    private (long Offset, long Length, bool Encrypted)? EndIndexFrame(HeaderProbe probe)
     {
         if (probe.EndFooter is not { } ft || ft.IndexLength < Osa.FrameHeaderSize) return null;
         // The index frame sits right before the footer, or where the footer says when nothing before it has moved.
@@ -189,9 +193,36 @@ internal sealed class SalvageRun : IDisposable
         {
             if (_scanner.ReadFrameHeader(at) is { } fh && fh.Number == Osa.IndexFrameNumber && (fh.Flags & Osa.FrameFlagIndex) != 0
                 && fh.BodyLength == ft.IndexLength - Osa.FrameHeaderSize)
-                return (fh.Flags & Osa.FrameFlagEncrypted) != 0;
+                return (at, ft.IndexLength, (fh.Flags & Osa.FrameFlagEncrypted) != 0);
         }
         return null;
+    }
+
+    /// <summary>
+    /// The bytes that the blocks of a plaintext index frame occupy, when its body checks out and decodes: they end where
+    /// its spare copy B begins (when the index names one and H's trailer says where) or where it begins. Null when it
+    /// does not decode.
+    /// </summary>
+    private List<(long Start, long End)>? PlaintextIndexBlocks((long Offset, long Length, bool Encrypted) end)
+    {
+        if (end.Encrypted || end.Length > Osa.MaxIndexFrameBytes) return null;
+        try
+        {
+            var body = _src.Read(end.Offset + Osa.FrameHeaderSize, (int)(end.Length - Osa.FrameHeaderSize));
+            var parsed = BlockBody.Parse(body, _o.Registry, "the index");
+            var raw = PipelineExecutor.Decode(parsed.Descriptor, parsed.Payload, new CodecContext { Token = _ct });
+            if (BlockBody.Hash128(raw) != parsed.RawHash) return null;
+            var index = ArchiveIndex.Deserialize(raw, 0, _o.Registry);
+            long blocksEnd = end.Offset;
+            if (index.Metadata.ContainsKey(ArchiveIndex.SparesKey) && end.Offset >= SpareCopies.TrailerSize
+                && SpareTrailer.Read(_src.Read(end.Offset - SpareCopies.TrailerSize, SpareCopies.TrailerSize)) is { Newer: false } t
+                && end.Offset - t.CopyLength - end.Length is var spare and >= 0)
+                blocksEnd = spare;
+            long span = index.Blocks.Count == 0 ? 0 : index.Blocks[^1].Offset + index.Blocks[^1].FrameLength;
+            long origin = blocksEnd - span;
+            return [.. index.Blocks.Select(b => (origin + b.Offset, origin + b.Offset + b.FrameLength))];
+        }
+        catch (Exception e) when (e is not (OperationCanceledException or OutOfMemoryException)) { return null; }
     }
 
     /// <summary>The encryption flag of a damaged header whose marker survived.</summary>
@@ -205,35 +236,53 @@ internal sealed class SalvageRun : IDisposable
     /// <summary>
     /// Whether the archive is encrypted, and what says so. An intact header decides. Without one, the archive counts as
     /// encrypted when anything says so: an intact copy of its header (FORMAT §4.1), the index frame the footer at the
-    /// end of the file points to, a damaged header whose marker survived, or a password given before salvage started.
-    /// Otherwise the index frame at the end or the damaged header saying it is not encrypted settles that, as an intact
-    /// header would (so that an unencrypted archive whose damage uncovers an encrypted archive stored in one of its
-    /// blocks is still salvaged). With none of them left, any encrypted frame makes it encrypted. No frame that is not
-    /// encrypted is written from an encrypted archive (FORMAT §8).
+    /// end of the file points to, a damaged header whose marker survived, a password given before salvage started, or
+    /// an encrypted frame. An encrypted frame inside the bytes of a block that a plaintext index frame at the end lists
+    /// does not count (an unencrypted archive whose damage uncovers an encrypted archive stored in one of its blocks is
+    /// still salvaged); one outside them does, so a plaintext file list put beside an encrypted archive's frames cannot
+    /// make salvage write what it lists. No frame that is not encrypted is written from an encrypted archive (FORMAT §8).
     /// </summary>
+    private const string PasswordGivenReason = "a password was given";
+
     private (bool Encrypted, string? Because) Encryption(HeaderProbe probe, bool anyFrame)
     {
         if (probe.Header is { } h) return (h.Encrypted, h.Encrypted ? "its header says so" : null);
         if (IntactHeaderCopies(probe).Any(c => c.Encrypted)) return (true, "a copy of its header says so");
-        bool? endIndex = EndIndexEncrypted(probe), damagedHeader = DamagedHeaderEncrypted();
-        if (endIndex == true) return (true, "the file list at its end is encrypted");
-        if (damagedHeader == true) return (true, "its damaged header says so");
-        if (_o.PasswordGiven) return (true, "a password was given");
-        if (endIndex == false || damagedHeader == false) return (false, null);
-        return anyFrame && FirstEncryptedFrame() is { } at ? (true, $"an encrypted frame was found at offset {at:N0}") : (false, null);
+        var end = EndIndexFrame(probe);
+        if (end is { Encrypted: true }) return (true, "the file list at its end is encrypted");
+        if (DamagedHeaderEncrypted() == true) return (true, "its damaged header says so");
+        if (_o.PasswordGiven) return (true, PasswordGivenReason);
+        var listed = end is { } e ? PlaintextIndexBlocks(e) : null;
+        if (!anyFrame || FirstEncryptedFrame(listed) is not { } at) return (false, null);
+        return (true, listed is null ? $"an encrypted frame was found at offset {at:N0}"
+            : $"an encrypted frame was found at offset {at:N0}, outside the blocks of the file list at its end");
     }
 
-    /// <summary>The first frame header that checks out and says encrypted, each claimed body skipped so that the frames of
-    /// an archive stored in an intact block are not seen.</summary>
-    private long? FirstEncryptedFrame()
+    /// <summary>The first frame header that checks out and says encrypted, outside the bytes of the blocks in
+    /// <paramref name="listed"/>; each claimed body is skipped, so that the frames of an archive stored in an intact block
+    /// are not seen.</summary>
+    private long? FirstEncryptedFrame(List<(long Start, long End)>? listed)
     {
         for (long pos = 0; _scanner.NextFrameHeader(pos, out var fh);)
         {
-            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0) return fh.Offset;
+            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0 && !(listed is not null && Inside(listed, fh.Offset))) return fh.Offset;
             long end = fh.Offset + Osa.FrameHeaderSize + fh.BodyLength;
             pos = fh.BodyLength >= 0 && end > fh.Offset && end <= _src.Length ? end : fh.Offset + 1;
         }
         return null;
+
+        // The blocks of an index follow one another in the file: the last one that starts at or before the offset.
+        static bool Inside(List<(long Start, long End)> blocks, long at)
+        {
+            int lo = 0, hi = blocks.Count - 1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >>> 1;
+                if (blocks[mid].Start <= at) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            return hi >= 0 && at < blocks[hi].End;
+        }
     }
 
     private List<ArchiveHeader>? _headerCopies;

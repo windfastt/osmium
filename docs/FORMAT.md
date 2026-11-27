@@ -380,12 +380,13 @@ index's offsets:
    restores the file names. Without the key fields, encrypted frames cannot be decrypted.
 
    Salvage never writes a frame that is not encrypted from an archive that counts as encrypted, and the report says
-   why it counts as encrypted. An intact header decides. Without one, the archive counts as encrypted when an intact
-   header copy, the index frame the footer at the end points to, the damaged header, or a password given before
-   salvage started says so; otherwise that index frame or the damaged header saying it is not encrypted settles it
-   (an unencrypted archive whose damage uncovers an encrypted archive stored in one of its blocks is still salvaged);
-   with none of them left, any encrypted frame found makes it encrypted. Salvage never writes a frame whose padding is
-   not zero.
+   why it counts as encrypted and what to do. An intact header decides. Without one, the archive counts as encrypted
+   when an intact header copy, the index frame the footer at the end points to, the damaged header, or a password
+   given before salvage started says so, or when an encrypted frame is found: a frame that cannot be checked without
+   the key is never ignored. Only an encrypted frame inside the bytes of a block that a plaintext index frame at the
+   end lists does not count (an unencrypted archive whose damage uncovers an encrypted archive stored in one of its
+   blocks is still salvaged), so a plaintext file list put beside an encrypted archive's frames cannot make salvage
+   write what it lists. Salvage never writes a frame whose padding is not zero.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
    (`--force` lifts both in the CLI).
 8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, which must be this

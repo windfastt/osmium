@@ -509,10 +509,12 @@ public class SalvageTests
         });
 
         var res = Salvage(t, bad);
-        Assert.Equal(0, res.ExitCode);
-        Assert.False(res.Encrypted);
-        Assert.Equal(SalvageFrameState.Ignored, res.Frames[0].State);
-        AssertFilesRecovered(t, l, res);
+        // A frame that cannot be checked without the key is never ignored: the archive counts as encrypted.
+        Assert.Equal(2, res.ExitCode);
+        Assert.True(res.Encrypted);
+        Assert.Empty(res.Written);
+        Assert.Contains(res.Notes, n => n.Contains($"an encrypted frame was found at offset {l.HeaderLength:N0}, outside the blocks of the file list at its end", StringComparison.Ordinal));
+        Assert.Contains($"an encrypted frame was found at offset {l.HeaderLength:N0}, outside the blocks of the file list at its end", File.ReadAllText(res.ReportPath!));
     }
 
     // ------------------------------------------------------------------ (g) encryption

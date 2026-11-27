@@ -319,11 +319,42 @@ public class SalvageKdfTests
         Assert.True(r.Encrypted);
         Assert.Empty(r.Written);
         Assert.All(r.Frames, f => Assert.Equal(SalvageFrameState.Ignored, f.State));
-        Assert.Contains(r.Notes, n => n.StartsWith("The archive counts as encrypted (a password was given)", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.StartsWith("The archive counts as encrypted (a password was given)", StringComparison.Ordinal)
+            && n.EndsWith("If the archive was not encrypted, salvage it again without a password.", StringComparison.Ordinal));
         // Without the password, the same frames are an unencrypted archive's, and are written.
         var plainRun = Salvage(path, t.Sub("out2"), () => null);
         Assert.False(plainRun.Encrypted);
         Assert.Equal(10, plainRun.Written.Count(w => w.StartsWith("block-", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void APlaintextFileListPlantedBesideTheFramesOfAnEncryptedArchiveDoesNotMakeItsFilesWritten()
+    {
+        // The header of an encrypted archive destroyed, its file list and footer replaced by those of a plaintext archive
+        // whose frames follow the encrypted ones: the plaintext file list does not list the bytes of the encrypted frames.
+        using var t = new TempDir();
+        var encrypted = BlockFrames(EncryptedArchives.Write(t.Sub("enc.osa"), "pbkdf2", blocks: 2), EncryptedArchives.Password);
+        string plainPath = EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Never }, 3000, 3000);
+        var plain = File.ReadAllBytes(plainPath);
+        long plainBlocks;
+        using (var r = OsaReader.Open(plainPath)) plainBlocks = r.Blocks[0].Offset;
+        string path = t.Sub("planted.osa");
+        File.WriteAllBytes(path, [.. new byte[200], .. encrypted.SelectMany(f => f), .. plain.AsSpan((int)plainBlocks)]);
+        var res = Salvage(path, t.Sub("out"), () => EncryptedArchives.Password);
+        Assert.True(res.Encrypted);
+        Assert.Empty(res.Written);
+        Assert.Contains(res.Notes, n => n.StartsWith("The archive counts as encrypted (an encrypted frame was found at offset 200, "
+            + "outside the blocks of the file list at its end)", StringComparison.Ordinal)
+            && n.EndsWith("If the archive was encrypted, salvage it with its password. If you know it was not, it was changed on purpose, "
+                + "and salvage cannot recover it safely.", StringComparison.Ordinal));
+        Assert.All(res.Frames.Where(f => !f.Encrypted), f => Assert.Equal(SalvageFrameState.Ignored, f.State));
+
+        // The same plaintext archive on its own, with its header destroyed, is still salvaged with its names.
+        string alone = t.Sub("alone.osa");
+        File.WriteAllBytes(alone, [.. new byte[plainBlocks], .. plain.AsSpan((int)plainBlocks)]);
+        var whole = Salvage(alone, t.Sub("out-alone"), () => null);
+        Assert.False(whole.Encrypted);
+        Assert.Contains("f0.bin", whole.Written);
     }
 }
 
