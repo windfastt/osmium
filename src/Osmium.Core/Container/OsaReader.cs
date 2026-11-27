@@ -1,11 +1,35 @@
 using System.Buffers.Binary;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Container;
 
 public sealed class PasswordRequiredException() : Exception("This archive is encrypted. A password is required.");
 public sealed class WrongPasswordException() : Exception("Wrong password.");
+
+/// <summary>How <see cref="OsaReader.Open(string, OsaOpenOptions)"/> opens an archive.</summary>
+public sealed record OsaOpenOptions
+{
+    /// <summary>Called only for an encrypted archive, and only after every check that needs no password; return null
+    /// to cancel (<see cref="PasswordRequiredException"/>).</summary>
+    public Func<string?>? Password { get; init; }
+    public MethodRegistry? Registry { get; init; }
+    /// <summary>The most memory the key derivation may use (the decode memory limit); above it,
+    /// <see cref="KdfMemoryLimitException"/> before the password is asked for.</summary>
+    public long KdfMemoryLimit { get; init; } = MemoryBudgets.Default();
+    /// <summary>Whether protection weaker than any Osmium preset, and unprotected data beside the encrypted parts, are
+    /// refused (the default) or allowed after the user agreed.</summary>
+    public ProtectionPolicy Protection { get; init; } = ProtectionPolicy.Default;
+    /// <summary>Allow a key derivation that takes more work than the strongest preset (the user agreed).</summary>
+    public bool AllowSlowKdf { get; init; }
+    /// <summary>Cancels the key derivation.</summary>
+    public CancellationToken Cancellation { get; init; }
+    /// <summary>Progress of the key derivation, 0 to 1 ("Checking the password…").</summary>
+    public IProgress<double>? KdfProgress { get; init; }
+    /// <summary>Tests: (offset, count) of a read that fails with an I/O error, as a bad sector does.</summary>
+    internal Func<long, int, bool>? TestUnreadable { get; init; }
+}
 
 /// <summary>Random-access reader. Thread-safe for concurrent block reads.</summary>
 public sealed class OsaReader : IDisposable
@@ -60,14 +84,28 @@ public sealed class OsaReader : IDisposable
     /// </summary>
     /// <param name="password">Called only when the archive is encrypted; return null to cancel.</param>
     public static OsaReader Open(string path, Func<string?>? password = null, MethodRegistry? registry = null) =>
-        Open(path, password, registry, unreadable: null);
+        Open(path, new OsaOpenOptions { Password = password, Registry = registry });
 
     /// <param name="unreadable">Tests: (offset, count) of a read that fails with an I/O error, as a bad sector does.</param>
-    internal static OsaReader Open(string path, Func<string?>? password, MethodRegistry? registry, Func<long, int, bool>? unreadable)
+    internal static OsaReader Open(string path, Func<string?>? password, MethodRegistry? registry, Func<long, int, bool>? unreadable) =>
+        Open(path, new OsaOpenOptions { Password = password, Registry = registry, TestUnreadable = unreadable });
+
+    /// <summary>
+    /// Opens an archive, in this order: the header and the footer; for an encrypted archive the checks of its key
+    /// derivation that need no password (<see cref="PasswordKdf.Admit"/>: too weak, more memory than
+    /// <see cref="OsaOpenOptions.KdfMemoryLimit"/>, more work than the strongest preset); only then the password, which
+    /// must be text a password can be; one derivation; the verifier (<see cref="WrongPasswordException"/>); the index.
+    /// A refusal or a question therefore never costs a password prompt. The spare copies stand in for damage only,
+    /// never for any of these refusals.
+    /// </summary>
+    public static OsaReader Open(string path, OsaOpenOptions options)
     {
-        registry ??= MethodRegistry.Default;
+        ArgumentNullException.ThrowIfNull(options);
+        var registry = options.Registry ?? MethodRegistry.Default;
         // FileShare.Delete: Explorer can still rename or delete an archive that is open; reads go on through the handle.
-        var handle = new ArchiveFile(File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess), unreadable);
+        var handle = new ArchiveFile(File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess),
+            options.TestUnreadable);
+        ArchiveKey? key = null;
         try
         {
             long length = RandomAccess.GetLength(handle.Handle);
@@ -97,12 +135,19 @@ public sealed class OsaReader : IDisposable
             if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
                 throw new CorruptDataException("Index location is invalid (truncated or appended file?).");
 
-            ArchiveKey? key = null;
             if (header.Encrypted)
             {
-                var pw = password?.Invoke() ?? throw new PasswordRequiredException();
-                key = ArchiveKey.Derive(pw, header.Encryption!.Salt, header.Encryption.Iterations);
-                if (!key.Matches(header.Encryption.Verifier)) throw new WrongPasswordException();
+                var enc = header.Encryption!;
+                var run = new KdfRun
+                {
+                    MemoryLimitBytes = options.KdfMemoryLimit, Policy = options.Protection, AllowSlow = options.AllowSlowKdf,
+                    Cancellation = options.Cancellation, Progress = options.KdfProgress,
+                };
+                PasswordKdf.Admit(enc.Kdf, run);
+                var pw = options.Password?.Invoke() ?? throw new PasswordRequiredException();
+                PasswordKdf.CheckPasswordText(pw, creating: false);
+                key = ArchiveKey.Derive(pw, enc, run);
+                if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
             }
             ArchiveIndex index;
             bool usedSpareIndex = false;
@@ -127,16 +172,21 @@ public sealed class OsaReader : IDisposable
         }
         catch
         {
+            key?.Dispose();
             handle.Dispose();
             throw;
         }
     }
 
-    /// <summary>Damage the spare copies can stand in for: bytes that do not check out, or that cannot be read at all (a
-    /// bad sector), but never a wrong password, a missing one, or a feature of a newer version (a
-    /// <see cref="NewerVersionException"/> is an <see cref="IOException"/>, so it is excluded by name).</summary>
+    /// <summary>
+    /// Damage the spare copies can stand in for: bytes that do not check out, or that cannot be read at all (a bad
+    /// sector), but never a wrong password, a missing one, a feature of a newer version, a refusal of an archive that is
+    /// not protected as Osmium protects archives, or a refusal or question about its key derivation (all of those are
+    /// <see cref="IOException"/>s, so they are excluded by name).
+    /// </summary>
     private static bool IsDamage(Exception e) =>
-        e is InvalidDataException || (e is IOException && e is not NewerVersionException);
+        e is InvalidDataException
+        || (e is IOException && e is not (NewerVersionException or ModifiedArchiveException or KdfMemoryLimitException or KdfCostException or WeakProtectionException));
 
     /// <summary>The open archive file. Every read goes through it, so that a test can make a range unreadable.</summary>
     private sealed class ArchiveFile(SafeFileHandle handle, Func<long, int, bool>? unreadable) : IDisposable
@@ -417,6 +467,7 @@ public sealed class OsaReader : IDisposable
         if ((flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex)) is var unknown and not 0)
             throw new NewerVersionException($"frame flag 0x{unknown:X}", location);
         if (bodyLen != frameLength - Osa.FrameHeaderSize) throw new CorruptDataException("Frame length mismatch.");
+        FrameRead?.Invoke(expectedFrame);
         var body = GC.AllocateUninitializedArray<byte>(checked((int)bodyLen));
         int read = 0;
         while (read < body.Length)
@@ -426,8 +477,17 @@ public sealed class OsaReader : IDisposable
             read += n;
         }
         byte[] plain = key is null ? body : key.Open(header.ArchiveId, expectedFrame, body, isIndex ? header.Raw : ReadOnlySpan<byte>.Empty);
-        return BlockBody.Parse(plain, reg, location);
+        return BlockBody.Parse(plain, reg, location, PaddingAllowed(header, isIndex));
     }
+
+    /// <summary>Zero padding after the payload (FORMAT §5): in the index frame of an Argon2id archive only.</summary>
+    internal static bool PaddingAllowed(ArchiveHeader header, bool isIndex) =>
+        isIndex && header.Encrypted && header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id;
+
+    private static readonly AsyncLocal<Action<ulong>?> s_frameRead = new();
+
+    /// <summary>Tests: called with the frame number each time a frame's body is read.</summary>
+    internal static Action<ulong>? FrameRead { get => s_frameRead.Value; set => s_frameRead.Value = value; }
 
     /// <summary>
     /// The first block this version cannot decode because a newer version of Osmium made it, or null. Such an archive
@@ -468,5 +528,10 @@ public sealed class OsaReader : IDisposable
     /// <summary>Estimated decode time; blocks that need a newer Osmium cannot be decoded and are left out.</summary>
     public double EstimatedDecodeSeconds => Index.Blocks.Where(b => b.Descriptor.NewerVersion is null).Sum(b => b.Descriptor.Spec.EstimateDecodeSeconds(b.RawSize));
 
-    public void Dispose() => _handle.Dispose();
+    /// <summary>Closes the archive and zeroes its key.</summary>
+    public void Dispose()
+    {
+        _key?.Dispose();
+        _handle.Dispose();
+    }
 }
