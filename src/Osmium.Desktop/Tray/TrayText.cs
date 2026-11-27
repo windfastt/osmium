@@ -79,7 +79,8 @@ public static class TrayText
         int failed = finished.Count(j => j.State == JobState.Failed);
         string body = $"{finished.Count} jobs finished" + (saved > 0 ? $" — {Bytes(saved)} saved" : "") + (failed > 0 ? $", {failed} failed" : "");
         var recycled = finished.Select(j => j.Recycle).OfType<RecycleSummary>().ToList();
-        var originals = recycled.Count == 0 ? null : new RecycleSummary(recycled.Sum(r => r.Moved), recycled.Sum(r => r.Kept), recycled.Sum(r => r.Gone));
+        var originals = recycled.Count == 0 ? null
+            : new RecycleSummary(recycled.Sum(r => r.Moved), recycled.Sum(r => r.Kept), recycled.Sum(r => r.Gone), recycled.Sum(r => r.Others));
         return ("Osmium", WithOriginals(body, originals));
     }
 

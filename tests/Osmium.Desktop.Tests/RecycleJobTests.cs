@@ -298,11 +298,12 @@ public sealed class RecycleJobTests : IDisposable
     }
 
     [Fact]
-    public async Task ACancelWhileMovingKeepsWhatIsLeft()
+    public async Task ACancelWhileTheOriginalsAreCheckedMovesNothing()
     {
         JobManager? manager = null;
         _bin.Drives = _ =>
         {
+            // Asked while the job decides what may move, as when the app exits then.
             foreach (var active in manager!.Snapshot().Where(j => j.IsActive)) manager.Cancel(active.Id);
             return DriveType.Fixed;
         };
@@ -313,9 +314,11 @@ public sealed class RecycleJobTests : IDisposable
         Assert.Equal(new RecycleSummary(0, 2), job.Recycle);
         Assert.True(Directory.Exists(_photos));
         Assert.True(File.Exists(_notes));
+        Assert.Empty(_bin.Calls); // the decision stopped at once: nothing was handed over to be moved
         var log = jm.GetLog(job.Id);
         Assert.Contains($"kept {_photos}: the job was canceled", log);
-        Assert.Contains("warning: 2 of 2 items could not be moved to the Recycle Bin", log);
+        Assert.Contains($"kept {_notes}: the job was canceled", log);
+        Assert.DoesNotContain(log, l => l.Contains("could not be moved", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -404,6 +407,10 @@ public sealed class RecycleJobTests : IDisposable
         var gone = j with { Recycle = new RecycleSummary(1, 0, 1) };
         Assert.EndsWith("\nOriginals: 1 moved to the Recycle Bin, 0 kept, 1 no longer in place and not confirmed in the Recycle Bin", TrayText.Completion(gone).Body);
         Assert.EndsWith("Originals: 3 moved to the Recycle Bin, 1 kept, 1 no longer in place and not confirmed in the Recycle Bin", TrayText.Aggregate([j, gone]).Body);
+
+        // Items the operation affected although they were not to move are counted, and said.
+        var others = j with { Recycle = new RecycleSummary(1, 0, Others: 2) };
+        Assert.EndsWith("Originals: 3 moved to the Recycle Bin, 1 kept, 2 other items affected, which were not to move", TrayText.Aggregate([j, others]).Body);
     }
 
     [Fact]
@@ -434,8 +441,10 @@ public sealed class RecycleJobTests : IDisposable
         _bin.ReportsWhatElseItTakes = true;
         using var jm = Manager(Settings());
         var job = await Compress(jm, [page]);
-        Assert.Equal(new RecycleSummary(1, 0), job.Recycle);
-        Assert.Contains($"warning: the Recycle Bin operation also affected {pageFiles}, which was not to move: it went along with {page}", jm.GetLog(job.Id));
+        Assert.Equal(new RecycleSummary(1, 0, Others: 1), job.Recycle);
+        var log = jm.GetLog(job.Id);
+        Assert.Contains($"warning: the Recycle Bin operation also affected {pageFiles}, which was not to move: it went along with {page}", log);
+        Assert.Contains("originals: 1 moved to the Recycle Bin, 0 kept, 1 other item affected, which was not to move", log);
     }
 
     [Fact]
@@ -476,6 +485,149 @@ public sealed class RecycleJobTests : IDisposable
         Assert.Contains($"kept {_photos}: checked again just before it moved: it holds a file that is not in the archive: late.txt", log);
         Assert.Contains($"kept {_notes}: checked again just before it moved: it changed after it was read", log);
         Assert.Contains("moved to the Recycle Bin: " + other, log);
+    }
+
+    /// <summary>Changes the first byte of a file and gives it back its last-write time: its size and time stay the same.</summary>
+    private static void EditKeepingSizeAndTime(string path)
+    {
+        var time = File.GetLastWriteTimeUtc(path);
+        var bytes = File.ReadAllBytes(path);
+        bytes[0] ^= 0x20;
+        File.WriteAllBytes(path, bytes);
+        File.SetLastWriteTimeUtc(path, time);
+        Assert.Equal(time, File.GetLastWriteTimeUtc(path));
+    }
+
+    [Fact]
+    public async Task AnEditThatKeepsSizeAndTimeStays()
+    {
+        string other = Folder("other");
+        Write("other/c.txt", "unchanged");
+        Write("other/empty.txt", "");
+        _bin.BeforeMove = p =>
+        {
+            // After the archive was written and the rules passed it, just before it moves.
+            if (p == _notes) EditKeepingSizeAndTime(_notes);
+            if (p == _photos) EditKeepingSizeAndTime(Path.Combine(_photos, "sub", "b.txt"));
+        };
+        using var jm = Manager(Settings());
+        var job = await Compress(jm, [_photos, _notes, other]);
+        Assert.Equal(JobState.Completed, job.State);
+        Assert.Equal(new RecycleSummary(1, 2), job.Recycle);
+        Assert.True(Directory.Exists(_photos));
+        Assert.True(File.Exists(_notes));
+        Assert.False(Directory.Exists(other));
+        var log = jm.GetLog(job.Id);
+        Assert.Contains($"kept {_photos}: checked again just before it moved: the contents of {Path.Combine("sub", "b.txt")} no longer match the archive", log);
+        Assert.Contains($"kept {_notes}: checked again just before it moved: its contents no longer match the archive", log);
+        Assert.Contains("moved to the Recycle Bin: " + other, log);
+    }
+
+    [Fact]
+    public async Task AnEditedFileTheArchiveStoresOnceForTwoStays()
+    {
+        string twins = Folder("twins");
+        string text = string.Concat(Enumerable.Repeat("the same contents in two files\n", 50));
+        Write("twins/a.txt", text);
+        string copy = Write("twins/b.txt", text); // stored as a.txt's contents: the archive is built without reading it
+        var s = Settings();
+        s.Compression.Dedup = DedupSetting.Files;
+        _bin.BeforeMove = p =>
+        {
+            if (p == twins) EditKeepingSizeAndTime(copy);
+        };
+        using var jm = Manager(s);
+        var job = await Compress(jm, [twins, _notes]);
+        Assert.Equal(JobState.Completed, job.State);
+        using (var archive = OsaReader.Open(job.Output!))
+            Assert.Equal(archive.Entries.Single(e => e.Path == "twins/a.txt").Segments, archive.Entries.Single(e => e.Path == "twins/b.txt").Segments);
+        Assert.Equal(new RecycleSummary(1, 1), job.Recycle);
+        Assert.True(File.Exists(copy));
+        Assert.False(File.Exists(_notes));
+        Assert.Contains($"kept {twins}: checked again just before it moved: the contents of b.txt no longer match the archive", jm.GetLog(job.Id));
+    }
+
+    [Fact]
+    public async Task ACancelDuringTheLastCheckMovesNothing()
+    {
+        JobManager? manager = null;
+        _bin.BeforeMove = _ =>
+        {
+            foreach (var active in manager!.Snapshot().Where(j => j.IsActive)) manager.Cancel(active.Id);
+        };
+        using var jm = Manager(Settings());
+        manager = jm;
+        var job = await Compress(jm, [_photos, _notes]);
+        Assert.Equal(JobState.Completed, job.State); // the archive is complete and good
+        Assert.Equal(new RecycleSummary(0, 2), job.Recycle);
+        Assert.True(Directory.Exists(_photos));
+        Assert.True(File.Exists(_notes));
+        Assert.Empty(_bin.Moved);
+        var log = jm.GetLog(job.Id);
+        // The check itself stopped for the cancel: the job handed it its cancellation.
+        Assert.Contains($"kept {_photos}: checked again just before it moved: the job was canceled", log);
+        Assert.Contains($"kept {_notes}: the job was canceled", log); // not reached once the job was canceled
+    }
+
+    [Fact]
+    public async Task APausedJobMovesNothingUntilItIsResumed()
+    {
+        using var jm = Manager(Settings());
+        var real = jm.ReadIndex;
+        using var paused = new ManualResetEventSlim();
+        var id = Guid.Empty;
+        jm.ReadIndex = (path, password) =>
+        {
+            jm.Pause(id); // once the archive is written, before the originals are checked
+            paused.Set();
+            return real(path, password);
+        };
+        var finished = NextFinished(jm);
+        id = jm.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [_photos, _notes], Output = Path.Combine(_root, "out.osa") });
+        Assert.True(paused.Wait(Timeout, Ct));
+        await Task.Delay(300, Ct); // time enough to go on, if it did
+        Assert.Equal(JobState.Paused, jm.Snapshot().Single(j => j.Id == id).State);
+        Assert.Empty(_bin.Calls);
+        Assert.True(Directory.Exists(_photos));
+        jm.Resume(id);
+        var job = await finished.WaitAsync(Timeout, Ct);
+        Assert.Equal(new RecycleSummary(2, 0), job.Recycle);
+    }
+
+    [Fact]
+    public async Task APauseWhileTheOriginalsMoveHoldsTheNextOne()
+    {
+        using var paused = new ManualResetEventSlim();
+        JobManager? manager = null;
+        _bin.BeforeMove = p =>
+        {
+            if (p != _photos) return;
+            foreach (var active in manager!.Snapshot().Where(j => j.IsActive)) manager.Pause(active.Id);
+            paused.Set();
+        };
+        using var jm = Manager(Settings());
+        manager = jm;
+        var finished = NextFinished(jm);
+        var id = jm.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [_photos, _notes], Output = Path.Combine(_root, "out.osa") });
+        Assert.True(paused.Wait(Timeout, Ct));
+        await Task.Delay(300, Ct);
+        Assert.Empty(_bin.Moved); // held before its last check
+        Assert.True(Directory.Exists(_photos));
+        jm.Resume(id);
+        var job = await finished.WaitAsync(Timeout, Ct);
+        Assert.Equal(new RecycleSummary(2, 0), job.Recycle);
+    }
+
+    [Fact]
+    public async Task NothingMovesWhenTheArchiveChangesBeforeTheMove()
+    {
+        string output = Path.Combine(_root, "out.osa");
+        _bin.BeforeMove = _ => File.SetLastWriteTimeUtc(output, File.GetLastWriteTimeUtc(output).AddSeconds(5));
+        using var jm = Manager(Settings());
+        var job = await Compress(jm, [_photos, _notes], output);
+        Assert.Equal(new RecycleSummary(0, 2), job.Recycle);
+        Assert.True(Directory.Exists(_photos));
+        Assert.Contains($"kept {_photos}: checked again just before it moved: the archive changed after it was checked", jm.GetLog(job.Id));
     }
 
     [Fact]
@@ -524,6 +676,8 @@ public sealed class RecycleJobTests : IDisposable
                 if (ct.IsCancellationRequested) { outcomes.Add(new RecycleOutcome(p, false, "the job was canceled")); continue; }
                 if (Refuse(p) is { } why) { outcomes.Add(new RecycleOutcome(p, false, why)); continue; }
                 BeforeMove(p);
+                // Only the last check itself keeps an item here: what the system's recycler adds to it is tested on
+                // RecycleGate, and these tests check what the job hands over to that check.
                 if (recheck(p) is { } changed) { outcomes.Add(new RecycleOutcome(p, false, "checked again just before it moved: " + changed)); continue; }
                 var lie = Lies(p);
                 if (lie == Lie.ConfirmsButDoesNotMove) { outcomes.Add(new RecycleOutcome(p, true)); continue; }

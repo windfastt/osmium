@@ -13,8 +13,9 @@
 //   new TuneDialog(TrayApp, string path, string? current, string profile, bool startDeep) and its Analysis task
 //   new PasswordDialog(string prompt, bool confirm); new AboutDialog(Icon)
 //   TrayIcons.Progress(double, bool, bool); Ui.Unattended
-//   Recycle Bin: ShellRecycler (TSF_DELETE_RECYCLE_IF_POSSIBLE, Refuse, DriveTypeOf, Recycle, LastPreDeletes),
-//     RecycleGate(Func<string, string?>, CancellationToken).PreDelete, RecycleSummary, Settings.Compression.RecycleOriginals
+//   Recycle Bin: ShellRecycler (TSF_DELETE_RECYCLE_IF_POSSIBLE, Refuse, Key, DriveTypeOf, Recycle, LastPreDeletes),
+//     new RecycleSink(new RecycleGate(Func<string, string?>, CancellationToken, Func<string, string>), null).PreDeleteItem,
+//     RecycleSummary, Settings.Compression.RecycleOriginals
 // Further steps go in SelfTest.Compress.cs, SelfTest.Archives.cs, SelfTest.Pages.cs and SelfTest.Layout.cs, which
 // implement the partial methods below through SelfTestContext.
 
@@ -296,9 +297,11 @@ internal static partial class SelfTest
                 // Before the shell deletes anything: no Recycle Bin, no path, or a canceled job means the item stays.
                 const uint recycle = ShellRecycler.TSF_DELETE_RECYCLE_IF_POSSIBLE;
                 Func<string, string?> unchanged = _ => null;
-                if (new RecycleGate(unchanged, CancellationToken.None).PreDelete(0, null, 0) != ShellRecycler.Refuse
-                    || new RecycleGate(unchanged, CancellationToken.None).PreDelete(recycle, null, 0) != ShellRecycler.Refuse
-                    || new RecycleGate(unchanged, new CancellationToken(canceled: true)).PreDelete(recycle, null, 0) != ShellRecycler.Refuse)
+                static int Ask(Func<string, string?> recheck, CancellationToken ct, uint flags) =>
+                    new RecycleSink(new RecycleGate(recheck, ct, ShellRecycler.Key), null).PreDeleteItem(flags, 0);
+                if (Ask(unchanged, CancellationToken.None, 0) != ShellRecycler.Refuse
+                    || Ask(unchanged, CancellationToken.None, recycle) != ShellRecycler.Refuse
+                    || Ask(unchanged, new CancellationToken(canceled: true), recycle) != ShellRecycler.Refuse)
                     throw new InvalidOperationException("the Recycle Bin gate would allow a delete it must refuse");
                 string folder = Own(Path.Combine(recycleRoot, "direct", "a folder"));
                 Directory.CreateDirectory(Path.Combine(folder, "sub"));

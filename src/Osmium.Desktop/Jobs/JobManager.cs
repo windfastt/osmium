@@ -56,13 +56,16 @@ public sealed record JobSnapshot(
 }
 
 /// <summary>
-/// How many inputs of a compress job moved to the Recycle Bin, how many stayed where they were, and how many are no
-/// longer in place although the Recycle Bin did not confirm holding them (the job log names them).
+/// How many inputs of a compress job moved to the Recycle Bin, how many stayed where they were, how many are no
+/// longer in place although the Recycle Bin did not confirm holding them, and how many other items the Recycle Bin
+/// operation affected although they were not to move (the job log names them).
 /// </summary>
-public sealed record RecycleSummary(int Moved, int Kept, int Gone = 0)
+public sealed record RecycleSummary(int Moved, int Kept, int Gone = 0, int Others = 0)
 {
     public override string ToString() =>
-        $"{Moved} moved to the Recycle Bin, {Kept} kept" + (Gone > 0 ? $", {Gone} no longer in place and not confirmed in the Recycle Bin" : "");
+        $"{Moved} moved to the Recycle Bin, {Kept} kept"
+        + (Gone > 0 ? $", {Gone} no longer in place and not confirmed in the Recycle Bin" : "")
+        + (Others > 0 ? $", {Others} other item{(Others == 1 ? " affected, which was" : "s affected, which were")} not to move" : "");
 }
 
 /// <summary>Sequential job queue used by the tray app. Thread-safe; the UI polls <see cref="Snapshot"/>.</summary>
@@ -405,14 +408,29 @@ public sealed class JobManager : IDisposable
             else if (RecycleCandidates.JobBlocker(facts) is { } blocker) decision = RecycleDecision.KeepAll(r.Inputs, blocker);
             else
             {
+                // A paused job checks and moves nothing until it is resumed.
+                j.Gate.WaitIfPaused(ct);
+                // The archive as its index is read: from now on it must stay so.
+                var checkedAt = File.GetLastWriteTimeUtc(result.Path);
                 // In the archive means listed by the archive's own index: the planner leaves files out (rules, unreadable
                 // files), so the scan alone does not say what the archive holds.
                 var (files, dirs) = RecycleCandidates.InArchive(plan.Files.Select(f => f.Src), plan.Dirs, ReadIndex(result.Path, () => r.Password));
-                var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
-                decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf);
+                var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs, ArchiveModifiedUtc = checkedAt };
+                j.Gate.WaitIfPaused(ct);
+                decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf, ct);
                 // The same rules once more for each input just before it moves: it may have changed since.
-                recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf);
+                var lastCheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf, ct);
+                recheck = path =>
+                {
+                    try { j.Gate.WaitIfPaused(ct); }
+                    catch (OperationCanceledException) { return RecycleCandidates.Canceled; }
+                    return lastCheck(path);
+                };
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            decision = RecycleDecision.KeepAll(r.Inputs, RecycleCandidates.Canceled);
         }
         catch (Exception e)
         {
@@ -424,6 +442,7 @@ public sealed class JobManager : IDisposable
         // The inputs that are to stay and are in place now: afterwards, each must still be there.
         var staying = decision.Keep.Select(k => k.Path).Where(InPlace).ToHashSet(StringComparer.Ordinal);
         var outcomes = new Dictionary<string, RecycleOutcome>(StringComparer.Ordinal);
+        int others = 0;
         if (move.Count > 0)
         {
             try
@@ -432,7 +451,11 @@ public sealed class JobManager : IDisposable
                 foreach (var o in _recycler!.Recycle(move, recheck, ct))
                 {
                     if (handedOver.Contains(o.Path)) outcomes[o.Path] = o;
-                    else Log($"warning: the Recycle Bin operation also affected {o.Path}, which was not to move: {o.Reason}");
+                    else
+                    {
+                        others++;
+                        Log($"warning: the Recycle Bin operation also affected {o.Path}, which was not to move: {o.Reason}");
+                    }
                 }
             }
             catch (Exception e) { Log("warning: moving the originals to the Recycle Bin failed: " + e.Message); }
@@ -476,7 +499,7 @@ public sealed class JobManager : IDisposable
             }
         }
         if (failed > 0) Log($"warning: {failed} of {move.Count} item{(move.Count == 1 ? "" : "s")} could not be moved to the Recycle Bin");
-        j.Recycle = new RecycleSummary(moved, kept, gone);
+        j.Recycle = new RecycleSummary(moved, kept, gone, others);
         Log("originals: " + j.Recycle);
 
         static bool InPlace(string path) => Path.IsPathFullyQualified(path) && (File.Exists(path) || Directory.Exists(path));

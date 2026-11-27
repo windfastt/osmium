@@ -86,7 +86,7 @@ internal sealed partial class ShellRecycler : IRecycler
         var outcomes = new RecycleOutcome?[paths.Count];
         var items = new RecycleGate.Item?[paths.Count];
         var shellItems = new nint[paths.Count];
-        var gate = new RecycleGate(recheck, ct);
+        var gate = new RecycleGate(recheck, ct, Key);
         int performed = 0;
         bool aborted = false;
         Check(CoCreateInstance(in ClsidFileOperation, 0, CLSCTX_INPROC_SERVER, in IidFileOperation, out nint unknown), "Creating the shell's file operation");
@@ -156,7 +156,7 @@ internal sealed partial class ShellRecycler : IRecycler
         if (hr < 0) throw new IOException($"{what} failed: {Describe(hr)}", hr);
     }
 
-    internal static string Describe(int hr) => $"{Marshal.GetExceptionForHR(hr)?.Message ?? "error"} (0x{hr:X8})";
+    internal static string Describe(int hr) => RecycleGate.Describe(hr);
 
     /// <summary>The file-system path of a shell item, or null (also when the shell cannot say).</summary>
     internal static string? PathOf(nint item)
@@ -177,8 +177,9 @@ internal sealed partial class ShellRecycler : IRecycler
     }
 
     /// <summary>
-    /// A path in the form the shell reports items in, for comparing them: full, long names (no 8.3 short names) where
-    /// the item exists, no closing separator. Compared ignoring case, as Windows does.
+    /// A path in the form the shell reports items in, for comparing them (the <see cref="RecycleGate"/>'s key): full,
+    /// long names (no 8.3 short names) where the item exists, no closing separator. Compared ignoring case, as Windows
+    /// does.
     /// </summary>
     internal static string Key(string path)
     {
@@ -213,7 +214,10 @@ internal sealed partial class ShellRecycler : IRecycler
         }
     }
 
-    /// <summary>The path of the item itself, with every junction, symbolic link and mounted folder resolved.</summary>
+    /// <summary>
+    /// The path of the item itself, with every junction, symbolic link and mounted folder resolved; null when it cannot
+    /// be told, or lies on a volume without a drive letter (<see cref="FinalPaths.ToDos"/>).
+    /// </summary>
     private static unsafe string? FinalPath(string path)
     {
         using var handle = CreateFile(path, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
@@ -225,9 +229,7 @@ internal sealed partial class ShellRecycler : IRecycler
             fixed (char* p = buffer) n = GetFinalPathNameByHandle(handle, p, (uint)buffer.Length, 0); // normalized, drive letter
             if (n == 0) return null;
             if (n >= buffer.Length) { buffer = new char[n]; continue; } // n is the size it needs
-            string final = new(buffer, 0, (int)n);
-            return final.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + final[8..]
-                : final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final[4..] : final;
+            return FinalPaths.ToDos(new string(buffer, 0, (int)n));
         }
     }
 
@@ -256,185 +258,31 @@ internal sealed partial class ShellRecycler : IRecycler
 }
 
 /// <summary>
-/// The decisions of one Recycle Bin operation, shared by all its progress sinks, and what the shell reported for each
-/// item. A delete goes ahead only when the shell is about to recycle it and it is an item handed over, or part of one;
-/// an item handed over is also checked once more with <paramref name="recheck"/> at that moment, the last one before it
-/// moves. Once anything is refused, fails or is destroyed, every later delete is refused, so the rest stays in place.
-/// </summary>
-internal sealed class RecycleGate(Func<string, string?> recheck, CancellationToken ct)
-{
-    internal const string CannotTake =
-        "the Recycle Bin cannot take it (its drive keeps no deleted files, or it is larger than the Recycle Bin), so the shell would have deleted it for good";
-
-    /// <summary>An item handed over, by its <see cref="ShellRecycler.Key"/>.</summary>
-    internal sealed class Item(string path, string key)
-    {
-        public string Path { get; } = path;
-        public string Key { get; } = key;
-        public bool Reached, Approved, Recycled, Destroyed;
-        public int Failed;
-        public string? Refusal, BinPath;
-    }
-
-    private readonly object _lock = new();
-    private readonly Dictionary<string, Item> _items = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _holders = new(StringComparer.OrdinalIgnoreCase); // folders that hold an item
-    private readonly Dictionary<string, RecycleOutcome> _others = new(StringComparer.OrdinalIgnoreCase); // by path, once
-    private string? _stopped;
-
-    /// <summary>How often the shell asked before deleting something.</summary>
-    public int PreDeletes { get; private set; }
-
-    /// <summary>Registers an item to be handed over; null when it is, holds or lies inside one already registered.</summary>
-    public Item? Expect(string path)
-    {
-        var item = new Item(path, ShellRecycler.Key(path));
-        lock (_lock)
-        {
-            if (_holders.Contains(item.Key) || Owner(item.Key) is not null) return null;
-            _items.Add(item.Key, item);
-            for (var parent = System.IO.Path.GetDirectoryName(item.Key); !string.IsNullOrEmpty(parent); parent = System.IO.Path.GetDirectoryName(parent))
-                _holders.Add(parent);
-            return item;
-        }
-    }
-
-    /// <summary>An item that was not handed over after all.</summary>
-    public void Forget(Item item)
-    {
-        lock (_lock) _items.Remove(item.Key);
-    }
-
-    /// <summary>
-    /// The answer before the shell deletes <paramref name="shellItem"/>: S_OK, or <see cref="ShellRecycler.Refuse"/>.
-    /// <paramref name="own"/> is the item whose sink asks, null for the sink of the whole operation.
-    /// </summary>
-    public int PreDelete(uint flags, Item? own, nint shellItem)
-    {
-        string? key = KeyOf(shellItem);
-        lock (_lock)
-        {
-            PreDeletes++;
-            var owner = key is null ? null : Owner(key);
-            if (owner is not null) owner.Reached = true;
-            if (own is not null) own.Reached = true;
-            if (_stopped is not null) return ShellRecycler.Refuse;
-            string? refusal =
-                (flags & ShellRecycler.TSF_DELETE_RECYCLE_IF_POSSIBLE) == 0 ? CannotTake
-                : ct.IsCancellationRequested ? "the job was canceled"
-                : key is null ? "the shell named no path for an item it was about to move"
-                : owner is null || (own is not null && !ReferenceEquals(owner, own)) ? $"the shell was about to move something else with it: {key}"
-                : null;
-            if (refusal is null && !owner!.Approved && string.Equals(key, owner.Key, StringComparison.OrdinalIgnoreCase))
-            {
-                // The item itself, about to move: it must still be exactly what the archive holds.
-                try { refusal = recheck(owner.Path) is { } changed ? "checked again just before it moved: " + changed : null; }
-                catch (Exception e) { refusal = $"it could not be checked again ({e.Message})"; }
-                owner.Approved = refusal is null;
-            }
-            if (refusal is null) return 0;
-            var blame = own ?? owner;
-            if (blame is not null) blame.Refusal ??= refusal;
-            _stopped = blame is null ? refusal : $"{blame.Path}: {refusal}";
-            return ShellRecycler.Refuse;
-        }
-    }
-
-    /// <summary>What the shell did with <paramref name="shellItem"/>; destroying anything stops the operation.</summary>
-    public int PostDelete(Item? own, nint shellItem, int hrDelete, nint newItem)
-    {
-        string? key = KeyOf(shellItem);
-        string? binPath = hrDelete >= 0 && newItem != 0 ? ShellRecycler.PathOf(newItem) : null;
-        lock (_lock)
-        {
-            var owner = key is null ? own : Owner(key);
-            if (owner is not null) owner.Reached = true;
-            if (hrDelete >= 0 && newItem == 0)
-            {
-                // Deleted rather than moved to the Recycle Bin (the new item would be the one in the Recycle Bin).
-                if (owner is not null) owner.Destroyed = true;
-                else
-                {
-                    string what = key ?? "(an item the shell named no path for)";
-                    _others[what] = new RecycleOutcome(what, false, "the operation deleted it rather than moved it to the Recycle Bin");
-                }
-                _stopped ??= $"{key ?? "an item"} was deleted rather than moved to the Recycle Bin";
-                return ShellRecycler.Refuse;
-            }
-            if (owner is null)
-            {
-                // Moved although not handed over: reported once, when the shell names it.
-                if (hrDelete >= 0 && key is not null)
-                    _others.TryAdd(key, new RecycleOutcome(key, true, "the operation moved it to the Recycle Bin, although it was not handed over", binPath));
-                return 0;
-            }
-            if (key is not null && !string.Equals(key, owner.Key, StringComparison.OrdinalIgnoreCase)) return 0; // part of an item
-            if (hrDelete < 0)
-            {
-                owner.Failed = hrDelete;
-                _stopped ??= $"{owner.Path}: the shell could not move it";
-            }
-            else
-            {
-                owner.Recycled = true;
-                owner.BinPath = binPath ?? owner.BinPath;
-            }
-            return 0;
-        }
-    }
-
-    /// <summary>What happened to one item, from the shell's reports and from whether it is still where it was.</summary>
-    public RecycleOutcome Outcome(Item item, int performed, bool aborted)
-    {
-        bool inPlace = File.Exists(item.Path) || Directory.Exists(item.Path);
-        lock (_lock)
-        {
-            if (item.Destroyed) return new RecycleOutcome(item.Path, false, "the shell deleted it, or part of it, rather than moved it to the Recycle Bin");
-            if (item.Recycled && item.Refusal is null && item.Failed == 0 && !inPlace) return new RecycleOutcome(item.Path, true, null, item.BinPath);
-            if (item.Refusal is { } refusal) return new RecycleOutcome(item.Path, false, refusal);
-            if (item.Failed != 0) return new RecycleOutcome(item.Path, false, "the shell could not move it: " + ShellRecycler.Describe(item.Failed));
-            if (!item.Reached)
-                return new RecycleOutcome(item.Path, false, _stopped is { } why ? $"the operation stopped before it ({why})"
-                    : ct.IsCancellationRequested ? "the job was canceled"
-                    : performed < 0 ? "the operation stopped before it: " + ShellRecycler.Describe(performed)
-                    : aborted ? "the operation stopped before it" : "the shell did not move it");
-            return new RecycleOutcome(item.Path, false, inPlace ? "the shell did not move it" : "it is gone, but the shell did not report it in the Recycle Bin");
-        }
-    }
-
-    /// <summary>Anything the operation moved or deleted that was not handed over (it should never happen).</summary>
-    public List<RecycleOutcome> Others()
-    {
-        lock (_lock) return [.. _others.Values];
-    }
-
-    /// <summary>The item that is <paramref name="key"/> or holds it.</summary>
-    private Item? Owner(string key)
-    {
-        for (string? p = key; !string.IsNullOrEmpty(p); p = System.IO.Path.GetDirectoryName(p))
-            if (_items.TryGetValue(p, out var item)) return item;
-        return null;
-    }
-
-    private static string? KeyOf(nint shellItem) => ShellRecycler.PathOf(shellItem) is { } path ? ShellRecycler.Key(path) : null;
-}
-
-/// <summary>
 /// A progress sink of the operation: of one item, or of the whole operation. It hands every question to the
-/// operation's <see cref="RecycleGate"/>. The shell may call it on any thread.
+/// operation's <see cref="RecycleGate"/>, with the path of the shell item it is about and whether the shell's flags say
+/// it will be recycled. The shell may call it on any thread.
 /// </summary>
 [GeneratedComClass]
 internal sealed partial class RecycleSink(RecycleGate gate, RecycleGate.Item? item) : IFileOperationProgressSink
 {
     public int PreDeleteItem(uint dwFlags, nint psiItem)
     {
-        try { return gate.PreDelete(dwFlags, item, psiItem); }
+        try
+        {
+            bool recycles = (dwFlags & ShellRecycler.TSF_DELETE_RECYCLE_IF_POSSIBLE) != 0;
+            return gate.PreDelete(recycles, item, ShellRecycler.PathOf(psiItem)) is null ? 0 : ShellRecycler.Refuse;
+        }
         catch (Exception) { return ShellRecycler.Refuse; } // whatever went wrong, nothing is deleted
     }
 
     public int PostDeleteItem(uint dwFlags, nint psiItem, int hrDelete, nint psiNewlyCreated)
     {
-        try { return gate.PostDelete(item, psiItem, hrDelete, psiNewlyCreated); }
+        try
+        {
+            // The new item is the one in the Recycle Bin; without one, the shell deleted it for good.
+            string? binPath = hrDelete >= 0 && psiNewlyCreated != 0 ? ShellRecycler.PathOf(psiNewlyCreated) : null;
+            return gate.PostDelete(item, ShellRecycler.PathOf(psiItem), hrDelete, psiNewlyCreated != 0, binPath) ? 0 : ShellRecycler.Refuse;
+        }
         catch (Exception) { return ShellRecycler.Refuse; } // stop rather than go on without knowing
     }
 
