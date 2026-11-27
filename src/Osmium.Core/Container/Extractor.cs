@@ -701,5 +701,14 @@ public sealed class MemoryGate(long capacity)
     public readonly struct Lease(MemoryGate gate, long bytes) : IDisposable
     {
         public void Dispose() => gate?.Release(bytes);
+
+        /// <summary>Gives back all of this lease but <paramref name="keep"/> bytes and returns the lease for those. Dispose
+        /// the returned lease, not this one.</summary>
+        public Lease Keep(long keep)
+        {
+            keep = Math.Clamp(keep, 0, bytes);
+            gate?.Release(bytes - keep);
+            return new Lease(gate!, keep);
+        }
     }
 }
