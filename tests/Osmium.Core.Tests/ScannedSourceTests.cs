@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Osmium.Core.Container;
 using Osmium.Core.Planning;
 
 namespace Osmium.Core.Tests;
@@ -207,6 +208,59 @@ public class ScannedSourceTests
         Assert.Equal(file, e.SourcePath);
         Assert.Contains("is not a regular file", e.Message);
         Assert.False(File.Exists(output));
+    }
+
+    /// <summary>in/sub/a.bin, scanned; then sub moves to a new name and a link to <paramref name="target"/> takes its place.</summary>
+    private static (ScanResult Scan, string File, byte[] Data) ScanThenLinkTheFolder(TempDir t, Func<string, string> target)
+    {
+        string input = t.Sub("in"), sub = Path.Combine(input, "sub"), file = Path.Combine(sub, "a.bin");
+        Directory.CreateDirectory(sub);
+        var data = new byte[100_000];
+        new Random(3).NextBytes(data);
+        File.WriteAllBytes(file, data);
+        var scan = Scanner.Scan([input], ct: Ct);
+        string moved = Path.Combine(input, "moved");
+        Directory.Move(sub, moved);
+        Directory.CreateSymbolicLink(sub, target(moved));
+        return (scan, file, data);
+    }
+
+    [Fact]
+    public async Task AFolderMovedBehindALinkStillGivesTheFilesTheScanSaw()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The scan records file ids on Linux only; elsewhere a folder on the way that became a link is refused.");
+        using var t = new TempDir();
+        // The link leads to the folder itself under its new name: a.bin behind it is the very file the scan saw.
+        var (scan, _, data) = ScanThenLinkTheFolder(t, moved => Path.GetFileName(moved));
+
+        var plan = await new Planner(Options(DedupMode.Files)).BuildAsync(scan, Ct);
+        var r = await ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = t.Sub("a.osa"), MemoryBudget = 2L << 30 }, Ct);
+
+        using var reader = OsaReader.Open(r.Path);
+        var res = Extractor.Extract(reader, t.Sub("out"), null, null, null, Ct);
+        Assert.Empty(res.Errors);
+        Assert.Equal(data, File.ReadAllBytes(Path.Combine(t.Sub("out"), "in", "sub", "a.bin")));
+    }
+
+    [Fact]
+    public async Task AnotherFileBehindALinkInAFoldersPlaceIsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The scan records file ids on Linux only; elsewhere every folder on the way is checked.");
+        using var t = new TempDir();
+        // The link leads to a copy of the folder: a.bin there has the same name, size, content and time, but is another
+        // file.
+        var (scan, file, _) = ScanThenLinkTheFolder(t, moved =>
+        {
+            string copy = t.Sub("copy");
+            Directory.CreateDirectory(copy);
+            File.Copy(Path.Combine(moved, "a.bin"), Path.Combine(copy, "a.bin"));
+            File.SetLastWriteTimeUtc(Path.Combine(copy, "a.bin"), File.GetLastWriteTimeUtc(Path.Combine(moved, "a.bin")));
+            return copy;
+        });
+
+        var e = await Assert.ThrowsAsync<SourceChangedException>(() => new Planner(Options(DedupMode.Files)).BuildAsync(scan, Ct));
+        Assert.Equal(file, e.SourcePath);
+        Assert.Contains("is below a folder that became a link after it was scanned", e.Message);
     }
 
     [Fact]

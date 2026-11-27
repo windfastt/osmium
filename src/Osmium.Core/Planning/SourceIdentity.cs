@@ -25,19 +25,35 @@ internal static class SourceIdentity
     /// the scan recorded one (by its creation time where the system gives no id). Throws
     /// <see cref="SourceChangedException"/> when it is not, and as <see cref="FileStream"/> does when it cannot be opened.
     /// </summary>
+    /// <remarks>Where the scan recorded a file id (Linux), an open whose file has that id has reached the very file the
+    /// scan saw, whatever the folders on the way are now, so they are checked only when the id differs or cannot be
+    /// read; everywhere else every folder on the way is checked, before and after the open.</remarks>
     public static FileStream Open(SourceFile src)
     {
-        var fs = ZipSources.Open(src.FullPath, src.RelPath, out string? refusal);
-        if (fs is null)
-            throw new SourceChangedException(src.FullPath, refusal switch
-            {
-                ZipSources.IsLink => "became a link after it was scanned (links are not followed)",
-                ZipSources.FolderIsLink => "is below a folder that became a link after it was scanned (links are not followed)",
-                _ => "is not a regular file (it is a pipe or a device)",
-            });
+        if (src.FileId is { } id && OperatingSystem.IsLinux())
+        {
+            var fs = ZipSources.OpenFile(src.FullPath, out string? refusal) ?? throw Refused(src, refusal);
+            if (FileStat.TryStat(fs.SafeFileHandle, out var st) && st.Id == id && FileStat.Kind(st.Mode) is null) return Checked(fs, src, sameId: true);
+            // Another file, or one whose id cannot be read: say why as the full check does.
+            fs.Dispose();
+        }
+        return Checked(ZipSources.Open(src.FullPath, src.RelPath, out string? why) ?? throw Refused(src, why), src);
+    }
+
+    private static SourceChangedException Refused(SourceFile src, string? refusal) => new(src.FullPath, refusal switch
+    {
+        ZipSources.IsLink => "became a link after it was scanned (links are not followed)",
+        ZipSources.FolderIsLink => "is below a folder that became a link after it was scanned (links are not followed)",
+        _ => "is not a regular file (it is a pipe or a device)",
+    });
+
+    /// <summary><paramref name="fs"/> when it is still the scanned file by <see cref="Changed"/>; otherwise closes it and
+    /// throws.</summary>
+    private static FileStream Checked(FileStream fs, SourceFile src, bool sameId = false)
+    {
         try
         {
-            if (Changed(fs.SafeFileHandle, src) is { } why) throw new SourceChangedException(src.FullPath, why);
+            if (Changed(fs.SafeFileHandle, src, sameId) is { } why) throw new SourceChangedException(src.FullPath, why);
             return fs;
         }
         catch
@@ -61,10 +77,12 @@ internal static class SourceIdentity
         }
     }
 
-    private static string? Changed(SafeFileHandle h, SourceFile src)
+    /// <summary>Why the open file is not the one the scan saw, or null; <paramref name="sameId"/> when its id has already
+    /// been found to be the scanned one.</summary>
+    private static string? Changed(SafeFileHandle h, SourceFile src, bool sameId)
     {
         const string Replaced = "was replaced by another file after it was scanned";
-        if (src.FileId is { } id && FileStat.TryStat(h, out var st) && (st.Id != id || FileStat.Kind(st.Mode) is not null)) return Replaced;
+        if (!sameId && src.FileId is { } id && FileStat.TryStat(h, out var st) && (st.Id != id || FileStat.Kind(st.Mode) is not null)) return Replaced;
         if (RandomAccess.GetLength(h) != src.Size || File.GetLastWriteTimeUtc(h) != src.ModifiedUtc) return "changed after it was scanned";
         // Linux gives no stable creation time; Windows and macOS keep one per file.
         if (src.FileId is null && !OperatingSystem.IsLinux() && File.GetCreationTimeUtc(h) != src.CreatedUtc) return Replaced;

@@ -89,7 +89,9 @@ internal static class ZipSources
         return false;
     }
 
-    private static FileStream? OpenFile(string path, out string? refusal)
+    /// <summary>Opens <paramref name="path"/> as <see cref="Open"/> does but without checking the folders on the way: only
+    /// for a caller that proves by other means, such as a file id, that the open reached the file it means.</summary>
+    internal static FileStream? OpenFile(string path, out string? refusal)
     {
         refusal = null;
         SafeFileHandle handle;
