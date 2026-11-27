@@ -185,6 +185,31 @@ public class ScannedSourceTests
     }
 
     [Fact]
+    public async Task ADeviceSwappedInBeforeTheBlocksAreReadIsNotRead()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Device nodes are made with mknod here on Linux; Windows has none.");
+        using var t = new TempDir();
+        string input = MakeTree(t);
+        var scan = Scanner.Scan([input], ct: Ct);
+        var plan = await new Planner(Options(DedupMode.Off)).BuildAsync(scan, Ct);
+        string file = Path.Combine(input, "a.bin");
+        File.Delete(file);
+        // A character device like /dev/zero (1, 5).
+        using (var mk = Process.Start(new ProcessStartInfo("mknod", [file, "c", "1", "5"]) { UseShellExecute = false, RedirectStandardError = true })!)
+        {
+            mk.WaitForExit();
+            if (mk.ExitCode != 0) Assert.Skip("Making a device node needs administrator rights.");
+        }
+        string output = t.Sub("a.osa");
+
+        var e = await Assert.ThrowsAsync<SourceChangedException>(
+            () => ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = output, MemoryBudget = 2L << 30 }, Ct));
+        Assert.Equal(file, e.SourcePath);
+        Assert.Contains("is not a regular file", e.Message);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
     public void AFileRemovedOnceItWasReadHasChanged()
     {
         using var t = new TempDir();

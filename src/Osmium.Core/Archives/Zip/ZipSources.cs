@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.IO;
 
 namespace Osmium.Core.Archives.Zip;
 
@@ -117,16 +118,21 @@ internal static class ZipSources
         }
         try
         {
-            var attributes = File.GetAttributes(handle);
-            if ((attributes & FileAttributes.ReparsePoint) != 0) refusal = IsLink;
-            else if ((attributes & FileAttributes.Directory) != 0) refusal = NotRegular;
+            // What the system says the open file is: a device can seek like a file and read without end.
+            if (FileStat.IsRegular(handle) is false) refusal = NotRegular;
             else
             {
-                var fs = new FileStream(handle, FileAccess.Read, 1 << 16);
-                if (fs.CanSeek) return fs;
-                fs.Dispose();
-                refusal = NotRegular;
-                return null;
+                var attributes = File.GetAttributes(handle);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) refusal = IsLink;
+                else if ((attributes & FileAttributes.Directory) != 0) refusal = NotRegular;
+                else
+                {
+                    var fs = new FileStream(handle, FileAccess.Read, 1 << 16);
+                    if (fs.CanSeek) return fs;
+                    fs.Dispose();
+                    refusal = NotRegular;
+                    return null;
+                }
             }
         }
         catch
