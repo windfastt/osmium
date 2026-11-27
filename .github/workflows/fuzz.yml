@@ -1,0 +1,78 @@
+name: Fuzz native encoders
+
+# libFuzzer with the address and undefined-behaviour sanitizers (and LeakSanitizer) over the native encoder
+# interface (native/fuzz): random parameters, capacities, memory caps and failing allocations, with every output
+# decoded again by the upstream decoders (linked into these test programs only). Nothing here is shipped.
+# 10 minutes per harness on changes to native/**, 60 minutes nightly, or as long as asked when started by hand.
+# The corpus is kept between runs; a crash is uploaded and fails the job.
+
+on:
+  push:
+    paths: ['native/**', '.github/workflows/fuzz.yml']
+  pull_request:
+    paths: ['native/**', '.github/workflows/fuzz.yml']
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'Minutes per harness'
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.harness }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 400
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [fuzz_lzma_encode, fuzz_zstd_encode, fuzz_shim_args]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: libFuzzer runtime (Ubuntu's clang runtime package, only if the image lacks it)
+        run: |
+          clang --version
+          printf 'int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { (void)d; (void)n; return 0; }\n' > "$RUNNER_TEMP/probe.c"
+          if ! clang -fsanitize=fuzzer "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe"; then
+            sudo apt-get update && sudo apt-get install -y "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
+          fi
+      - name: Corpus from earlier runs
+        uses: actions/cache@v4
+        with:
+          path: artifacts/native-fuzz/corpus/${{ matrix.harness }}
+          key: fuzz-corpus-${{ matrix.harness }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.harness }}-
+      - name: Build the harnesses and the seeds
+        run: native/build.sh --fuzz
+      - name: Fuzz
+        env:
+          MINUTES: ${{ github.event_name == 'schedule' && '60' || github.event_name == 'workflow_dispatch' && inputs.minutes || '10' }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          h=${{ matrix.harness }}
+          mkdir -p "artifacts/native-fuzz/corpus/$h" artifacts/native-fuzz/crashes
+          echo "fuzzing $h for $MINUTES minutes"
+          "artifacts/native-fuzz/$h" "artifacts/native-fuzz/corpus/$h" "artifacts/native-fuzz/seeds/$h" \
+            -max_total_time=$((MINUTES * 60)) -rss_limit_mb=4096 -max_len=1100000 -timeout=120 \
+            -print_final_stats=1 -artifact_prefix=artifacts/native-fuzz/crashes/ 2>&1 | tee fuzz.log | tail -40
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: Statistics
+        if: always()
+        run: grep -E '^(stat::|#[0-9]+ +DONE)|cov:' fuzz.log | tail -12 || true
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: fuzz-crashes-${{ matrix.harness }}
+          path: |
+            artifacts/native-fuzz/crashes/
+            fuzz.log

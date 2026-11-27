@@ -15,4 +15,122 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Osmium.Core.Tests" />
   </ItemGroup>
+
+  <!-- Native encoders (native/README.md). The libraries built into artifacts/native/<rid>/ are copied beside every
+       program that references Osmium.Core, and never into a single-file bundle. The SHA-256 from the build-info.txt
+       beside each one is compiled into NativeExpected.g.cs: the loader accepts no other file. Without the files,
+       Osmium builds and runs with its built-in encoders. -->
+  <PropertyGroup>
+    <OsmiumNativeDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..', 'artifacts', 'native'))</OsmiumNativeDir>
+    <OsmiumGenerationFile>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', '..', '..', 'native', 'generation.txt'))</OsmiumGenerationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <OsmiumNativeLibrary Include="$(OsmiumNativeDir)win-x64/osmium_native-x64.dll"
+      Condition="Exists('$(OsmiumNativeDir)win-x64/osmium_native-x64.dll') And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64')" />
+    <OsmiumNativeLibrary Include="$(OsmiumNativeDir)win-arm64/osmium_native-arm64.dll"
+      Condition="Exists('$(OsmiumNativeDir)win-arm64/osmium_native-arm64.dll') And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-arm64')" />
+    <OsmiumNativeLibrary Include="$(OsmiumNativeDir)linux-x64/libosmium_native-x64.so"
+      Condition="Exists('$(OsmiumNativeDir)linux-x64/libosmium_native-x64.so') And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-x64')" />
+    <None Include="@(OsmiumNativeLibrary)" Link="%(Filename)%(Extension)" Visible="false"
+      CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <UsingTask TaskName="OsmiumWriteNativeExpected" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <GenerationFile ParameterType="System.String" Required="true" />
+      <NativeDir ParameterType="System.String" Required="true" />
+      <OutputFile ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Using Namespace="System.Text" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        Func<string[], string, string> value = (lines, key) =>
+        {
+            foreach (var l in lines) if (l.StartsWith(key + "=")) return l.Substring(key.Length + 1).Trim();
+            return null;
+        };
+        var gen = File.ReadAllLines(GenerationFile);
+        string generation = value(gen, "generation"), abi = value(gen, "abi"), lzma = value(gen, "lzma-sdk"), zstd = value(gen, "zstd");
+        if (generation == null || !Regex.IsMatch(generation, "^[a-z]+-[0-9]+$") || abi == null || !Regex.IsMatch(abi, "^[0-9]+$")
+            || lzma == null || !Regex.IsMatch(lzma, "^[0-9]+\\.[0-9]+$") || zstd == null || !Regex.IsMatch(zstd, "^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+        {
+            Log.LogError(GenerationFile + " is malformed.");
+            return false;
+        }
+        string versions = "lzma-sdk " + lzma + "; zstd " + zstd;
+        var known = new[] { new[] { "win-x64", "osmium_native-x64.dll" }, new[] { "win-arm64", "osmium_native-arm64.dll" },
+                            new[] { "linux-x64", "libosmium_native-x64.so" } };
+        var hashes = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var k in known)
+        {
+            string dir = Path.Combine(NativeDir, k[0]), info = Path.Combine(dir, "build-info.txt"), lib = Path.Combine(dir, k[1]);
+            if (!File.Exists(lib)) continue;
+            if (!File.Exists(info))
+            {
+                Log.LogMessage(MessageImportance.High, "Native encoders: " + lib + " has no build-info.txt beside it; it will not be loaded.");
+                continue;
+            }
+            var lines = File.ReadAllLines(info);
+            string sha = value(lines, "sha256");
+            if (sha == null || !Regex.IsMatch(sha, "^[0-9a-f]{64}$") || value(lines, "generation") != generation
+                || value(lines, "abi") != abi || value(lines, "versions") != versions)
+            {
+                Log.LogMessage(MessageImportance.High, "Native encoders: " + info + " is not for " + generation + " (abi " + abi
+                    + ", " + versions + "); rebuild it with native/build.sh or native/build.ps1. It will not be loaded.");
+                continue;
+            }
+            string actual;
+            using (var s = File.OpenRead(lib))
+            using (var h = SHA256.Create())
+                actual = BitConverter.ToString(h.ComputeHash(s)).Replace("-", "").ToLowerInvariant();
+            if (actual != sha)
+            {
+                Log.LogMessage(MessageImportance.High, "Native encoders: " + lib + " is not the file its build-info.txt describes; it will not be loaded.");
+                continue;
+            }
+            hashes[k[0]] = sha;
+        }
+        var cs = new StringBuilder();
+        cs.AppendLine("// <auto-generated>From native/generation.txt and artifacts/native/*/build-info.txt by Osmium.Core.csproj.</auto-generated>");
+        cs.AppendLine("#nullable enable");
+        cs.AppendLine("namespace Osmium.Core.Codecs.Native;");
+        cs.AppendLine();
+        cs.AppendLine("internal static class NativeExpected");
+        cs.AppendLine("{");
+        cs.AppendLine("    public const string Generation = \"" + generation + "\";");
+        cs.AppendLine("    public const int Abi = " + abi + ";");
+        cs.AppendLine("    public const string LzmaSdkVersion = \"" + lzma + "\";");
+        cs.AppendLine("    public const string ZstdVersion = \"" + zstd + "\";");
+        cs.AppendLine("    public const string Versions = \"" + versions + "\";");
+        cs.AppendLine("    /// <summary>The SHA-256 of the library built for a runtime identifier, or null without one.</summary>");
+        cs.AppendLine("    public static string? Sha256For(string rid) => rid switch");
+        cs.AppendLine("    {");
+        foreach (var kv in hashes) cs.AppendLine("        \"" + kv.Key + "\" => \"" + kv.Value + "\",");
+        cs.AppendLine("        _ => null,");
+        cs.AppendLine("    };");
+        cs.AppendLine("}");
+        string text = cs.ToString();
+        if (!File.Exists(OutputFile) || File.ReadAllText(OutputFile) != text)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(OutputFile));
+            File.WriteAllText(OutputFile, text);
+        }
+        Log.LogMessage(MessageImportance.Normal, "Native encoders: " + generation + ", library hashes for " + (hashes.Count == 0 ? "no target" : string.Join(", ", hashes.Keys)));
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="OsmiumNativeExpected" BeforeTargets="CoreCompile">
+    <OsmiumWriteNativeExpected GenerationFile="$(OsmiumGenerationFile)" NativeDir="$(OsmiumNativeDir)"
+                               OutputFile="$(IntermediateOutputPath)NativeExpected.g.cs" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)NativeExpected.g.cs" />
+      <FileWrites Include="$(IntermediateOutputPath)NativeExpected.g.cs" />
+    </ItemGroup>
+  </Target>
 </Project>

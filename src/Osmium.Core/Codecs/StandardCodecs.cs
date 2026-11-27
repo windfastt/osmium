@@ -203,6 +203,21 @@ public sealed class ZstdCodec : MethodBase
 
     public override byte[] Encode(ReadOnlyMemory<byte> input, ParamValues p, CodecContext ctx)
     {
+        var native = Native.NativeEncoders.ForEncode();
+        if (native == null) return EncodeManaged(input, p, ctx);
+        bool ldm = Get(p, "ldm") != 0;
+        long mm = Get(p, "ldmmin");
+        var output = Native.NativeEncode.Zstd(native, input,
+            new Native.ZstdSettings((int)Get(p, "level"), Wlog(p, input.Length, Get(p, "wlog")), ldm,
+                ldm && mm > 0 ? (int)Math.Clamp(mm, 4, 4096) : 0, (int)Get(p, "strategy")),
+            EncodeMemory(p, input.Length), ctx);
+        ctx.Checkpoint(input.Length);
+        return output;
+    }
+
+    /// <summary>The built-in encoder (generation managed-1): the fallback, and what the managed-1 vectors pin.</summary>
+    internal byte[] EncodeManaged(ReadOnlyMemory<byte> input, ParamValues p, CodecContext ctx)
+    {
         var ms = new MemoryStream(Math.Max(256, input.Length / 3));
         using (var cs = new CompressionStream(ms, (int)Get(p, "level"), leaveOpen: true))
         {
@@ -284,6 +299,19 @@ public sealed class LzmaCodec : MethodBase
     }
 
     public override byte[] Encode(ReadOnlyMemory<byte> input, ParamValues p, CodecContext ctx)
+    {
+        var native = Native.NativeEncoders.ForEncode();
+        if (native == null) return EncodeManaged(input, p, ctx);
+        var output = Native.NativeEncode.Lzma(native, input,
+            new Native.LzmaSettings(EffectiveDict(Get(p, "dict"), input.Length), (int)Get(p, "lc"), (int)Get(p, "lp"),
+                (int)Get(p, "pb"), (int)Get(p, "fb"), (int)Get(p, "mf")),
+            EncodeMemory(p, input.Length), ctx);
+        ctx.Checkpoint(input.Length);
+        return output;
+    }
+
+    /// <summary>The built-in encoder (generation managed-1): the fallback, and what the managed-1 vectors pin.</summary>
+    internal byte[] EncodeManaged(ReadOnlyMemory<byte> input, ParamValues p, CodecContext ctx)
     {
         int dict = EffectiveDict(Get(p, "dict"), input.Length);
         var enc = new SevenZip.Compression.LZMA.Encoder();

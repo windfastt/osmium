@@ -1,0 +1,10 @@
+# Encoder vectors of generation managed-1-large: Built-in encoders: LZMA SDK for C# 22.1.1 and ZstdSharp 0.8.8.
+# Fields: case input input-length input-sha256 parameters output-length output-sha256 independent-decoder
+# Written by EncoderVectorTests with OSMIUM_REGENERATE_VECTORS=managed-1-large; never edited by hand.
+lzma.d32m.large-40m large-40m 41943040 c4d6800a5abec9ad2e0d6cc2c252b0cd53b5729819f37087d6933411e66b51f1 dict=33554432,lc=3,lp=0,pb=2,fb=273,mf=1 8350069 88401267988f90111d3f1c54fcd116fcc7da656b7cce4d10bfa1c47b02d6bd54 xz
+lzma.d64m.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f dict=67108864,lc=3,lp=0,pb=2,fb=273,mf=1 12087891 04f138e7a0d00ce57c1be5d31d20439c65eae7d36359090846173779cc2d0ffb xz
+zstd.l19w27.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f level=19,wlog=27,ldm=0,ldmmin=0,strategy=0 11848575 fc2324a4d1b6326d0d9110fdc3e1af43d16f85c744b45306805cbe7425b2db76 zstd
+zstd.l19w27ldm.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f level=19,wlog=27,ldm=1,ldmmin=0,strategy=0 11848575 fc2324a4d1b6326d0d9110fdc3e1af43d16f85c744b45306805cbe7425b2db76 zstd
+zstd.l22.large-16m large-16m 16777216 0e7744f5aca02ac7ddfab957eabfd08eed9591baa3a2f17162f17179beb9ee58 level=22,wlog=0,ldm=0,ldmmin=0,strategy=0 3331810 aa4868fbe01da7fa26f1aa395869a543c474410691d833ce8650263606b8c7d3 zstd
+index.zstd19.index-200k index-200k 26816241 82c5fc2314ca65aa2e95f924b7319e63b3e2898097de4ae4fb22c54500d04d50 level=19,wlog=0,ldm=0,ldmmin=0,strategy=0 7353350 3d5cd32328d8c2eb5e86db35255dd4f17b971c46bdd15df813f26f8dae89fc79 zstd
+index.lzma16m.index-200k index-200k 26816241 82c5fc2314ca65aa2e95f924b7319e63b3e2898097de4ae4fb22c54500d04d50 dict=16777216,lc=3,lp=0,pb=2,fb=273,mf=1 6916561 7729b84eb3847eaa216aca1ae95d873779e3a06e1c446a7433c04248796d4fc4 xz

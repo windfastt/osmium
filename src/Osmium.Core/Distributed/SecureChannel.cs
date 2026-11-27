@@ -130,9 +130,12 @@ public static class Protocol
 
     public const byte KindTrials = 1, KindCompress = 2;
 
-    /// <summary>Identifies the exact engine build: workers with a different fingerprint are refused, because version
-    /// skew would make honest workers fail verification.</summary>
-    public static byte[] EngineFingerprint()
+    /// <summary>Identifies the exact engine build and its active encoder generation: workers with a different
+    /// fingerprint are refused, because version skew (or encoders writing other bytes, which makes trial sizes differ)
+    /// would make honest workers fail verification. Reading it decides the encoder generation if nothing has yet.</summary>
+    public static byte[] EngineFingerprint() => EngineFingerprint(Codecs.Native.EncoderGeneration.Active.Id);
+
+    internal static byte[] EngineFingerprint(string encoderGeneration)
     {
         var sb = new StringBuilder($"osa{Container.Osa.Major}.{Container.Osa.Minor};");
         foreach (var m in MethodRegistry.Default.All)
@@ -142,6 +145,7 @@ public static class Protocol
             sb.Append(");");
         }
         sb.Append(typeof(Protocol).Assembly.GetName().Version);
+        sb.Append(";enc=").Append(encoderGeneration);
         return SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))[..16];
     }
 }
@@ -237,10 +241,12 @@ public sealed class SecureChannel : IAsyncDisposable
         await WritePlainAsync(s, hello, ct);
         var chBytes = await ReadPlainAsync(s, ct);
         if (chBytes.Length > 0 && chBytes[0] == Protocol.Reject)
-            throw new InvalidDataException("Worker refused: " + Encoding.UTF8.GetString(chBytes, 1, chBytes.Length - 1));
+            throw new InvalidDataException("Worker refused: " + Encoding.UTF8.GetString(chBytes, 1, chBytes.Length - 1)
+                + $" (this computer uses encoder generation {Codecs.Native.EncoderGeneration.Active.Id})");
         var ch = ParseHello(chBytes);
         if (!ch.Fingerprint.AsSpan().SequenceEqual(Protocol.EngineFingerprint()))
-            throw new InvalidDataException("Worker runs a different Osmium engine version.");
+            throw new InvalidDataException("Worker runs a different Osmium engine build or encoder generation. " +
+                $"This computer uses encoder generation {Codecs.Native.EncoderGeneration.Active.Id}.");
         var th = SHA256.HashData(hello.Concat(chBytes).ToArray());
         await WritePlainAsync(s, HMACSHA256.HashData(key.AuthKey, "osmium c-auth"u8.ToArray().Concat(th).ToArray()), ct);
         var ok = await ReadPlainAsync(s, ct);
@@ -260,8 +266,9 @@ public sealed class SecureChannel : IAsyncDisposable
         }
         if (!hello.Fingerprint.AsSpan().SequenceEqual(Protocol.EngineFingerprint()))
         {
-            await WritePlainAsync(s, [Protocol.Reject, .. "engine version mismatch"u8], ct);
-            throw new InvalidDataException("Client runs a different Osmium engine version.");
+            await WritePlainAsync(s, [Protocol.Reject, .. "different Osmium engine build or encoder generation"u8], ct);
+            throw new InvalidDataException("Client runs a different Osmium engine build or encoder generation. " +
+                $"This computer uses encoder generation {Codecs.Native.EncoderGeneration.Active.Id}.");
         }
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var ch = HelloBytes(RandomNumberGenerator.GetBytes(32), ecdh.ExportSubjectPublicKeyInfo(), key.Tag, myName, slots, mem);

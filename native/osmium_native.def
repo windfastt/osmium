@@ -1,0 +1,9 @@
+; Exports of osmium_native-<arch>.dll: the osn_* functions of include/osmium_native.h, nothing else.
+EXPORTS
+    osn_abi
+    osn_generation
+    osn_versions
+    osn_lzma_bound
+    osn_zstd_bound
+    osn_lzma_encode
+    osn_zstd_encode

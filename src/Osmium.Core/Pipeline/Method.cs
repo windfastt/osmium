@@ -42,6 +42,9 @@ public sealed class CodecContext
     public PauseGate? Gate { get; init; }
     /// <summary>Called with the number of input bytes consumed so far by the current stage.</summary>
     public Action<long>? Progress { get; init; }
+    /// <summary>Threads one encode may use (1 by default). Every encoder uses one thread for now: the LZMA SDK's
+    /// helper thread would change the bytes of some blocks.</summary>
+    public int MaxThreads { get; init; } = 1;
 
     public void Checkpoint(long done)
     {

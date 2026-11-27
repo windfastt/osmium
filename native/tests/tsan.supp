@@ -1,0 +1,10 @@
+# Thread-sanitizer suppressions for the self-test (TSAN_OPTIONS=suppressions=native/tests/tsan.supp).
+#
+# LZMA SDK 26.06, C/LzFindMt.c, MtSync_StopWriting(): the encoding thread sets the match finder thread's stop flag
+# (CMtSync.stopWriting, a plain int) and then releases freeSemaphore; the match finder thread reads the flag right
+# after Semaphore_Wait(&freeSemaphore), which an earlier release may have satisfied, so the read is not ordered after
+# the write. A stale read only lets that thread fill one more block; it then waits on the release made by
+# MtSync_StopWriting itself, sees the flag and stops. The encoded bytes do not depend on it (the self-test compares
+# every parallel result with the one-thread reference). Upstream code is compiled unchanged, so the report is
+# suppressed for this one function only; any other report fails the run.
+race:MtSync_StopWriting

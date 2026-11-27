@@ -1,0 +1,64 @@
+# Upstream sources of the osmium_native library, pinned by SHA-256.
+#
+# One line per archive, fields separated by spaces:
+#   name  version  url  sha256  size-in-bytes  git-tag  git-commit
+# fetch_sources.py downloads each archive (or takes it from a cache or a folder), checks its size and SHA-256 before
+# anything is extracted, and then checks every extracted file against sources.files. Changing a line here is a new
+# encoder generation (see README.md, "Upgrading an upstream library"); a hash is never "just bumped".
+
+lzma-sdk 26.06 https://github.com/ip7z/7zip/releases/download/26.06/lzma2606.7z 1d9da340870b12712e9068be178a4436fbad785486b62aed6e2aa88ea1e3bb65 1784871 26.06 d3296e39e1f1f92c7b41c0c3848e65640428d42d
+zstd 1.5.7 https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3 2434947 v1.5.7 f8745da6ff1ad1e7bab384bd1f9d742439278e99
+
+# ---------------------------------------------------------------------------------------------------------------------
+# How the pins were checked (2026-11-26)
+#
+# lzma-sdk 26.06 (C/7zVersion.h: MY_VERSION_NUMBERS "26.06", MY_DATE "2026-11-06"; released 20 days before the pin)
+#   - The archive is the one linked from https://www.7-zip.org/sdk.html.
+#   - Second channel, run by the same author but not the same account: SourceForge project files,
+#     https://downloads.sourceforge.net/project/sevenzip/LZMA%20SDK/lzma2606.7z
+#     size 1784871, SHA-256 1d9da340870b12712e9068be178a4436fbad785486b62aed6e2aa88ea1e3bb65 (byte-identical).
+#   - Git: tag 26.06 of https://github.com/ip7z/7zip is a lightweight tag on commit
+#     d3296e39e1f1f92c7b41c0c3848e65640428d42d. The 21 C files listed in sources.files are identical to the tag
+#     apart from line endings (the archive has CRLF, the tag LF); sources.files pins the archive's bytes.
+#   - Change notes: 26.02 to 26.04 "some bugs and vulnerabilities were fixed", 26.05 minor changes, 26.06 concerns
+#     split files in the 7-Zip program only.
+#
+# zstd 1.5.7 (lib/zstd.h: ZSTD_VERSION 1.5.7; released 2025-02-19)
+#   - The release's own zstd-1.5.7.tar.gz.sha256 gives the same SHA-256.
+#   - Signature: zstd-1.5.7.tar.gz.sig from the same release, made 2025-02-19 by
+#       4EF4 AC63 455F C9F4 545D  9B7D EF8F E995 28B5 2FFD  "Zstandard Release Signing Key <signing@zstd.net>"
+#     The key was fetched from keyserver.ubuntu.com, and the same fingerprint is pinned independently by Arch
+#     Linux's zstd package (validpgpkeys in its PKGBUILD); gpgv reports a good signature over the archive.
+#   - Git: tag v1.5.7 of https://github.com/facebook/zstd is tag object ac66b19e6bd6b83238bf008eecc1298105298532 on
+#     commit f8745da6ff1ad1e7bab384bd1f9d742439278e99; lib/common, lib/compress, lib/zstd.h and lib/zstd_errors.h
+#     (56 files) are byte-identical to the tag.
+#   - zstd 1.6.0 (2026-11-23) is not pinned: a release is pinned only once it is at least 14 days old and its notes
+#     are read.
+#
+# Advisories, queried 2026-11-26:
+#   - OSV (api.osv.dev/v1/query): by commit for both pinned commits, zstd as GIT v1.5.7, Debian, Ubuntu and Alpine
+#     libzstd/zstd 1.5.7, crates.io zstd-sys 2.0.15+zstd.1.5.7, PyPI zstd 1.5.7.0, Debian and Alpine 7zip 26.06.
+#   - NVD (services.nvd.nist.gov, CVE API 2.0): keywords zstandard, zstd, "LZMA SDK", LzmaEnc, LzFind, "7-Zip 26",
+#     published 2026-08-01 to 2026-11-26.
+#   - GitHub advisory database: covered through OSV, which imports it.
+#   Results:
+#   - CVE-2026-124851 (DSA-6657-1): information disclosure in the zstd DEcoder (1.5.1 to 1.5.7): crafted frames
+#     expose a decompression context's literal buffer. Fixed upstream in lib/decompress (commit 0c9d297). The
+#     library compiles no decoder; the decoder files listed as "test" in sources.files are linked into test
+#     programs only.
+#   - The 7-Zip entries Debian lists against 26.06 (CVE-2022-47111/47112, CVE-2026-104086, -125742, -130067,
+#     -14266, -48092, -48095, -48101 to -48104, -48111, -48112, -58052) concern archive handlers, xz, LZX and the file
+#     manager, and are fixed in 26.06 or earlier; none touches a file in sources.files.
+#   - RUSTSEC-2026-0410 concerns the Rust crate's WebAssembly allocator, not zstd's C code.
+#   - No advisory names LzmaEnc, LzFind, LzFindMt, LzFindOpt, Threads, CpuArch, Alloc, lib/common or lib/compress.
+#   Fixed upstream after 1.5.7 without an advisory, in compiled files (zstd dev, v1.5.7..e50cdb0, read 2026-11-26):
+#   - 974238ca9 "Fix block splitter partition bounds": at strategy btopt and above with windowLog 17 or more
+#     (levels 16 to 22) a 128 KiB block with very many 3-byte matches can make the block splitter write a few
+#     entries past blockSplitCtx.partitions[196] into blockSplitCtx.entropyMetadata, inside the compression
+#     context. With DEBUGLEVEL 0 nothing reads that field before it is rewritten, so output and state are not
+#     affected; the build never defines DEBUGLEVEL (check_sources.py). The managed ZstdSharp 0.8.8 encoder has the
+#     same code. Fixed in 1.6.0.
+#   - 3f8f9b3f8 "NULL pointer dereference in ZSTD_customCalloc when a custom allocator fails": reached only through
+#     ZSTD_createCCtxParams, thread pools and zstdmt, which the library never calls (check_sources.py).
+#   - cf2bae0bf "preserve the reset LDM gear hash": a compression-ratio fix that changes LDM output; no safety
+#     effect.

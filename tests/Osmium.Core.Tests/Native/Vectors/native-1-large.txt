@@ -1,0 +1,10 @@
+# Encoder vectors of generation native-1-large: Native encoders: LZMA SDK 26.06 and Zstandard 1.5.7 (osmium_native).
+# Fields: case input input-length input-sha256 parameters output-length output-sha256 independent-decoder
+# Written by EncoderVectorTests with OSMIUM_REGENERATE_VECTORS=native-1-large; never edited by hand.
+lzma.d32m.large-40m large-40m 41943040 c4d6800a5abec9ad2e0d6cc2c252b0cd53b5729819f37087d6933411e66b51f1 dict=33554432,lc=3,lp=0,pb=2,fb=273,mf=1 8348987 ba354f0c36bffd17a7ede987ffa380d09a9dda7af744e12f7d7ea34b7d3aca9b xz
+lzma.d64m.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f dict=67108864,lc=3,lp=0,pb=2,fb=273,mf=1 12086563 6791a58aea9243d5f76c40196bacc243a6d9936dcc02021cb791f25affb6f250 xz
+zstd.l19w27.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f level=19,wlog=27,ldm=0,ldmmin=0,strategy=0 11848578 472d876053ee6b60254fecb51760765c385c403e465c4e7f18fb28bbbef30a68 zstd
+zstd.l19w27ldm.large-72m large-72m 75497472 946b9b10183ff8a624bd1013673f516a84b2e6d4b481a1453ec7dcd302ab027f level=19,wlog=27,ldm=1,ldmmin=0,strategy=0 11848578 472d876053ee6b60254fecb51760765c385c403e465c4e7f18fb28bbbef30a68 zstd
+zstd.l22.large-16m large-16m 16777216 0e7744f5aca02ac7ddfab957eabfd08eed9591baa3a2f17162f17179beb9ee58 level=22,wlog=0,ldm=0,ldmmin=0,strategy=0 3331813 23822aa4d5175c21b9f81077919e04da45348a9bbb3094762b5c22667ed46f8b zstd
+index.zstd19.index-200k index-200k 26816241 82c5fc2314ca65aa2e95f924b7319e63b3e2898097de4ae4fb22c54500d04d50 level=19,wlog=0,ldm=0,ldmmin=0,strategy=0 7353353 21703bf00a83c7d8f9be3783f00b2550ddb474512924ca2e25f3b176e92d6d47 zstd
+index.lzma16m.index-200k index-200k 26816241 82c5fc2314ca65aa2e95f924b7319e63b3e2898097de4ae4fb22c54500d04d50 dict=16777216,lc=3,lp=0,pb=2,fb=273,mf=1 6913010 9a532e990549e4a8b0a85d09b2a3a9c37780d45b44f34ba698c6139c9f8c7081 xz

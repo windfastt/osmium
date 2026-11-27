@@ -1,0 +1,150 @@
+name: Native encoder measurements
+
+# Manual only, and indicative: shared runners are noisy, so the release numbers come from one named machine per
+# platform instead. On Windows x64 and Windows ARM64 it measures Osmium's two encoder generations (managed-1 and
+# native-1) against the runner's 7-Zip on the winapp corpus (Osmium's own publish folder, built with
+# tools/bench/make_corpora.py), and compares builds of the native library in one process by per-thread CPU cycles:
+# MSVC with and without /Qspectre and, on ARM64, MSVC against clang-cl. The tables are uploaded as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: 'Interleaved rounds per group'
+        type: string
+        default: '3'
+      threads:
+        description: 'Thread counts for the profile rows, comma-separated'
+        type: string
+        default: '1,2,4'
+      groups:
+        description: 'codec, profiles, or both (comma-separated)'
+        type: string
+        default: 'codec,profiles'
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  OSN_JOBS: 4
+
+jobs:
+  libraries:
+    name: Library builds to compare
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: MSVC (shipped flags) and MSVC without /Qspectre for x64 and ARM64; clang-cl for ARM64
+        shell: pwsh
+        run: |
+          ./native/build.ps1 -Arch x64 -Tests
+          ./native/build.ps1 -Arch x64 -NoSpectre
+          ./native/build.ps1 -Arch arm64 -Tests
+          ./native/build.ps1 -Arch arm64 -NoSpectre
+          ./native/build.ps1 -Arch arm64 -Compiler clang-cl
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bench-libraries
+          path: |
+            artifacts/native/
+            artifacts/native-nospectre/
+            artifacts/native-clangcl/
+            artifacts/native-test/
+          if-no-files-found: error
+
+  measure:
+    name: Measure ${{ matrix.target }}
+    needs: libraries
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: win-x64, arch: x64, os: windows-2025 }
+          - { target: win-arm64, arch: arm64, os: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@v7
+        with:
+          name: bench-libraries
+          path: artifacts
+      - name: The measuring machine
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bench-results | Out-Null
+          $f = 'bench-results/machine-${{ matrix.target }}.txt'
+          $cpu = Get-CimInstance Win32_Processor
+          $os = Get-CimInstance Win32_OperatingSystem
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip is not at $sevenZip on this runner image" }
+          @(
+            "cpu=$($cpu.Name.Trim())",
+            "cores=$(($cpu | Measure-Object NumberOfCores -Sum).Sum) logical=$(($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum) max_mhz=$($cpu[0].MaxClockSpeed)",
+            "ram_gib=$([Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1))",
+            "os=$($os.Caption) $($os.Version) build $($os.BuildNumber) $env:PROCESSOR_ARCHITECTURE",
+            "image=$env:ImageOS $env:ImageVersion",
+            "power_plan=$((powercfg /getactivescheme) -join ' ')",
+            "7zip=$((& $sevenZip | Where-Object { "$_".Trim() } | Select-Object -First 1))",
+            "dotnet=$(dotnet --version)"
+          ) | Set-Content $f
+          Get-Content $f
+      - name: Publish Osmium with the native library beside it
+        shell: pwsh
+        run: |
+          ./build/publish.ps1 -Arch ${{ matrix.arch }} -SkipInstaller
+          $dll = 'artifacts/publish/${{ matrix.target }}/osmium_native-${{ matrix.arch }}.dll'
+          if (-not (Test-Path $dll)) { throw "$dll is missing from the publish folder" }
+          $built = (Get-Content 'artifacts/native/${{ matrix.target }}/build-info.txt' | Where-Object { $_ -like 'sha256=*' }) -replace '^sha256=', ''
+          $copied = (Get-FileHash -Algorithm SHA256 $dll).Hash.ToLowerInvariant()
+          if ($built -ne $copied) { throw "the published library is not the one built ($copied, expected $built)" }
+      - name: The winapp corpus (a copy of the publish folder) and its tar
+        shell: pwsh
+        run: |
+          python -I tools/bench/make_corpora.py winapp bench/winapp --from artifacts/publish/${{ matrix.target }}
+          if ($LASTEXITCODE) { throw 'make_corpora failed' }
+          tar -cf bench/winapp.tar -C bench winapp
+          if ($LASTEXITCODE) { throw 'tar failed' }
+          Copy-Item bench/winapp.MANIFEST.sha256 bench-results/
+      - name: Encoder generations against 7-Zip
+        shell: pwsh
+        run: |
+          $threads = [int[]]('${{ inputs.threads }}' -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          $groups = [string[]]('${{ inputs.groups }}' -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          ./native/bench/s8.ps1 -Osmium artifacts/publish/${{ matrix.target }}/osmium.exe -Corpus bench/winapp `
+            -Out bench-results/s8-${{ matrix.target }}.tsv -Rounds ${{ inputs.rounds }} -Threads $threads -Groups $groups
+          Get-Content bench-results/s8-${{ matrix.target }}.tsv
+      - name: Library builds by per-thread CPU cycles (/Qspectre against none; ARM64 also clang-cl)
+        shell: pwsh
+        run: |
+          $bench = 'artifacts/native-test/${{ matrix.target }}/osn_bench.exe'
+          $libs = @(
+            (Resolve-Path 'artifacts/native/${{ matrix.target }}/osmium_native-${{ matrix.arch }}.dll').Path,
+            (Resolve-Path 'artifacts/native-nospectre/${{ matrix.target }}/osmium_native-${{ matrix.arch }}.dll').Path)
+          if ('${{ matrix.arch }}' -eq 'arm64') { $libs += (Resolve-Path 'artifacts/native-clangcl/win-arm64/osmium_native-arm64.dll').Path }
+          $out = 'bench-results/cycles-${{ matrix.target }}.tsv'
+          foreach ($codec in @('--lzma', '32'), @('--zstd', '19'), @('--zstd', '3')) {
+            & $bench --rounds 5 @codec bench/winapp.tar @libs | Add-Content $out
+            if ($LASTEXITCODE) { throw "osn_bench $codec failed" }
+          }
+          Get-Content $out
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: bench-results-${{ matrix.target }}
+          path: bench-results/

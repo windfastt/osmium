@@ -1,0 +1,430 @@
+name: Native encoders
+
+# Builds osmium_native (native/README.md) from the pinned upstream sources for linux-x64, win-x64 and win-arm64,
+# checks the binaries, builds each twice on one runner from two folders and compares the bytes (and with the build
+# job's copy from another runner when both have the same toolset), and runs the tests on Linux x64, Windows x64,
+# Windows ARM64 and x64 under emulation on Windows ARM64: the native-1 and managed-1 vectors must pass on all of
+# them. Runner labels are pinned (never -latest); the images behind a label still roll forward now and then.
+
+on:
+  push:
+    branches: [main, native-encoders]
+    paths: ['native/**', 'src/Osmium.Core/**', 'tests/Osmium.Core.Tests/**', '.github/workflows/native.yml']
+  pull_request:
+    paths: ['native/**', 'src/Osmium.Core/**', 'tests/Osmium.Core.Tests/**', '.github/workflows/native.yml']
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'build: only build and check the libraries; full: everything'
+        type: string
+        default: full
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  OSN_JOBS: 4
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-24.04 }
+          - { target: win-x64, os: windows-2025, arch: x64 }
+          - { target: win-arm64, os: windows-2025, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Runner image
+        shell: bash
+        run: echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-}"
+      - name: Upstream archive cache (every copy is checked against native/sources.lock before use)
+        uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: Source checks (fetch_sources refusals)
+        if: matrix.target == 'linux-x64'
+        run: python3 -I native/tests/test_fetch_sources.py
+      - name: Build, check and self-test (Linux, gcc)
+        if: matrix.target == 'linux-x64'
+        run: native/build.sh --tests
+      - name: Build, check and self-test (Windows, MSVC)
+        if: matrix.target != 'linux-x64'
+        shell: pwsh
+        run: |
+          Write-Host "ImageVersion $env:ImageVersion"
+          foreach ($t in 'cmake', 'ninja', 'python') { $c = Get-Command $t -ErrorAction SilentlyContinue; Write-Host "$t : $($c.Source)" }
+          ./native/build.ps1 -Arch ${{ matrix.arch }} -Tests
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-${{ matrix.target }}
+          path: artifacts/native/${{ matrix.target }}/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-test-${{ matrix.target }}
+          path: artifacts/native-test/${{ matrix.target }}/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        if: matrix.target != 'linux-x64'
+        with:
+          name: native-symbols-${{ matrix.target }}
+          path: artifacts/native-symbols/${{ matrix.target }}/
+          if-no-files-found: error
+
+  differential:
+    name: Compiler differential ${{ matrix.name }}
+    if: inputs.mode != 'build'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64 clang, os: ubuntu-24.04 }
+          - { name: win-arm64 clang-cl, os: windows-2025 }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: clang build and self-test (output compared with the vectors by the self-test's round trips)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          clang --version
+          native/build.sh --compiler clang --tests
+          mkdir -p artifacts/native-clang && cp artifacts/native/linux-x64/* artifacts/native-clang/
+      - name: 'clang-cl ARM64 build (flags differ from MSVC: no /Qspectre, branch protection instead of /guard:signret)'
+        if: matrix.os == 'windows-2025'
+        shell: pwsh
+        run: ./native/build.ps1 -Arch arm64 -Compiler clang-cl -Tests
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-differential-${{ matrix.os }}
+          path: |
+            artifacts/native-clang/
+            artifacts/native-clangcl/
+            artifacts/native-test/win-arm64-clangcl/
+          if-no-files-found: error
+
+  analyze:
+    name: MSVC /analyze of the interface layer
+    if: inputs.mode != 'build'
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - shell: pwsh
+        run: |
+          ./native/build.ps1 -Arch x64 -Analyze
+          ./native/build.ps1 -Arch arm64 -Analyze
+
+  repro:
+    name: Reproducible ${{ matrix.target }}
+    needs: build
+    if: inputs.mode != 'build'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-24.04 }
+          - { target: win-x64, os: windows-2025, arch: x64 }
+          - { target: win-arm64, os: windows-2025, arch: arm64 }
+    # The gate: two builds on this runner, from two checkouts in different folders (so a build path that leaks
+    # into the binary shows), must be byte-identical. The build job's library, from another runner, is extra
+    # evidence: compared when both runners have the same toolset, noted otherwise (runner images cannot be pinned
+    # to a toolset, and a rollout can land between two jobs).
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: one
+      - uses: actions/checkout@v5
+        with:
+          path: elsewhere/second-checkout
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: other-runner
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('one/native/sources.lock') }}
+      - name: Upstream archives (cached or downloaded, each checked against native/sources.lock)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" -I one/native/fetch_sources.py --cache "$GITHUB_WORKSPACE/artifacts/native-cache"
+      - name: Two builds (Linux)
+        if: matrix.target == 'linux-x64'
+        run: |
+          one/native/build.sh --from "$GITHUB_WORKSPACE/artifacts/native-cache"
+          elsewhere/second-checkout/native/build.sh --from "$GITHUB_WORKSPACE/artifacts/native-cache"
+      - name: Two builds (Windows)
+        if: matrix.target != 'linux-x64'
+        shell: pwsh
+        run: |
+          ./one/native/build.ps1 -Arch ${{ matrix.arch }} -From "$env:GITHUB_WORKSPACE/artifacts/native-cache"
+          ./elsewhere/second-checkout/native/build.ps1 -Arch ${{ matrix.arch }} -From "$env:GITHUB_WORKSPACE/artifacts/native-cache"
+      - name: Compare the two builds on this runner (must be byte-identical)
+        shell: bash
+        run: |
+          a=one/artifacts/native/${{ matrix.target }}
+          b=elsewhere/second-checkout/artifacts/native/${{ matrix.target }}
+          file=$(sed -n 's/^file=//p' "$a/build-info.txt" | tr -d '\r')   # build.ps1 writes CRLF
+          ha=$(sha256sum < "$a/$file" | cut -d' ' -f1); hb=$(sha256sum < "$b/$file" | cut -d' ' -f1)
+          echo "$ha  $a/$file"; echo "$hb  $b/$file"
+          [ -n "$ha" ] && [ "$ha" = "$hb" ] || { echo "::error::two builds of one commit on one runner differ (from $a and $b)"; exit 1; }
+      - name: Compare with the build job's library from another runner (when the toolsets are the same)
+        shell: bash
+        run: |
+          first=other-runner/build-info.txt
+          second=one/artifacts/native/${{ matrix.target }}/build-info.txt
+          keys='compiler_version|msvc_toolset|visual_studio|cmake|ninja|compiler'
+          diff <(grep -E "^($keys)=" "$first" | tr -d '\r') <(grep -E "^($keys)=" "$second" | tr -d '\r') > toolset.diff || true
+          if [ -s toolset.diff ]; then
+            cat toolset.diff
+            echo "::notice title=Cross-runner comparison not made::the two runners have different toolsets:%0A$(sed ':a;N;$!ba;s/\n/%0A/g' toolset.diff)"
+            exit 0
+          fi
+          a=$(sed -n 's/^sha256=//p' "$first" | tr -d '\r'); b=$(sed -n 's/^sha256=//p' "$second" | tr -d '\r')
+          echo "other runner $a"; echo "this runner  $b"
+          [ "$a" = "$b" ] || { echo "::error::the same toolset on another runner built a different library"; exit 1; }
+
+  test:
+    name: Tests ${{ matrix.name }}
+    needs: build
+    if: inputs.mode != 'build'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-24.04, target: linux-x64, dotnet_arch: '', aot: true }
+          - { name: win-x64, os: windows-2025, target: win-x64, dotnet_arch: '', aot: true }
+          - { name: win-arm64 (native), os: windows-11-arm, target: win-arm64, dotnet_arch: '', aot: true }
+          - { name: win-x64 under emulation on ARM64, os: windows-11-arm, target: win-x64, dotnet_arch: x64, aot: false }
+    steps:
+      - uses: actions/checkout@v5
+      # PowerShell on the ARM64 runner image occasionally crashes at startup while setup-dotnet runs; one retry.
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+          architecture: ${{ matrix.dotnet_arch }}
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+          architecture: ${{ matrix.dotnet_arch }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: artifacts/native/${{ matrix.target }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-test-${{ matrix.target }}
+          path: artifacts/native-test/${{ matrix.target }}
+      - name: Runner
+        shell: bash
+        run: |
+          echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-}"
+          dotnet --info | head -20
+          cat artifacts/native/${{ matrix.target }}/build-info.txt
+          # The emulation leg must really run an x64 .NET (an ignored setup input would install the ARM64 one).
+          want='${{ matrix.dotnet_arch }}'
+          if [ -n "$want" ]; then
+            rid=$(dotnet --info | sed -n 's/^ *RID: *//p' | head -1)
+            echo "dotnet RID: $rid"
+            case "$rid" in *-$want) ;; *) echo "::error::expected an $want .NET SDK, got $rid"; exit 1 ;; esac
+          fi
+      - name: Build
+        run: dotnet build Osmium.sln -c Release
+      - name: Single-file probe for the planting test (the library must stay beside it, outside the bundle)
+        shell: pwsh
+        run: |
+          dotnet publish tests/Osmium.Native.LoadProbe -c Release -r ${{ matrix.target }} --self-contained false -p:PublishSingleFile=true -o artifacts/probe-single
+          if ($LASTEXITCODE) { throw 'single-file publish failed' }
+          Get-ChildItem artifacts/probe-single | Format-Table Name, Length
+          if (-not (Get-ChildItem artifacts/probe-single | Where-Object Name -match 'osmium_native')) { throw 'the native library went into the single-file bundle' }
+          $exe = Get-ChildItem artifacts/probe-single -File | Where-Object Name -match '^Osmium\.Native\.LoadProbe(\.exe)?$' | Select-Object -First 1
+          "OSMIUM_LOADPROBE_SINGLEFILE=$($exe.FullName)" >> $env:GITHUB_ENV
+      - name: Native AOT probe for the same test (the app's jobs run in a native AOT program)
+        shell: pwsh
+        run: |
+          if ('${{ matrix.aot }}' -ne 'true') {
+            # An x64 .NET on an ARM64 runner: the x64 native toolchain is not what this leg checks.
+            "OSMIUM_LOADPROBE_AOT=none: x64 .NET under emulation; the x64 and ARM64 legs publish one" >> $env:GITHUB_ENV
+            exit 0
+          }
+          dotnet publish tests/Osmium.Native.LoadProbe -c Release -r ${{ matrix.target }} -p:PublishAot=true -o artifacts/probe-aot
+          if ($LASTEXITCODE) { throw 'native AOT publish failed' }
+          Get-ChildItem artifacts/probe-aot | Format-Table Name, Length
+          $exe = Get-ChildItem artifacts/probe-aot -File | Where-Object Name -match '^Osmium\.Native\.LoadProbe(\.exe)?$' | Select-Object -First 1
+          "OSMIUM_LOADPROBE_AOT=$($exe.FullName)" >> $env:GITHUB_ENV
+      - name: Core tests with the native encoders (required, never skipped)
+        env:
+          OSMIUM_ENCODERS: native
+        run: dotnet test -c Release --project tests/Osmium.Core.Tests
+      - name: Core tests with the built-in encoders
+        env:
+          OSMIUM_ENCODERS: managed
+        run: dotnet test -c Release --project tests/Osmium.Core.Tests
+      - name: Desktop and command-line tests with the native encoders
+        env:
+          OSMIUM_ENCODERS: native
+        shell: bash
+        run: |
+          dotnet test -c Release --project tests/Osmium.Desktop.Tests
+          dotnet test -c Release --project tests/Osmium.Cli.Tests
+      - name: Self-test, and every two-thread LZMA vector input 20 times while other encodes run (ARM64)
+        if: matrix.target == 'win-arm64'
+        shell: pwsh
+        run: |
+          $t = 'artifacts/native-test/win-arm64/osn_selftest.exe'
+          & $t; if ($LASTEXITCODE) { throw 'self-test failed' }
+          & $t --parallel 4 --repeat 20 --only-parallel; if ($LASTEXITCODE) { throw 'parallel repetitions differ' }
+      - name: Independent decoders on Linux (xz, 7-Zip, zstd; CrossDecodeTests requires them in CI)
+        if: matrix.target == 'linux-x64'
+        run: |
+          xz --version | head -1; 7z | head -2; zstd --version
+
+  # The vectors at the sizes Osmium ships (LargeVectorTests) and the 2,000-case sweep per codec (SweepTests), on all
+  # three platforms. Both are part of the merge gate.
+  large-vectors:
+    name: Large vectors ${{ matrix.target }}
+    needs: build
+    if: inputs.mode != 'build'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: windows-2025, target: win-x64 }
+          - { os: windows-11-arm, target: win-arm64 }
+    steps:
+      - uses: actions/checkout@v5
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: artifacts/native/${{ matrix.target }}
+      - run: dotnet build Osmium.sln -c Release
+      - name: managed-1 and native-1 large vectors
+        env:
+          OSMIUM_ENCODERS: native
+        run: dotnet test -c Release --project tests/Osmium.Core.Tests --filter-class Osmium.Core.Tests.Native.LargeVectorTests --explicit only
+
+  sweep:
+    name: Sweep ${{ matrix.target }}
+    needs: build
+    if: inputs.mode != 'build'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: windows-2025, target: win-x64 }
+          - { os: windows-11-arm, target: win-arm64 }
+    steps:
+      - uses: actions/checkout@v5
+      - id: dotnet
+        uses: actions/setup-dotnet@v5
+        continue-on-error: true
+        with:
+          global-json-file: global.json
+      - if: steps.dotnet.outcome == 'failure'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: artifacts/native/${{ matrix.target }}
+      - run: dotnet build Osmium.sln -c Release
+      - name: 2,000 cases per codec
+        env:
+          OSMIUM_ENCODERS: native
+          OSMIUM_SWEEP_OUT: artifacts/native-sweep/${{ matrix.target }}.txt
+        run: dotnet test -c Release --project tests/Osmium.Core.Tests --filter-class Osmium.Core.Tests.Native.SweepTests --explicit only
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-sweep-${{ matrix.target }}
+          path: artifacts/native-sweep/
+          if-no-files-found: error
+
+  sweep-compare:
+    name: Sweep identical on all platforms
+    needs: sweep
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: native-sweep-*
+          path: sweep
+          merge-multiple: true
+      - run: python3 -I native/sweep/compare.py sweep/linux-x64.txt sweep/win-x64.txt sweep/win-arm64.txt
+
+  sanitizers:
+    name: Sanitizers (${{ matrix.sanitize }})
+    if: inputs.mode != 'build'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: [thread, 'address,undefined']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: 'Self-test under the sanitizer (thread: parallel encodes with the helper thread)'
+        env:
+          OSN_PARALLEL: 4
+          OSN_REPEAT: 3
+        run: native/build.sh --sanitize '${{ matrix.sanitize }}'
+
+  msvc-asan:
+    name: MSVC AddressSanitizer and libFuzzer smoke (win-x64)
+    if: inputs.mode != 'build'
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: artifacts/native-cache
+          key: native-sources-${{ hashFiles('native/sources.lock') }}
+      - name: The fuzz harnesses built by MSVC with /fsanitize=address,fuzzer, three minutes each
+        shell: pwsh
+        run: ./native/build.ps1 -Arch x64 -Fuzz -FuzzSeconds 180
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: msvc-asan-findings
+          path: artifacts/native-fuzz/win-x64/findings/
+          if-no-files-found: ignore
