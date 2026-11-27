@@ -442,7 +442,9 @@ internal sealed class SalvageRun : IDisposable
     private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, KdfRun run, out string? problem)
     {
         problem = null;
-        var copies = IntactHeaderCopies(probe).Where(h => h.Encryption is not null).ToList();
+        // Only the last two: the copy beside the file list at the end of the file and the one beside its spare copy. A
+        // file can carry any number of copies, each with settings of its own, and each would cost a key derivation.
+        var copies = IntactHeaderCopies(probe).Where(h => h.Encryption is not null).TakeLast(2).ToList();
         if (copies.Count == 0) return null;
         // A copy checks out as a header, so its settings are settled: a refusal of them ends salvage, before the password.
         foreach (var h in copies) PasswordKdf.Admit(h.Encryption!.Kdf, run);

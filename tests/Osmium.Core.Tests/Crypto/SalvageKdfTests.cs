@@ -328,6 +328,52 @@ public class SalvageKdfTests
     }
 
     [Fact]
+    public void ManyPlantedHeaderCopiesCostAtMostTwoKeyDerivations()
+    {
+        // The header destroyed, and 20 header copies of the archive, each with its own salt, beside index frame headers
+        // put after the blocks: only the last two copies (beside the file list at the end) are derived.
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), "argon2id", SpareCopyPolicy.Always);
+        var b = File.ReadAllBytes(path);
+        var header = ArchiveHeader.Read(new MemoryStream(b));
+        var tail = SpareArchives.TailOf(path, EncryptedArchives.Password);
+        var trailer = tail.Trailer!.Value;
+        var planted = new List<byte>();
+        for (int i = 0; i < 20; i++)
+        {
+            var salt = new byte[32];
+            salt[0] = (byte)(i + 1);
+            var copy = new ArchiveHeader
+            {
+                Minor = header.Minor, Flags = header.Flags, ArchiveId = header.ArchiveId,
+                Encryption = new EncryptionInfo(header.Encryption!.Kdf, salt, header.Encryption.Verifier),
+            }.Serialize();
+            Assert.Equal(header.Length, copy.Length);
+            var tr = new byte[SpareCopies.TrailerSize];
+            trailer.Write(tr);
+            var fh = new byte[Osa.FrameHeaderSize];
+            Osa.FrameMagic.CopyTo(fh);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(fh.AsSpan(4), Osa.FrameFlagEncrypted | Osa.FrameFlagIndex);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(fh.AsSpan(8), Osa.IndexFrameNumber);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(fh.AsSpan(24), Osa.Crc(fh.AsSpan(0, 24)));
+            planted.AddRange([.. copy, .. new byte[trailer.PaddingLength], .. tr, .. fh]);
+        }
+        string bad = t.Sub("planted.osa");
+        // (after the first frame, so none of them is taken for the header of an archive with data put before it)
+        int blocksEnd = (int)tail.BlocksEnd;
+        File.WriteAllBytes(bad, [.. new byte[header.Length], .. b.AsSpan(header.Length, blocksEnd - header.Length), .. planted, .. b.AsSpan(blocksEnd)]);
+        using (var seams = new KdfSeams(inspectWipe: false))
+        {
+            Assert.Throws<WrongPasswordException>(() => Salvage(bad, t.Sub("wrong"), () => "not the password of this archive"));
+            Assert.True(seams.Allocations <= 2, $"{seams.Allocations} key derivations");
+        }
+        // With its password, the archive still comes back through the copy beside its file list.
+        var r = Salvage(bad, t.Sub("out"), () => EncryptedArchives.Password);
+        Assert.Equal(3, r.FilesRecovered);
+        for (int i = 0; i < 3; i++) Assert.Equal(EncryptedArchives.Content(i), File.ReadAllBytes(Path.Combine(t.Sub("out"), $"f{i}.bin")));
+    }
+
+    [Fact]
     public void APlaintextFileListPlantedBesideTheFramesOfAnEncryptedArchiveDoesNotMakeItsFilesWritten()
     {
         // The header of an encrypted archive destroyed, its file list and footer replaced by those of a plaintext archive
