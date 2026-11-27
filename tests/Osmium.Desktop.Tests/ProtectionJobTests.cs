@@ -114,6 +114,53 @@ public sealed class ProtectionJobTests : IDisposable
     }
 
     [Fact]
+    public async Task AMemoryLimitBelowTheProtectionStopsTheJobBeforeAnythingIsScanned()
+    {
+        var s = Settings();
+        s.Performance.MemoryLimitMiB = 512; // Standard needs 1 GiB
+        var job = await Compress(s, Path.Combine(_root, "missing"));
+        Assert.Equal(JobState.Failed, job.State);
+        Assert.Equal("This password protection needs 1 GiB of memory to make the archive, more than the 512 MiB Osmium may use (Memory limit).", job.Error);
+        Assert.False(File.Exists(Path.Combine(_root, "out.osa")));
+    }
+
+    /// <summary>An archive protected with the lightest Argon2id settings Osmium accepts (256 MiB), made by the writer.</summary>
+    private string FloorArchive()
+    {
+        string path = Path.Combine(_root, "floor.osa");
+        var data = "the contents of the archive"u8.ToArray();
+        using var w = new OsaWriter(path, new OsaWriterOptions { Password = Password, Kdf = KdfPresets.Floor });
+        var (desc, payload) = Core.Pipeline.PipelineExecutor.Encode(Core.Pipeline.PipelineSpec.Parse("store", Core.Pipeline.MethodRegistry.Default), data, Core.Pipeline.CodecContext.None);
+        int frame = w.WriteBlock(desc, BlockBody.Hash128(data), payload, data.Length);
+        w.Finish([new ArchiveEntry { Path = "a.txt", Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(frame, 0, data.Length)], Hash = System.IO.Hashing.XxHash128.HashToUInt128(data) }]);
+        w.Commit(overwrite: true);
+        return path;
+    }
+
+    private static async Task<JobSnapshot> Test(OsmiumSettings s, string archive)
+    {
+        using var jm = new JobManager(() => s, () => new RuleSet());
+        var done = new TaskCompletionSource<JobSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        jm.JobFinished += j => done.TrySetResult(j);
+        jm.Enqueue(new JobRequest { Kind = JobKind.Test, Inputs = [archive], Password = Password });
+        return await done.Task.WaitAsync(TimeSpan.FromSeconds(120), Ct);
+    }
+
+    [Fact]
+    public async Task TestAndExtractJobsCheckThePasswordWithinTheMemoryLimit()
+    {
+        string archive = FloorArchive();
+        var s = Settings();
+        s.Performance.MemoryLimitMiB = 128;
+        var refused = await Test(s, archive);
+        Assert.Equal(JobState.Failed, refused.State);
+        Assert.Equal("Checking the password of this archive needs 256 MiB of memory, more than the 128 MiB Osmium may use.", refused.Error);
+        s.Performance.MemoryLimitMiB = 512;
+        var tested = await Test(s, archive);
+        Assert.True(tested.State == JobState.Completed, tested.Error);
+    }
+
+    [Fact]
     public void OnlyTheTestAssemblySetsTheSwitchThatMakesEveryProtectionPbkdf2()
     {
         // No method of Osmium's desktop code stores to the switch (stsfld) or calls the setter of the per-test override.
