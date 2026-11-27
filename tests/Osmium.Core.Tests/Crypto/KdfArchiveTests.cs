@@ -248,6 +248,131 @@ public class KdfArchiveTests
     }
 }
 
+/// <summary>The archive builder and the key cache: one derivation per build, none for an open with a cached key.</summary>
+public class KdfBuildTests
+{
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private static async Task<Planning.ArchivePlan> Plan(TempDir t)
+    {
+        string input = t.Sub("in");
+        Directory.CreateDirectory(input);
+        for (int i = 0; i < 3; i++) File.WriteAllBytes(Path.Combine(input, $"f{i}.bin"), EncryptedArchives.Content(i));
+        return await new Planning.Planner(new Planning.PlanOptions { Profile = Planning.Profile.ByName("fast"), MemoryBudget = 1L << 30 })
+            .BuildAsync(Planning.Scanner.Scan([input]), Ct);
+    }
+
+    private static Planning.BuildOptions Build(TempDir t, string? password, KdfParameters? kdf = null, List<Planning.BuildProgress>? progress = null) => new()
+    {
+        OutputPath = t.Sub("a.osa"), Password = password, Kdf = kdf ?? EncryptedArchives.Small, MemoryBudget = 1L << 30,
+        Progress = progress is null ? null : p => { lock (progress) progress.Add(p); },
+    };
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("surrogate")]
+    public async Task APasswordThatCannotBeUsedIsRefusedBeforeTheBuildDoesAnything(string which)
+    {
+        using var t = new TempDir();
+        var plan = await Plan(t);
+        var progress = new List<Planning.BuildProgress>();
+        using var seams = new KdfSeams();
+        string password = which == "" ? "" : "a" + "\uD800" + "b";
+        var o = Build(t, password, progress: progress);
+        Assert.Throws<ArgumentException>(() => Planning.ArchiveBuilder.CheckProtection(o));
+        await Assert.ThrowsAsync<ArgumentException>(() => Planning.ArchiveBuilder.BuildAsync(plan, o, Ct));
+        Assert.Empty(progress);
+        Assert.Equal(0, seams.Allocations);
+        Assert.Equal(["in"], Directory.GetFileSystemEntries(t.Path).Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public async Task ProtectionTheWriterRefusesIsRefusedByTheBuildFirst()
+    {
+        using var t = new TempDir();
+        var plan = await Plan(t);
+        var o = Build(t, EncryptedArchives.Password, KdfPresets.Standard) with { MemoryBudget = 512L << 20 };
+        var e = await Assert.ThrowsAsync<KdfMemoryLimitException>(() => Planning.ArchiveBuilder.BuildAsync(plan, o, Ct));
+        Assert.Contains("more than the 512 MiB Osmium may use (Memory limit)", e.Message);
+        Assert.Equal(["in"], Directory.GetFileSystemEntries(t.Path).Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public async Task ABuildDerivesOnceAndHandsItsKeyToTheCaller()
+    {
+        using var t = new TempDir();
+        var plan = await Plan(t);
+        var progress = new List<Planning.BuildProgress>();
+        using var cache = new ArchiveKeyCache();
+        using (var seams = new KdfSeams())
+        {
+            var r = await Planning.ArchiveBuilder.BuildAsync(plan, Build(t, EncryptedArchives.Password, progress: progress) with { KeyCache = cache }, Ct);
+            Assert.Equal(1, seams.Allocations); // the re-read used the writer's key
+            Assert.Equal(1, cache.Count);
+            Assert.Contains(progress, p => p.Phase == "Preparing encryption");
+            Assert.True(File.Exists(r.Path));
+        }
+        // Opening with the cache derives nothing and needs no password.
+        using (var seams = new KdfSeams())
+        {
+            int asked = 0;
+            using var reader = OsaReader.Open(t.Sub("a.osa"), new OsaOpenOptions { Password = () => { asked++; return null; }, KeyCache = cache });
+            Assert.Equal(3, reader.Entries.Count(e => !e.IsDirectory));
+            Assert.Equal((0, 0L), (asked, seams.Allocations));
+        }
+    }
+
+    [Fact]
+    public async Task ABuildWithoutACacheStillDerivesOnce()
+    {
+        using var t = new TempDir();
+        var plan = await Plan(t);
+        using var seams = new KdfSeams();
+        await Planning.ArchiveBuilder.BuildAsync(plan, Build(t, EncryptedArchives.Password), Ct);
+        Assert.Equal(1, seams.Allocations);
+    }
+
+    [Fact]
+    public async Task ACancelledDerivationLeavesNoFile()
+    {
+        using var t = new TempDir();
+        var plan = await Plan(t);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Planning.ArchiveBuilder.BuildAsync(plan, Build(t, EncryptedArchives.Password), cts.Token));
+        Assert.Equal(["in"], Directory.GetFileSystemEntries(t.Path).Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public void AWrongKeyInTheCacheIsAWrongPassword()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), "argon2id");
+        var info = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(path))).Encryption!;
+        using var cache = new ArchiveKeyCache();
+        using (var wrong = ArchiveKey.Derive("another password", info)) cache.Add(info, wrong);
+        Assert.Throws<WrongPasswordException>(() => OsaReader.Open(path, new OsaOpenOptions { Password = () => EncryptedArchives.Password, KeyCache = cache }));
+    }
+
+    [Fact]
+    public void TheCacheKeepsItsOwnCopiesAndZeroesThem()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), "argon2id");
+        var cache = new ArchiveKeyCache();
+        using (var reader = OsaReader.Open(path, new OsaOpenOptions { Password = () => EncryptedArchives.Password, KeyCache = cache })) { }
+        // the reader's key is zeroed, the cache's copy is not
+        var held = ((Dictionary<string, ArchiveKey>)typeof(ArchiveKeyCache).GetField("_keys", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(cache)!).Values.Single();
+        Assert.False(held.IsDisposed);
+        using (OsaReader.Open(path, new OsaOpenOptions { KeyCache = cache })) { }
+        cache.Dispose();
+        Assert.True(held.IsDisposed);
+        var info = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(path))).Encryption!;
+        Assert.False(cache.TryGet(info, out _));
+        Assert.Throws<PasswordRequiredException>(() => OsaReader.Open(path, new OsaOpenOptions { KeyCache = cache }));
+    }
+}
+
 /// <summary>The default protection at its real size: one derivation of 1 GiB, so alone in its collection.</summary>
 [Collection(HeavyKeyDerivation.Name)]
 public class DefaultProtectionTests

@@ -27,6 +27,9 @@ public sealed record OsaOpenOptions
     public CancellationToken Cancellation { get; init; }
     /// <summary>Progress of the key derivation, 0 to 1 ("Checking the password…").</summary>
     public IProgress<double>? KdfProgress { get; init; }
+    /// <summary>Keys derived before for this archive (no password and no derivation are needed when one is here and
+    /// matches the header's verifier); a key this open derives is added.</summary>
+    public ArchiveKeyCache? KeyCache { get; init; }
     /// <summary>Tests: (offset, count) of a read that fails with an I/O error, as a bad sector does.</summary>
     internal Func<long, int, bool>? TestUnreadable { get; init; }
 }
@@ -144,10 +147,19 @@ public sealed class OsaReader : IDisposable
                     Cancellation = options.Cancellation, Progress = options.KdfProgress,
                 };
                 PasswordKdf.Admit(enc.Kdf, run);
-                var pw = options.Password?.Invoke() ?? throw new PasswordRequiredException();
-                PasswordKdf.CheckPasswordText(pw, creating: false);
-                key = ArchiveKey.Derive(pw, enc, run);
-                if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
+                if (options.KeyCache?.TryGet(enc, out var cached) == true)
+                {
+                    key = cached;
+                    if (!key.Matches(enc.Verifier)) throw new WrongPasswordException(); // a wrong key is a wrong password
+                }
+                else
+                {
+                    var pw = options.Password?.Invoke() ?? throw new PasswordRequiredException();
+                    PasswordKdf.CheckPasswordText(pw, creating: false);
+                    key = ArchiveKey.Derive(pw, enc, run);
+                    if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
+                    options.KeyCache?.Add(enc, key);
+                }
             }
             ArchiveIndex index;
             bool usedSpareIndex = false;

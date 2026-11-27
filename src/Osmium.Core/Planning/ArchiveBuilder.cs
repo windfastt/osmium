@@ -3,6 +3,7 @@ using System.IO.Hashing;
 using System.Text;
 using System.Text.Json;
 using Osmium.Core.Container;
+using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Planning;
@@ -29,8 +30,15 @@ public sealed class LocalBlockCompressor : IBlockCompressor
 public sealed record BuildOptions
 {
     public required string OutputPath { get; init; }
+    /// <summary>Null: not encrypted. Empty, or text that cannot be stored: refused before anything else.</summary>
     public string? Password { get; init; }
-    public int KdfIterations { get; init; } = ArchiveKey.DefaultIterations;
+    /// <summary>How the key is derived; null: PBKDF2 with <see cref="KdfIterations"/> when that is set, else the default
+    /// protection (<see cref="KdfPresets.Default"/>).</summary>
+    public KdfParameters? Kdf { get; init; }
+    /// <summary>PBKDF2 iterations, for callers that still choose them (see <see cref="Kdf"/>).</summary>
+    public int? KdfIterations { get; init; }
+    /// <summary>Receives the archive's key, so the caller can open the archive again without deriving it again.</summary>
+    public ArchiveKeyCache? KeyCache { get; init; }
     /// <summary>Decode every block and compare before writing it (strongly recommended).</summary>
     public bool VerifyBlocks { get; init; } = true;
     public bool Overwrite { get; init; }
@@ -55,6 +63,14 @@ public sealed record BuildOptions
     /// <summary>Tests only: called with the path of the finished, not yet checked archive (to change a byte the check
     /// before it takes its place must catch).</summary>
     internal Action<string>? TestBeforeCheck { get; init; }
+
+    /// <summary>Never prints the password.</summary>
+    private bool PrintMembers(StringBuilder b)
+    {
+        b.Append($"OutputPath = {OutputPath}, Encrypted = {Password is not null}, Kdf = {Kdf?.Describe() ?? (KdfIterations is { } n ? $"PBKDF2 x{n}" : "default")}, ");
+        b.Append($"VerifyBlocks = {VerifyBlocks}, Overwrite = {Overwrite}, Threads = {Threads}, MemoryBudget = {MemoryBudget}, SpareCopies = {SpareCopies}");
+        return true;
+    }
 }
 
 public sealed record BuildProgress(string Phase, long BytesIn, long BytesInTotal, long BytesOut, int BlocksDone, int BlocksTotal, string? Detail);
@@ -68,24 +84,47 @@ public sealed record BuildResult(string Path, long InputBytes, long OutputBytes,
 /// <summary>Executes an <see cref="ArchivePlan"/> and writes a verified archive.</summary>
 public static class ArchiveBuilder
 {
+    /// <summary>
+    /// What a build would refuse about its password and protection, without doing anything: an empty password or text
+    /// that cannot be stored, key-derivation settings outside the limits or below the minimum, or more memory than this
+    /// PC has or than <see cref="BuildOptions.MemoryBudget"/>. Callers check this before they scan and plan; the build
+    /// checks it again first.
+    /// </summary>
+    public static void CheckProtection(BuildOptions o) => OsaWriter.CheckProtection(WriterOptions(o, null, CancellationToken.None, null));
+
+    private static OsaWriterOptions WriterOptions(BuildOptions o, ArchivePlan? plan, CancellationToken ct, IProgress<double>? kdfProgress) => new()
+    {
+        Password = o.Password,
+        Kdf = o.Kdf,
+        KdfIterations = o.KdfIterations,
+        KdfMemoryLimit = o.MemoryBudget,
+        Cancellation = ct,
+        KdfProgress = kdfProgress,
+        Experimental = plan?.UsesExperimental ?? false,
+        IndexPipeline = plan is not null && plan.Profile.Level >= ProfileLevel.Ultra ? "lzma(dict=16M)" : "zstd(level=19)",
+        SpareCopies = o.SpareCopies,
+        SpareThreshold = o.SpareThreshold,
+        TestFixedArchiveId = o.TestFixedArchiveId,
+        TestFixedSalt = o.TestFixedSalt,
+        TestFixedSaltAcknowledged = o.TestFixedSaltAcknowledged,
+    };
+
     public static async Task<BuildResult> BuildAsync(ArchivePlan plan, BuildOptions o, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
+        CheckProtection(o); // before anything is read or written
         if (File.Exists(o.OutputPath) && !o.Overwrite)
             throw new IOException($"'{o.OutputPath}' already exists (use overwrite to replace it).");
 
-        using var writer = new OsaWriter(o.OutputPath, new OsaWriterOptions
-        {
-            Password = o.Password,
-            KdfIterations = o.KdfIterations,
-            Experimental = plan.UsesExperimental,
-            IndexPipeline = plan.Profile.Level >= ProfileLevel.Ultra ? "lzma(dict=16M)" : "zstd(level=19)",
-            SpareCopies = o.SpareCopies,
-            SpareThreshold = o.SpareThreshold,
-            TestFixedArchiveId = o.TestFixedArchiveId,
-            TestFixedSalt = o.TestFixedSalt,
-            TestFixedSaltAcknowledged = o.TestFixedSaltAcknowledged,
-        });
+        // The key is derived here, and its work area freed, before any block is compressed.
+        var kdfProgress = o.Progress is { } report
+            ? new SyncProgress(f => report(new BuildProgress("Preparing encryption", 0, plan.TotalInput, 0, 0, plan.Blocks.Count, $"{f:P0}")))
+            : null;
+        using var writer = new OsaWriter(o.OutputPath, WriterOptions(o, plan, ct, kdfProgress));
+        // The archive is read back below with the writer's key, so that a build derives once.
+        using var ownCache = o.KeyCache is null && writer.Encrypted ? new ArchiveKeyCache() : null;
+        var keyCache = o.KeyCache ?? ownCache;
+        if (writer.Encrypted) keyCache!.Add(writer.Header.Encryption!, writer.Key!);
 
         var gate = new MemoryGate(o.MemoryBudget);
         var throttle = new SemaphoreSlim(Math.Max(1, o.Threads));
@@ -275,7 +314,10 @@ public static class ArchiveBuilder
         Report("Checking archive");
         double decodeSec;
         long maxMem;
-        using (var check = OsaReader.Open(writer.TempPath, () => o.Password))
+        using (var check = OsaReader.Open(writer.TempPath, new OsaOpenOptions
+               {
+                   Password = () => o.Password, KeyCache = keyCache, KdfMemoryLimit = o.MemoryBudget, Cancellation = ct,
+               }))
         {
             for (int i = 0; i < check.Blocks.Count; i++) check.ReadBody(i);
             if (check.Entries.Count != entries.Count) throw new InvalidOperationException("Index re-read mismatch.");
@@ -322,4 +364,10 @@ public static class ArchiveBuilder
             }
         }
     }
+}
+
+/// <summary>Reports on the thread that reports (<see cref="Progress{T}"/> would post to a captured context).</summary>
+internal sealed class SyncProgress(Action<double> report) : IProgress<double>
+{
+    public void Report(double value) => report(value);
 }

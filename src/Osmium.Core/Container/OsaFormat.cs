@@ -289,7 +289,7 @@ public sealed class ArchiveKey : IDisposable
 
     /// <summary>PBKDF2 with a bare salt and iteration count, without the reader's minimum (for callers that hold no
     /// header record).</summary>
-    public static ArchiveKey Derive(string password, byte[] salt, int iterations) =>
+    internal static ArchiveKey Derive(string password, byte[] salt, int iterations) =>
         Derive(password, new EncryptionInfo(iterations, salt, new byte[EncryptionRecord.VerifierBytes]), new KdfRun { Policy = ProtectionPolicy.AllowWeak });
 
     /// <summary>Kenc = HKDF-Expand(SHA-256, master, 32, "osmium/v1/aead"); verifier = HKDF-Expand(SHA-256, master, 16,

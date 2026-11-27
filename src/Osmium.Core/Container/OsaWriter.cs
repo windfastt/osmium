@@ -159,9 +159,9 @@ public sealed class OsaWriter : IDisposable
     /// <summary>Frames sealed so far (tests).</summary>
     internal int Seals => Volatile.Read(ref _seals);
 
-    /// <summary>A copy of the archive's key, for reading the archive again without a second derivation (the caller
-    /// disposes it).</summary>
-    internal ArchiveKey? CopyKey() => _key?.Copy();
+    /// <summary>The archive's key (the writer disposes it), for reading the archive again without a second derivation:
+    /// <see cref="ArchiveKeyCache.Add"/> keeps a copy of its own.</summary>
+    internal ArchiveKey? Key => _key;
 
     /// <summary>True once <see cref="Finish"/> wrote spare copies of the index frame and the header
     /// (<see cref="OsaWriterOptions.SpareCopies"/>; FORMAT §4.1).</summary>
