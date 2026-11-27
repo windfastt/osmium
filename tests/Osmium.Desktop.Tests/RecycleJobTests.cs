@@ -555,8 +555,9 @@ public sealed class RecycleJobTests : IDisposable
         Assert.True(File.Exists(_notes));
         Assert.Empty(_bin.Moved);
         var log = jm.GetLog(job.Id);
-        Assert.Contains($"kept {_photos}: the job was canceled", log);
-        Assert.Contains($"kept {_notes}: the job was canceled", log);
+        // The check itself stopped for the cancel: the job handed it its cancellation.
+        Assert.Contains($"kept {_photos}: checked again just before it moved: the job was canceled", log);
+        Assert.Contains($"kept {_notes}: the job was canceled", log); // not reached once the job was canceled
     }
 
     [Fact]
@@ -605,10 +606,9 @@ public sealed class RecycleJobTests : IDisposable
                 if (ct.IsCancellationRequested) { outcomes.Add(new RecycleOutcome(p, false, "the job was canceled")); continue; }
                 if (Refuse(p) is { } why) { outcomes.Add(new RecycleOutcome(p, false, why)); continue; }
                 BeforeMove(p);
-                string? changed = recheck(p);
-                // As the system's recycler does: a cancel while the item was checked keeps it too.
-                if (ct.IsCancellationRequested) { outcomes.Add(new RecycleOutcome(p, false, "the job was canceled")); continue; }
-                if (changed is not null) { outcomes.Add(new RecycleOutcome(p, false, "checked again just before it moved: " + changed)); continue; }
+                // Only the last check itself keeps an item here: what the system's recycler adds to it is tested on
+                // RecycleGate, and these tests check what the job hands over to that check.
+                if (recheck(p) is { } changed) { outcomes.Add(new RecycleOutcome(p, false, "checked again just before it moved: " + changed)); continue; }
                 var lie = Lies(p);
                 if (lie == Lie.ConfirmsButDoesNotMove) { outcomes.Add(new RecycleOutcome(p, true)); continue; }
                 string target = Move(p);
