@@ -74,30 +74,89 @@ public class ReaderPolicyTests
     }
 
     [Theory]
-    [InlineData("argon2id")]
-    [InlineData("none")]
-    public void AFooterThatClaimsAHugeFileListIsRefusedBeforeItIsRead(string kdf)
+    // more than any frame may hold: refused before the header is known, in every archive
+    [InlineData("argon2id", 3L << 30, OsaReader.IndexTooLargeForAnyArchive)]
+    [InlineData("pbkdf2", 3L << 30, OsaReader.IndexTooLargeForAnyArchive)]
+    [InlineData("none", 3L << 30, OsaReader.IndexTooLargeForAnyArchive)]
+    // more than 256 MiB: the cap of an Argon2id archive; other archives keep the bound of any frame (this file is too
+    // short for the length the footer claims, which is refused before anything is read too)
+    [InlineData("argon2id", 300L << 20, OsaReader.IndexTooLarge)]
+    [InlineData("pbkdf2", 300L << 20, "Index location is invalid (truncated or appended file?).")]
+    [InlineData("none", 300L << 20, "Index location is invalid (truncated or appended file?).")]
+    public void AFooterThatClaimsAHugeFileListIsRefusedBeforeItIsRead(string kdf, long claimed, string message)
     {
         using var t = new TempDir();
         string path = kdf == "none" ? WriterSafetyTests.Write(t.Sub("a.osa"), new OsaWriterOptions()) : EncryptedArchives.Write(t.Sub("a.osa"), kdf);
-        SetFooter(path, 3L << 30);
+        SetFooter(path, claimed);
         int asked = 0;
         long before = GC.GetAllocatedBytesForCurrentThread();
         var e = Assert.Throws<CorruptDataException>(() => OsaReader.Open(path, new OsaOpenOptions { Password = () => { asked++; return EncryptedArchives.Password; } }));
         Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1 << 20);
-        Assert.Equal("The file list of this archive is larger than Osmium accepts (more than 256 MiB).", e.Message);
+        Assert.Equal(message, e.Message);
         Assert.Equal(0, asked);
+    }
+
+    /// <summary>Lowers the cap of an Argon2id archive's file list below the small test archives', until disposed.</summary>
+    private static IDisposable IndexFrameCap(long bytes) => new IndexFrameCapScope(bytes);
+
+    private sealed class IndexFrameCapScope : IDisposable
+    {
+        public IndexFrameCapScope(long bytes) => Osa.TestIndexFrameCap = bytes;
+        public void Dispose() => Osa.TestIndexFrameCap = null;
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("pbkdf2")]
+    public void OnlyTheFileListOfAnArgon2idArchiveIsCapped(string kdf)
+    {
+        // Archives that are not encrypted with Argon2id (all those of Osmium 0.1.x among them) open, list, test and
+        // salvage with their names whatever the size of their file list, up to the bound of any frame.
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), kdf == "none" ? new OsaWriterOptions { SpareCopies = SpareCopyPolicy.Never } : Options(kdf), 3000, 3000);
+        long indexLength;
+        using (var fs = File.OpenRead(path)) indexLength = ArchiveFooter.Read(fs).IndexLength;
+        using var cap = IndexFrameCap(indexLength - 1);
+        using (var r = OsaReader.Open(path, () => Pw))
+        {
+            Assert.Equal(4, r.Entries.Count);
+            Assert.Equal((3, 0), (Extractor.Test(r, null, Ct).FilesOk, 0));
+        }
+        using (var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw }, Ct)) Assert.Equal(4, s.Items.Count);
+        var salvaged = SalvageKdfTests.Salvage(path, t.Sub("out"), () => Pw);
+        Assert.True(salvaged.IndexRecovered);
+        Assert.Equal(3, salvaged.FilesRecovered);
+        Assert.True(File.Exists(Path.Combine(t.Sub("out"), "docs", "empty.txt")));
+    }
+
+    [Fact]
+    public void TheFileListOfAnArgon2idArchiveOverTheCapIsRefusedBeforeItIsRead()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options("argon2id"), 3000, 3000);
+        long indexLength;
+        using (var fs = File.OpenRead(path)) indexLength = ArchiveFooter.Read(fs).IndexLength;
+        using var cap = IndexFrameCap(indexLength - 1);
+        int asked = 0;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var e = Assert.Throws<CorruptDataException>(() => OsaReader.Open(path, () => { asked++; return Pw; }));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1 << 20);
+        Assert.Equal((OsaReader.IndexTooLarge, 0), (e.Message, asked));
+        // salvage does not read it either, and gives the blocks without their names
+        var salvaged = SalvageKdfTests.Salvage(path, t.Sub("out"), () => Pw);
+        Assert.False(salvaged.IndexRecovered);
+        Assert.Contains(salvaged.Frames, f => f.IsIndex && f.Problem!.Contains("larger than the 256 MiB", StringComparison.Ordinal));
     }
 
     [Fact]
     public void AHugeFileListInASparseFileIsRefusedToo()
     {
-        if (!OperatingSystem.IsLinux()) Assert.Skip("Needs a sparse file of 3.1 GiB, which this test makes on Linux only.");
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Needs a sparse file of 310 MiB, which this test makes on Linux only.");
         using var t = new TempDir();
         var header = File.ReadAllBytes(EncryptedArchives.Write(t.Sub("a.osa"), "argon2id")).AsSpan(0, 200).ToArray();
         var h = ArchiveHeader.Read(new MemoryStream(header));
         string path = t.Sub("sparse.osa");
-        long length = (31L << 30) / 10, indexLength = 3L << 30;
+        long length = 310L << 20, indexLength = 300L << 20; // within the bound of any frame, over the cap of Argon2id
         using (var fs = new FileStream(path, FileMode.CreateNew))
         {
             fs.Write(h.Raw);
@@ -144,6 +203,13 @@ public class ReaderPolicyTests
             new OsaWriterOptions { Password = EncryptedArchives.Password, Kdf = EncryptedArchives.Small, MaxIndexFrame = 4 << 10 }, blocks: 200, size: 1));
         Assert.Equal("The file list of this archive is too large (more than 4 KiB compressed).", e.Message);
         Assert.Empty(Directory.GetFileSystemEntries(t.Path));
+        // The cap is that of Argon2id archives: PBKDF2 and unencrypted archives keep the bound of any frame.
+        foreach (var options in new[] { new OsaWriterOptions { Password = EncryptedArchives.Password, Kdf = KdfParameters.Pbkdf2(100_000) }, new OsaWriterOptions() })
+        {
+            string path = WriterSafetyTests.Write(t.Sub($"{Guid.NewGuid():N}.osa"), options with { MaxIndexFrame = 4 << 10 }, blocks: 200, size: 1);
+            using var fs = File.OpenRead(path);
+            Assert.True(ArchiveFooter.Read(fs).IndexLength > 4 << 10);
+        }
     }
 
     [Fact]
@@ -376,7 +442,7 @@ public class ReaderPolicyTests
         string huge = Variant(t, path, "huge", b =>
         {
             var footer = b.AsSpan(b.Length - Osa.FooterSize);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(footer[8..], 1L << 40);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(footer[8..], 300L << 20);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(footer[24..], Osa.Crc(footer[..24]));
         });
         Assert.Equal(OsaReader.IndexTooLarge, Assert.Throws<CorruptDataException>(() => OsaReader.Peek(huge)).Message);

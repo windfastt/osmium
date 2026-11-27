@@ -54,7 +54,8 @@ public sealed record OsaWriterOptions
     internal ushort HeaderMinor { get; init; } = Osa.Minor;
     /// <summary>Tests: called with the number of earlier writes before each write to the file (a test makes one fail).</summary>
     internal Action<int>? TestBeforeWrite { get; init; }
-    /// <summary>The largest index frame this writer writes (<see cref="Osa.MaxIndexFrameBytes"/>; tests lower it).</summary>
+    /// <summary>The largest index frame this writer writes in an Argon2id archive (<see cref="Osa.MaxIndexFrameBytes"/>;
+    /// tests lower it). Other archives keep the bound of any frame.</summary>
     internal long MaxIndexFrame { get; init; } = Osa.MaxIndexFrameBytes;
     /// <summary>Tests only: header records after the ones Osmium writes, as other software might add them (the index is
     /// sealed over them, so only the reader's own rules can refuse them).</summary>
@@ -329,9 +330,11 @@ public sealed class OsaWriter : IDisposable
             (prefix, payload) = Encode(false);
             frameLength = Osa.FrameHeaderSize + PlainLength(prefix, payload) + (_key is null ? 0 : 16);
         }
-        // Readers refuse a larger index frame before they read it; nothing is sealed or written then.
-        if (frameLength > _options.MaxIndexFrame)
-            throw new IOException($"The file list of this archive is too large (more than {SizeText.Format(_options.MaxIndexFrame)} compressed).");
+        // Readers refuse a larger index frame before they read it (256 MiB with Argon2id, the bound of any frame
+        // otherwise); nothing is sealed or written then.
+        long maxIndexFrame = PadsIndex ? _options.MaxIndexFrame : Osa.MaxFrameBytes;
+        if (frameLength > maxIndexFrame)
+            throw new IOException($"The file list of this archive is too large (more than {SizeText.Format(maxIndexFrame)} compressed).");
         // Sealed once: the spare copy repeats the same ciphertext, so no plaintext is encrypted twice.
         var (fh, sealedBody, bodyLen) = BuildFrame(Osa.IndexFrameNumber, Osa.FrameFlagIndex, prefix, payload, PlainLength(prefix, payload));
         void WriteIndexFrame()

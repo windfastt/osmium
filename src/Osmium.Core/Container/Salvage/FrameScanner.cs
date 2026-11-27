@@ -407,9 +407,10 @@ internal sealed class FrameScanner
             f.Reject(SalvageFrameState.Damaged, "invalid frame length");
             return;
         }
-        if (f.IsIndex && f.FrameLength > Osa.MaxIndexFrameBytes)
+        // The cap of the file list of an Argon2id archive (other archives keep the bound of any frame, checked above).
+        if (f.IsIndex && f.Encrypted && Key is { PadsIndex: true } && f.FrameLength > Osa.Argon2idIndexFrameCap)
         {
-            f.Reject(SalvageFrameState.Damaged, "larger than the 256 MiB a file list may have");
+            f.Reject(SalvageFrameState.Damaged, "larger than the 256 MiB the file list of an Argon2id archive may have");
             return;
         }
         long available = _src.Length - f.Offset - Osa.FrameHeaderSize;

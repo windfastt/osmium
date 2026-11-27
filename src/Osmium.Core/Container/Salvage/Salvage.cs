@@ -219,7 +219,7 @@ internal sealed class SalvageRun : IDisposable
     /// </summary>
     private List<(long Start, long End)>? PlaintextIndexBlocks((long Offset, long Length, bool Encrypted) end)
     {
-        if (end.Encrypted || end.Length > Osa.MaxIndexFrameBytes) return null;
+        if (end.Encrypted || end.Length > Osa.MaxFrameBytes) return null;
         try
         {
             var body = _src.Read(end.Offset + Osa.FrameHeaderSize, (int)(end.Length - Osa.FrameHeaderSize));

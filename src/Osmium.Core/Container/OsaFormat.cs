@@ -19,11 +19,28 @@ public static class Osa
     public const ushort Major = 1, Minor = 1;
     public const int FrameHeaderSize = 28;
     public const int FooterSize = 32;
-    /// <summary>The largest index frame (frame header, padded body and tag) a reader reads or a writer writes: it is
-    /// read whole before it can be authenticated.</summary>
+    /// <summary>The largest index frame (frame header, padded body and tag) of an archive encrypted with Argon2id (kdf 2),
+    /// which a reader reads whole before it can be authenticated. Every other archive (unencrypted, PBKDF2, every archive
+    /// of Osmium 0.1.x) keeps the bound of any frame, <see cref="MaxFrameBytes"/>, as those versions read them.</summary>
     public const long MaxIndexFrameBytes = 256L << 20;
     /// <summary>The largest frame body a reader reads: twice the largest block, and what one array can hold.</summary>
     public static long MaxBlockBodyBytes => Math.Min(2 * BlockLimits.MaxRawSize, Array.MaxLength);
+    /// <summary>The largest frame, header included, of any archive: what a reader checks before it knows the header.</summary>
+    public static long MaxFrameBytes => FrameHeaderSize + MaxBlockBodyBytes;
+
+    private static readonly AsyncLocal<long?> s_testIndexFrameCap = new();
+
+    /// <summary>Tests: a lower <see cref="MaxIndexFrameBytes"/> for the current flow of execution (null: none).</summary>
+    internal static long? TestIndexFrameCap { get => s_testIndexFrameCap.Value; set => s_testIndexFrameCap.Value = value; }
+
+    /// <summary><see cref="MaxIndexFrameBytes"/>, or what a test lowered it to.</summary>
+    internal static long Argon2idIndexFrameCap => TestIndexFrameCap ?? MaxIndexFrameBytes;
+
+    /// <summary>The largest index frame (header included) a reader accepts in an archive with this header:
+    /// <see cref="Argon2idIndexFrameCap"/> when it is encrypted with Argon2id, which this version is the first to write
+    /// (padded blocks exist only there), and <see cref="MaxFrameBytes"/> for every other archive.</summary>
+    internal static long MaxIndexFrameFor(ArchiveHeader header) =>
+        header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id ? Argon2idIndexFrameCap : MaxFrameBytes;
     public const ulong IndexFrameNumber = ulong.MaxValue;
     public const string Extension = ".osa";
 

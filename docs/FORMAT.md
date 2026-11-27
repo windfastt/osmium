@@ -273,7 +273,10 @@ this format known, except the password.
    `t·m ≤ 33 554 432`; PBKDF2 `1 ≤ iterations ≤ 20 000 000`. Outside them the archive is refused as damaged. Within
    them a reader asks before it uses more memory than its configured memory limit, as for `decodeMemKiB`, and before
    it does more work than the strongest preset (`t·m > 12 582 912`). All of these checks come before the password is
-   asked for. The index frame is at most 256 MiB.
+   asked for. In a kdf 2 archive the index frame, which a reader reads whole before it can be authenticated, is at
+   most 256 MiB, and a reader refuses a larger one before it reads it. Every other archive (unencrypted, kdf 1, and
+   every archive of Osmium 0.1.x) keeps the bound of any frame: a body of at most 2 GiB, which a reader also checks
+   before it knows the header.
 8. **Minimum protection.** Osmium writes at least Argon2id with m = 256 MiB and t·m = 768 MiB-passes, or PBKDF2 with
    100 000 iterations. Below that a reader asks before it opens an archive (the command line needs
    `--allow-weak-protection`): such an archive comes from Osmium 0.1's command line with a low `--kdf-iterations`, or

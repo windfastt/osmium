@@ -265,9 +265,11 @@ public sealed class OsaReader : IDisposable
             throw new CorruptDataException(EndDamaged);
         }
         var ft = footer.Value;
-        CheckIndexLength(ft);
+        // Before the header is known, the bound of any frame; once it is, the cap of its kind (256 MiB with Argon2id).
+        if ((ulong)ft.IndexLength > (ulong)Osa.MaxFrameBytes) throw new CorruptDataException(IndexTooLargeForAnyArchive);
         bool usedSpareHeader = header is null;
         header ??= HeaderFromCopy(handle, ft, length) ?? Rethrow<ArchiveHeader>(headerError!);
+        CheckIndexLength(ft, header);
         if (ft.IdPrefix != BinaryPrimitives.ReadUInt64LittleEndian(header.ArchiveId))
             throw new CorruptDataException("Footer does not belong to this archive.");
         if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
@@ -325,6 +327,7 @@ public sealed class OsaReader : IDisposable
     }
 
     internal const string IndexTooLarge = "The file list of this archive is larger than Osmium accepts (more than 256 MiB).";
+    internal const string IndexTooLargeForAnyArchive = "The file list of this archive is larger than Osmium accepts (more than 2 GiB).";
     internal const string IgnoredUnprotectedData = "This archive holds data outside its protected parts; Osmium ignored it.";
     internal const string UsedTheHeaderThatAuthenticates =
         "The header of this encrypted archive and its spare copy differ; Osmium used the one the file list authenticates.";
@@ -460,11 +463,12 @@ public sealed class OsaReader : IDisposable
     /// </summary>
     internal static uint UnknownFrameFlags(uint flags) => flags & ~(Osa.FrameFlagEncrypted | Osa.FrameFlagIndex);
 
-    /// <summary>An index frame longer than <see cref="Osa.MaxIndexFrameBytes"/> is refused before it is allocated or read
-    /// (the footer that says so checks out, so this is not damage).</summary>
-    private static void CheckIndexLength(ArchiveFooter footer)
+    /// <summary>An index frame longer than its archive's kind allows (<see cref="Osa.MaxIndexFrameFor"/>) is refused before
+    /// it is allocated or read (the footer that says so checks out, so this is not damage).</summary>
+    private static void CheckIndexLength(ArchiveFooter footer, ArchiveHeader header)
     {
-        if ((ulong)footer.IndexLength > Osa.MaxIndexFrameBytes) throw new CorruptDataException(IndexTooLarge);
+        if ((ulong)footer.IndexLength > (ulong)Osa.MaxIndexFrameFor(header))
+            throw new CorruptDataException(header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id ? IndexTooLarge : IndexTooLargeForAnyArchive);
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
@@ -693,7 +697,8 @@ public sealed class OsaReader : IDisposable
     private static BlockBody ReadFrame(ArchiveFile h, long offset, long frameLength, ulong expectedFrame,
         ArchiveHeader header, ArchiveKey? key, MethodRegistry reg, bool isIndex)
     {
-        if (frameLength < Osa.FrameHeaderSize || frameLength - Osa.FrameHeaderSize > (isIndex ? Osa.MaxIndexFrameBytes : Osa.MaxBlockBodyBytes))
+        if (frameLength < Osa.FrameHeaderSize || frameLength - Osa.FrameHeaderSize > Osa.MaxBlockBodyBytes
+            || (isIndex && frameLength > Osa.MaxIndexFrameFor(header)))
             throw new CorruptDataException("Invalid frame length.");
         var fh = new byte[Osa.FrameHeaderSize];
         if (h.Read(fh, offset) != fh.Length) throw new CorruptDataException("Unexpected end of archive.");
