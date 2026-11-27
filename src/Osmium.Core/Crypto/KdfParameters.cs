@@ -72,6 +72,15 @@ public sealed record KdfParameters
         _ => Describe(),
     };
 
+    /// <summary>Where the key comes from, as an archive's details say it: "Argon2id (1 GiB, 2 passes, 4 lanes)" or
+    /// "PBKDF2-SHA512 (600,000 iterations; Osmium 0.1 can open it)".</summary>
+    public string KeyText() => Algorithm switch
+    {
+        KdfAlgorithm.Pbkdf2Sha512 => $"PBKDF2-SHA512 ({Count(Iterations, "iteration")}; Osmium 0.1 can open it)",
+        KdfAlgorithm.Argon2id => $"Argon2id ({SizeText.ExactKiB(MemoryKiB)}, {Count(TimeCost, "pass", "passes")}, {Count(Lanes, "lane")})",
+        _ => Describe(),
+    };
+
     public override string ToString() => Describe();
 
     /// <summary>

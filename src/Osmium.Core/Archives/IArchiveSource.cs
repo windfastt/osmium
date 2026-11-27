@@ -53,6 +53,12 @@ public sealed record ArchiveOpenOptions
     /// <summary>False: a stream format (TAR family, single compressed file) may skip the full listing in Open;
     /// <see cref="IArchiveSource.ItemsComplete"/> is then false and Extract or Test lists as it goes.</summary>
     public bool ListEagerly { get; init; } = true;
+    /// <summary>Open an encrypted .osa archive that is protected more weakly than any Osmium preset, or that holds
+    /// data outside its protected parts, after the user agreed (the app's question; the command line's
+    /// --allow-weak-protection). Without it Open refuses such an archive with WeakProtectionException (before the
+    /// password is asked for) or UnprotectedDataException, before anything is listed or written. It never opens an
+    /// archive that only claims to be encrypted (ModifiedArchiveException). Other formats ignore it.</summary>
+    public bool AllowWeakProtection { get; init; }
 }
 
 /// <summary>What to extract and how. Every filter applies together: an entry is extracted when it is selected (by

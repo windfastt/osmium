@@ -1,4 +1,5 @@
 using Osmium.Core.Container;
+using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Archives;
@@ -44,11 +45,22 @@ public sealed class OsaArchiveSource : IArchiveSource
     public IReadOnlyList<ArchiveDetail> Details { get; }
     public IReadOnlyList<string> Warnings => Reader.Warnings;
 
-    /// <summary>Opens an .osa archive (<see cref="ArchiveSources.Open"/> does this for .osa files).</summary>
+    /// <summary>
+    /// Opens an .osa archive (<see cref="ArchiveSources.Open"/> does this for .osa files). The key derivation of an
+    /// encrypted archive may use the memory limit of <see cref="ArchiveOpenOptions.Limits"/>; above it, or above the work
+    /// of the strongest preset, it throws <see cref="KdfMemoryLimitException"/> or <see cref="KdfCostException"/>
+    /// before the password is asked for (the caller may ask the user and open again with a higher memory limit).
+    /// </summary>
     public static OsaArchiveSource Open(string path, ArchiveOpenOptions options, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var reader = OsaReader.Open(path, options.Password);
+        var reader = OsaReader.Open(path, new OsaOpenOptions
+        {
+            Password = options.Password,
+            KdfMemoryLimit = options.Limits.MemoryBudgetBytes,
+            Protection = options.AllowWeakProtection ? ProtectionPolicy.AllowWeak : ProtectionPolicy.Default,
+            Cancellation = ct,
+        });
         try
         {
             CheckEntries(reader.Entries, options.Limits);
@@ -191,6 +203,10 @@ public sealed class OsaArchiveSource : IArchiveSource
         new("Extraction", $"~{Duration(TimeSpan.FromSeconds(r.EstimatedDecodeSeconds))} single-core"),
         new("Memory per block", $"up to {Bytes(r.MaxBlockDecodeMemory)}"),
         new("Encrypted", r.Header.Encrypted ? "yes" : "no"),
+        // An open source has checked the password and authenticated the file list.
+        .. r.Header.Encryption is { } e
+            ? new ArchiveDetail[] { new("Encryption", "AES-256-GCM, key from " + e.Kdf.KeyText()), new("Password", "verified") }
+            : [],
         new("Experimental features", r.Header.Experimental ? "yes" : "no"),
     ];
 
