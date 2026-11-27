@@ -81,6 +81,32 @@ public class ArchiveTests
         AssertTreesEqual(t.Sub("in"), t.Sub("out/in"));
     }
 
+    [Theory]
+    [InlineData("insane", null)]      // chunk dedup is Insane's default
+    [InlineData("balanced", "chunks")]
+    public async Task ChunkDedupArchivesFilesThatRepeatAChunk(string profile, string? dedup)
+    {
+        // A file of zeros is one chunk over and over, and a block of random data written three times repeats its chunks.
+        // Each repeated chunk is stored once, and every file still adds up to its own size.
+        using var t = new TempDir();
+        var dir = t.Sub("in");
+        Directory.CreateDirectory(dir);
+        File.WriteAllBytes(System.IO.Path.Combine(dir, "zeros.img"), new byte[1 << 20]);
+        var block = new byte[1 << 20];
+        new Random(7).NextBytes(block);
+        File.WriteAllBytes(System.IO.Path.Combine(dir, "thrice.bin"), [.. block, .. block, .. block]);
+        var mode = dedup is null ? (DedupMode?)null : Enum.Parse<DedupMode>(dedup, true);
+        var r = await Compress(dir, t.Sub("a.osa"), profile, dedup: mode);
+        using var reader = OsaReader.Open(r.Path);
+        var test = Extractor.Test(reader, null, Ct);
+        Assert.Equal(0, test.FilesFailed);
+        Assert.Empty(test.Errors);
+        Assert.True(reader.TotalStoredRaw < 2L << 20, $"{reader.TotalStoredRaw:N0} bytes stored for 4 MiB of input");
+        var res = Extractor.Extract(reader, t.Sub("out"), null, null, null, Ct);
+        Assert.Empty(res.Errors);
+        AssertTreesEqual(dir, System.IO.Path.Combine(t.Sub("out"), "in"));
+    }
+
     [Fact]
     public async Task ChunkDedupStoresDuplicateContentOnce()
     {

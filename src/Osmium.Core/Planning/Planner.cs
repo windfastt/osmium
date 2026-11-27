@@ -280,7 +280,8 @@ public sealed class Planner(PlanOptions o)
         foreach (int i in order)
         {
             var f = plan.Files[i];
-            var own = f.Units.Where(u => plan.Units[u].File == i).ToList();
+            // A chunk can repeat inside a file (a run of zeros, say): its unit is placed once, at its first occurrence.
+            var own = f.Units.Where(u => plan.Units[u].File == i).Distinct().ToList();
             if (own.Count == 0) continue;
             string solid = f.Rules.Solid;
             string key = f.Rules.Pipeline is not null ? $"F:{f.Rules.Pipeline}|{solid}|{f.Rules.Key}"
