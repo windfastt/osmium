@@ -50,6 +50,12 @@ public sealed class OsaReader : IDisposable
     public string Path { get; }
     public ArchiveHeader Header { get; }
     public ArchiveIndex Index { get; }
+    /// <summary>
+    /// What made the archive, e.g. "Osmium 0.2.0": from the file list (since 0.2.0 every archive has it there, and an
+    /// encrypted one only there, so that its release is not readable without the password), else from the header's
+    /// Creator record (earlier archives). Null when neither has one.
+    /// </summary>
+    public string? Creator => Index.MetaString(ArchiveIndex.CreatorKey) ?? Header.Creator;
     public long FileLength { get; }
     public IReadOnlyList<ArchiveEntry> Entries => Index.Entries;
     public IReadOnlyList<BlockInfo> Blocks => Index.Blocks;

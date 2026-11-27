@@ -22,8 +22,10 @@ public class TailLayoutGoldenTests
     [Theory]
     [InlineData(false, 55, 6186, 6186, 4096, "4F484452000000003700000000000000A90F00000000000000000000481A4374",
         "3829CE558520D01DCC5413CF51E4D69C934B93291E3E0712A509EF8F0A55729C")]
-    [InlineData(true, 109, 6272, 6272, 4096, "4F484452000000006D00000000000000730F00000000000000000000C86CE340",
-        "EE711FDE1BBD33F74B1DDD8B2EB455B9B0C539ED0230DA076308E195C5601B09")]
+    // The encrypted header has no Creator record (the creator is in the encrypted file list): 15 bytes fewer than the
+    // unencrypted one would have. Readers take headers with and without it.
+    [InlineData(true, 94, 6257, 6257, 4096, "4F484452000000005E00000000000000820F00000000000000000000577858CA",
+        "A7E20145590165FB1CFCCE59670139FC124B374233D1D4A38BCD13740C73BE3E")]
     public void TheTailOfASmallArchiveIsPinned(bool encrypted, long headerLength, long blocksEnd, long spareOffset, long headerCopyLength,
         string trailerHex, string headerCopySha256)
     {

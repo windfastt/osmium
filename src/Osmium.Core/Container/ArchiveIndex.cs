@@ -46,6 +46,9 @@ public sealed class ArchiveIndex
     public const int Version = 1;
     /// <summary>Metadata key of container 1.1: the offset of the spare copy of the index frame (<see cref="SpareCopies"/>).</summary>
     public const string SparesKey = "spares";
+    /// <summary>Metadata key: what made the archive (<see cref="OsaWriterOptions.Creator"/>), written by the writer in
+    /// every archive since 0.2.0; encrypted archives keep it only here (FORMAT §5).</summary>
+    public const string CreatorKey = "creator";
     public const FileAttributes StoredAttributes = (FileAttributes)0x2027;
 
     public List<BlockInfo> Blocks { get; } = [];

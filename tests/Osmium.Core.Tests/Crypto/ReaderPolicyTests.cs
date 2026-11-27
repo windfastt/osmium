@@ -341,6 +341,66 @@ public class ReaderPolicyTests
         }
     }
 
+    // ------------------------------------------------------------------ item 7: no product version in the clear
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void AnEncryptedArchiveKeepsItsCreatorInsideItsEncryptedFileList(string kdf)
+    {
+        using var t = new TempDir();
+        string creator = new OsaWriterOptions().Creator; // "Osmium 0.2.0" and the like
+        Assert.StartsWith("Osmium ", creator);
+        foreach (var spares in new[] { SpareCopyPolicy.Never, SpareCopyPolicy.Always })
+        {
+            string path = EncryptedArchives.WriteWithFolder(t.Sub($"a-{spares}.osa"), Options(kdf, spares), 3000, 3000);
+            var b = File.ReadAllBytes(path);
+            Assert.Equal(-1, b.AsSpan().IndexOf("Osmium"u8)); // the magic is "OSMA": the product's name is nowhere, nor its version
+            Assert.Equal(-1, b.AsSpan().IndexOf(System.Text.Encoding.UTF8.GetBytes(creator["Osmium ".Length..])));
+            using var r = OsaReader.Open(path, () => Pw);
+            Assert.Null(r.Header.Creator);
+            Assert.Equal(creator, r.Creator);
+            using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw }, Ct);
+            Assert.Equal(creator, Detail(s, "Created by"));
+        }
+    }
+
+    [Fact]
+    public void AnUnencryptedArchiveHasItsCreatorInItsHeaderAndItsFileList()
+    {
+        using var t = new TempDir();
+        const string creator = "Osmium 9.8.7";
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions { Creator = creator }, 3000);
+        using (var r = OsaReader.Open(path))
+        {
+            Assert.Equal(creator, r.Header.Creator); // Osmium 0.1.x shows it
+            Assert.Equal(creator, r.Index.MetaString("creator"));
+            Assert.Equal(creator, r.Creator);
+        }
+        // The writer's creator is the only one: a caller's "creator" metadata does not replace it.
+        string other = t.Sub("other.osa");
+        using (var w = new OsaWriter(other, new OsaWriterOptions { Creator = creator }))
+        {
+            w.Finish([], new Dictionary<string, byte[]> { ["creator"] = "someone else"u8.ToArray() });
+            w.Commit(overwrite: true);
+        }
+        using (var r = OsaReader.Open(other)) Assert.Equal(creator, r.Creator);
+    }
+
+    [Fact]
+    public void AnEarlierEncryptedArchiveShowsTheCreatorInItsHeader()
+    {
+        using var t = new TempDir();
+        string path = t.Sub("kept.osa");
+        File.WriteAllBytes(path, Convert.FromBase64String(KdfArchiveTests.KeptPbkdf2Archive));
+        using (var r = OsaReader.Open(path, () => "kept as bytes"))
+        {
+            Assert.Null(r.Index.MetaString("creator"));
+            Assert.Equal("Osmium 0.2.0", r.Creator);
+        }
+        using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => "kept as bytes" }, Ct);
+        Assert.Equal("Osmium 0.2.0", Detail(s, "Created by"));
+    }
+
     // ------------------------------------------------------------------ never "made by a newer version" from bytes that do not authenticate
 
     private static bool SaysNewerVersion(string text) => text.Contains("newer version", StringComparison.OrdinalIgnoreCase);

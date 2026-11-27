@@ -182,7 +182,7 @@ public sealed class OsaArchiveSource : IArchiveSource
     private static List<ArchiveDetail> Properties(OsaReader r) =>
     [
         new("Format", $".osa {Osa.Major}.{r.Header.Minor}"),
-        new("Created by", r.Header.Creator ?? "?"),
+        new("Created by", r.Creator ?? "?"),
         new("Profile", r.Index.MetaString("profile") ?? "?"),
         new("Files", $"{r.Entries.Count(e => !e.IsDirectory):N0}"),
         new("Folders", $"{r.Entries.Count(e => e.IsDirectory):N0}"),

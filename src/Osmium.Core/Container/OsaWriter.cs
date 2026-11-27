@@ -129,7 +129,8 @@ public sealed class OsaWriter : IDisposable
             Flags = (enc is not null ? Osa.FlagEncrypted : 0) | (_options.Experimental ? Osa.FlagExperimental : 0),
             ArchiveId = _options.TestFixedArchiveId?.ToArray() ?? RandomNumberGenerator.GetBytes(16),
             Encryption = enc,
-            Creator = _options.Creator,
+            // An encrypted archive does not say in the clear which release made it: the creator is in its file list only.
+            Creator = enc is null ? _options.Creator : null,
             ExtraRecords = _options.TestExtraHeaderRecords,
         };
         try
@@ -285,6 +286,8 @@ public sealed class OsaWriter : IDisposable
                 if (s.Frame < 0 || s.Frame >= _blocks.Count || s.Offset + s.Length > _blocks[s.Frame].RawSize)
                     throw new InvalidOperationException($"Entry '{e.Path}' references an invalid block region.");
         if (metadata is not null) foreach (var kv in metadata) index.Metadata[kv.Key] = kv.Value;
+        // The writer owns the creator, as it owns the spares key: one source, in every archive.
+        index.Metadata[ArchiveIndex.CreatorKey] = Encoding.UTF8.GetBytes(_options.Creator);
         long spareOffset = _fs.Position, blockFrames = _blocks.Sum(b => b.FrameLength);
         bool spares = _options.SpareCopies switch
         {

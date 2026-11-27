@@ -28,7 +28,10 @@ frame and the header (second line, §4.1); readers never depend on them being th
 
 Extension records:
 - **1 EncryptionInfo** (critical): `u8 kdf (1 = PBKDF2-HMAC-SHA512) · varint iterations · u8[32] salt · u8 aead (1 = AES-256-GCM) · u8[16] verifier`
-- **2 Creator** (ignorable): `str`, e.g. `Osmium 0.1.0`
+- **2 Creator** (ignorable): `str`, e.g. `Osmium 0.1.0`. Written in unencrypted archives only: an encrypted archive
+  keeps its creator in the encrypted index (`creator`, §3), so that the release that made it is not readable without
+  the password. Readers show the index's `creator`, else this record (archives of Osmium 0.1.x and encrypted archives
+  made before 0.2.0 have only this record).
 - Types 3 and 5 (critical) and 4 and 6 (ignorable) are reserved (§9).
 
 ## 2. Frame
@@ -132,8 +135,9 @@ varint entryCount                     sorted by ordinal byte order of path (pare
           varint present (bit0 mtime · bit1 ctime · bit2 attributes)
           [u64 mtime FILETIME UTC] [u64 ctime FILETIME UTC] [varint attributes & 0x2027]
           file: varint size · varint segmentCount · (varint frame · varint offset · varint length)* · u8[16] XxHash128
-varint metaCount · (str key · bytes value)*        e.g. "creator", "profile", "plan" (JSON explain log), "rules" (JSON),
-                                                   "spares" (u64 offset of the spare index frame, §4.1)
+varint metaCount · (str key · bytes value)*        e.g. "creator" (UTF-8, what made the archive; in every archive
+                                                   since 0.2.0, the writer's own value), "profile", "plan" (JSON explain
+                                                   log), "rules" (JSON), "spares" (u64 offset of the spare index frame, §4.1)
 ```
 - Length-prefixed records let a newer minor version append fields that older readers skip.
 - Frame offsets are implicit: `offset(frame k) = headerLength + Σ_{j<k} (gapBefore_j + frameLength_j) + gapBefore_k`.
