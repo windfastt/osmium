@@ -125,6 +125,8 @@ public sealed class OsaReader : IDisposable
                 throw new CorruptDataException(EndDamaged);
             }
             var ft = footer.Value;
+            // The index frame is read whole before it can be authenticated: its length is capped before anything else.
+            CheckIndexLength(ft);
             bool usedSpareHeader = false;
             if (header is null)
             {
@@ -212,6 +214,15 @@ public sealed class OsaReader : IDisposable
         }
 
         public void Dispose() => handle.Dispose();
+    }
+
+    internal const string IndexTooLarge = "The file list of this archive is larger than Osmium accepts (more than 256 MiB).";
+
+    /// <summary>An index frame longer than <see cref="Osa.MaxIndexFrameBytes"/> is refused before it is allocated or read
+    /// (the footer that says so checks out, so this is not damage).</summary>
+    private static void CheckIndexLength(ArchiveFooter footer)
+    {
+        if ((ulong)footer.IndexLength > Osa.MaxIndexFrameBytes) throw new CorruptDataException(IndexTooLarge);
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
@@ -461,7 +472,7 @@ public sealed class OsaReader : IDisposable
     private static BlockBody ReadFrame(ArchiveFile h, long offset, long frameLength, ulong expectedFrame,
         ArchiveHeader header, ArchiveKey? key, MethodRegistry reg, bool isIndex)
     {
-        if (frameLength < Osa.FrameHeaderSize || frameLength - Osa.FrameHeaderSize > BlockLimits.MaxRawSize * 2)
+        if (frameLength < Osa.FrameHeaderSize || frameLength - Osa.FrameHeaderSize > (isIndex ? Osa.MaxIndexFrameBytes : Osa.MaxBlockBodyBytes))
             throw new CorruptDataException("Invalid frame length.");
         var fh = new byte[Osa.FrameHeaderSize];
         if (h.Read(fh, offset) != fh.Length) throw new CorruptDataException("Unexpected end of archive.");

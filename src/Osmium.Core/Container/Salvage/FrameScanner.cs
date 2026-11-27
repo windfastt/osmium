@@ -390,6 +390,11 @@ internal sealed class FrameScanner
             f.Reject(SalvageFrameState.Damaged, "invalid frame length");
             return;
         }
+        if (f.IsIndex && f.FrameLength > Osa.MaxIndexFrameBytes)
+        {
+            f.Reject(SalvageFrameState.Damaged, "larger than the 256 MiB a file list may have");
+            return;
+        }
         long available = _src.Length - f.Offset - Osa.FrameHeaderSize;
         if (f.BodyLength > available)
         {
@@ -542,21 +547,32 @@ internal sealed class FrameScanner
         return null;
     }
 
+    /// <summary>Bodies read in all to confirm one candidate key: they are read before anything authenticates them.</summary>
+    internal const long ConfirmBudget = 256L << 20;
+
     /// <summary>
-    /// Tries a candidate key on the first encrypted block frames. True when one authenticates, false when some were
-    /// tried and none did, null when there was nothing to try.
+    /// Tries a candidate key on encrypted block frames: of the first 64 whose headers check out, the smallest first, at
+    /// most 8 and at most <see cref="ConfirmBudget"/> bytes of bodies. True when one authenticates, false when some
+    /// were tried and none did, null when there was nothing to try.
     /// </summary>
     public bool? Authenticates(ArchiveKey key, byte[] archiveId)
     {
-        int tried = 0;
+        var usable = new List<FrameHeader>();
         long pos = 0;
-        while (tried < 8 && NextFrameHeader(pos, out var fh))
+        while (usable.Count < 64 && NextFrameHeader(pos, out var fh))
         {
             pos = fh.Offset + 1;
-            bool usable = (fh.Flags & Osa.FrameFlagEncrypted) != 0 && (fh.Flags & Osa.FrameFlagIndex) == 0
-                && fh.BodyLength >= 16 && fh.BodyLength <= MaxBody && fh.BodyLength <= _src.Length - fh.Offset - Osa.FrameHeaderSize;
-            if (!usable) continue;
+            if ((fh.Flags & Osa.FrameFlagEncrypted) != 0 && (fh.Flags & Osa.FrameFlagIndex) == 0
+                && fh.BodyLength >= 16 && fh.BodyLength <= Osa.MaxBlockBodyBytes && fh.BodyLength <= _src.Length - fh.Offset - Osa.FrameHeaderSize)
+                usable.Add(fh);
+        }
+        int tried = 0;
+        long spent = 0;
+        foreach (var fh in usable.OrderBy(h => h.BodyLength).ThenBy(h => h.Offset))
+        {
+            if (tried == 8 || spent + fh.BodyLength > ConfirmBudget) break;
             tried++;
+            spent += fh.BodyLength;
             var body = _src.Read(fh.Offset + Osa.FrameHeaderSize, (int)fh.BodyLength);
             try
             {

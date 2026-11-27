@@ -48,6 +48,8 @@ public sealed record OsaWriterOptions
     internal ushort HeaderMinor { get; init; } = Osa.Minor;
     /// <summary>Tests: called with the number of earlier writes before each write to the file (a test makes one fail).</summary>
     internal Action<int>? TestBeforeWrite { get; init; }
+    /// <summary>The largest index frame this writer writes (<see cref="Osa.MaxIndexFrameBytes"/>; tests lower it).</summary>
+    internal long MaxIndexFrame { get; init; } = Osa.MaxIndexFrameBytes;
 
     /// <summary>The key derivation these options ask for (null without a password).</summary>
     internal KdfParameters? ResolvedKdf => Password is null ? null : Kdf ?? (KdfIterations is { } n ? KdfParameters.Pbkdf2(n) : KdfPresets.Default);
@@ -304,7 +306,11 @@ public sealed class OsaWriter : IDisposable
         {
             spares = false;
             (prefix, payload) = Encode(false);
+            frameLength = Osa.FrameHeaderSize + PlainLength(prefix, payload) + (_key is null ? 0 : 16);
         }
+        // Readers refuse a larger index frame before they read it; nothing is sealed or written then.
+        if (frameLength > _options.MaxIndexFrame)
+            throw new IOException($"The file list of this archive is too large (more than {SizeText.Format(_options.MaxIndexFrame)} compressed).");
         // Sealed once: the spare copy repeats the same ciphertext, so no plaintext is encrypted twice.
         var (fh, sealedBody, bodyLen) = BuildFrame(Osa.IndexFrameNumber, Osa.FrameFlagIndex, prefix, payload, PlainLength(prefix, payload));
         void WriteIndexFrame()

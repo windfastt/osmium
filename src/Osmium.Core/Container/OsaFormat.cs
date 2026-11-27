@@ -19,6 +19,11 @@ public static class Osa
     public const ushort Major = 1, Minor = 1;
     public const int FrameHeaderSize = 28;
     public const int FooterSize = 32;
+    /// <summary>The largest index frame (frame header, padded body and tag) a reader reads or a writer writes: it is
+    /// read whole before it can be authenticated.</summary>
+    public const long MaxIndexFrameBytes = 256L << 20;
+    /// <summary>The largest frame body a reader reads: twice the largest block, and what one array can hold.</summary>
+    public static long MaxBlockBodyBytes => Math.Min(2 * BlockLimits.MaxRawSize, Array.MaxLength);
     public const ulong IndexFrameNumber = ulong.MaxValue;
     public const string Extension = ".osa";
 
