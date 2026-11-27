@@ -327,6 +327,44 @@ public sealed class CliProtectionTests : IDisposable
         }
     }
 
+    /// <summary>What setting up remote workers prints and returns, the console redirected.</summary>
+    private static async Task<(bool Connected, string Output, string Error)> ClusterFor(bool encrypted, params string[] options)
+    {
+        TextWriter output = Console.Out, error = Console.Error;
+        using var o = new StringWriter();
+        using var e = new StringWriter();
+        try
+        {
+            Console.SetOut(o);
+            Console.SetError(e);
+            // A port nothing listens on: a connection is refused at once.
+            var a = new Args(["--workers", "127.0.0.1:1", "--cluster-key", Osmium.Core.Distributed.ClusterKey.Generate().ToString(), .. options]);
+            var po = new Osmium.Core.Planning.PlanOptions { Profile = Osmium.Core.Planning.Profile.ByName("store"), Threads = 1 };
+            await using var cluster = await ClusterSetup.CreateAsync(a, po, encrypted, TestContext.Current.CancellationToken);
+            return (cluster is not null, o.ToString(), e.ToString());
+        }
+        finally
+        {
+            Console.SetOut(output);
+            Console.SetError(error);
+        }
+    }
+
+    [Fact]
+    public async Task RemoteWorkersNeverSeeAnEncryptedArchiveWithoutAllowRemoteEncrypted()
+    {
+        // Encrypted whichever way the password came (here no password option at all: the prompt of --encrypt).
+        var refused = await ClusterFor(encrypted: true);
+        Assert.False(refused.Connected);
+        Assert.Contains("note: remote workers are disabled for encrypted archives", refused.Error);
+        Assert.DoesNotContain("cluster:", refused.Output); // no connection was tried
+        var allowed = await ClusterFor(encrypted: true, "--allow-remote-encrypted");
+        Assert.DoesNotContain("disabled for encrypted archives", allowed.Error);
+        Assert.Contains("cluster:", allowed.Output); // a connection was tried
+        var plain = await ClusterFor(encrypted: false);
+        Assert.DoesNotContain("disabled for encrypted archives", plain.Error);
+    }
+
     [Fact]
     public async Task SalvageWithAPasswordWritesNoFrameThatIsNotEncrypted()
     {

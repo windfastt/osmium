@@ -461,7 +461,7 @@ namespace Osmium.Cli
             var log = new List<string>();
             var po = PlanOptionsFrom(a, profile, log.Add, (phase, f) => progress.Update($"{phase} {f:P0}"));
 
-            await using var cluster = await ClusterSetup.CreateAsync(a, po, ct);
+            await using var cluster = await ClusterSetup.CreateAsync(a, po, encrypted: password is not null, ct);
             if (cluster is not null) po = po with { Trials = cluster.Trials, Threads = po.Threads };
 
             var plan = await new Planner(po).BuildAsync(scan, ct);

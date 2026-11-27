@@ -19,13 +19,15 @@ internal sealed class ClusterSetup : IAsyncDisposable
         Compressor = c.BlockCompressor(shipSymmetric);
     }
 
-    public static async Task<ClusterSetup?> CreateAsync(Args a, PlanOptions po, CancellationToken ct)
+    /// <param name="encrypted">The archive will be encrypted, whichever way its password came (an option, or the prompt
+    /// of --encrypt): remote workers would see its plaintext, so they are used only with --allow-remote-encrypted.</param>
+    public static async Task<ClusterSetup?> CreateAsync(Args a, PlanOptions po, bool encrypted, CancellationToken ct)
     {
         var spec = a.Get("workers");
         if (string.IsNullOrWhiteSpace(spec)) return null;
         var keyText = a.Get("cluster-key") ?? Environment.GetEnvironmentVariable("OSMIUM_CLUSTER_KEY")
             ?? throw new ArgumentException("--workers needs --cluster-key (or OSMIUM_CLUSTER_KEY). Create one with 'osmium keygen'.");
-        if ((a.Has("password") || a.Has("password-stdin")) && !a.Has("allow-remote-encrypted"))
+        if (encrypted && !a.Has("allow-remote-encrypted"))
         {
             Console.Error.WriteLine("note: remote workers are disabled for encrypted archives (they would see plaintext). Use --allow-remote-encrypted to override.");
             return null;
