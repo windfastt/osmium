@@ -357,6 +357,10 @@ public class PlannerSearchTests
             : LzmaLandscape(s, sample));
         var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
         var (steps, final) = AssertScreenedClimb(trials, Lzma3);
+        // lc=4 is among the first step's three promoted neighbours and wins on the full sample; the second step's two do
+        // not include lc=8, so the search ends at lc=4.
+        Assert.Equal(2, steps.Count);
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=4"), final);
         Assert.Contains(steps, s => s.Full is { Specs.Length: > 1 });
         Assert.All(steps.Where(s => s.Screen is not null && s.Full is not null), s =>
             Assert.Equal(Math.Max(2, (int)Math.Ceiling(s.Screen!.Specs.Length / 3.0)), s.Full!.Specs.Length));
@@ -481,6 +485,94 @@ public class PlannerSearchTests
         Assert.Equal(screened, g.Explain.Any(l => l.Contains("screening:")));
     }
 
+    [Fact]
+    public async Task TheFullSampleChoosesAmongThePromotedNeighbours()
+    {
+        // On the smaller sample pb=1 looks best and lc=4 second; on the full sample lc=4 is the better one. Both are
+        // promoted, and the search moves to lc=4.
+        using var t = new TempDir();
+        string pb1 = Lzma3.Replace("pb=0", "pb=1"), lc4 = Lzma3.Replace("lc=3", "lc=4");
+        var trials = new ScriptedTrials((s, sample) => (s.ToString(), sample.Length) switch
+        {
+            (var x, Small) when x == pb1 => 4850,
+            (var x, Small) when x == lc4 => 4880,
+            (var x, _) when x == pb1 => 4890,
+            _ => LzmaLandscape(s, sample),
+        });
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var g = Assert.Single(plan.Groups);
+        var (steps, final) = AssertScreenedClimb(trials, Lzma3);
+        Assert.Equal([pb1, lc4], steps[0].Full!.Specs);
+        Assert.StartsWith($"  search: {lc4} improves", g.Explain.First(l => l.Contains("search:")));
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+        Assert.Equal(final, g.Spec.ToString());
+    }
+
+    [Fact]
+    public async Task FailedScreeningTrialsAreNeverPromoted()
+    {
+        // fb=128 and mf=0 fail on the smaller sample; every other LZMA variant scores the same there. The three
+        // promotion places go to working neighbours, and no failure is compressed again on the full sample.
+        using var t = new TempDir();
+        static bool Fails(PipelineSpec s) => s.Codec.Params.Get("fb", 273) != 273 || s.Codec.Params.Get("mf", 1) != 1;
+        var trials = new ScriptedTrials((s, sample) => sample.Length == Small
+            ? s.Codec.Method.Name != "lzma" ? 200_000 : Fails(s) ? -1 : 4900
+            : LzmaLandscape(s, sample));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(evals: 7), trials));
+        var (steps, final) = AssertScreenedClimb(trials, Lzma3);
+        var step = Assert.Single(steps);
+        Assert.Equal(7, step.Screen!.Specs.Length);
+        Assert.Equal(2, step.Screen.Sizes.Count(size => size < 0));
+        Assert.Equal(3, step.Full!.Specs.Length);
+        Assert.DoesNotContain(step.Full.Specs, s => Fails(PipelineSpec.Parse(s, MethodRegistry.Default)));
+        Assert.Equal(final, Assert.Single(plan.Groups).Spec!.ToString());
+    }
+
+    [Fact]
+    public async Task AtLeastTwoNeighboursArePromoted()
+    {
+        // Three neighbours: ⌈3/3⌉ is 1, but two are promoted when both are within 0.5 % on the smaller sample.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials((s, sample) => sample.Length == Small
+            ? s.Codec.Method.Name == "lzma" ? 100_000 + (long)(ScriptedTrials.StableHash(s.ToString()) % 300) : 200_000
+            : LzmaLandscape(s, sample));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(evals: 3), trials));
+        var (steps, final) = AssertScreenedClimb(trials, Lzma3);
+        var step = Assert.Single(steps);
+        Assert.Equal(3, step.Screen!.Specs.Length);
+        Assert.Equal(2, step.Full!.Specs.Length);
+        Assert.Equal(final, Assert.Single(plan.Groups).Spec!.ToString());
+    }
+
+    [Fact]
+    public async Task WhenEveryTrialOfALaterRungFailsTheSearchUsesTheLastRungThatWorked()
+    {
+        // Every trial on 64 KiB fails. The search runs on the 16 KiB sample, scored against that rung, and still finds
+        // lc=8; it is not screened, since no earlier sample is left.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials((s, sample) => sample.Length == Small ? LzmaLandscape(s, sample) : -1);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var g = Assert.Single(plan.Groups);
+        Assert.Equal([Small, Full], trials.Calls.Take(2).Select(c => c.SampleLength));
+        var search = trials.Calls.Skip(2).ToList();
+        Assert.NotEmpty(search);
+        Assert.All(search, c => Assert.Equal(Small, c.SampleLength));
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+        Assert.Contains($"  rung {Full:N0} B: ", g.Explain);
+        Assert.DoesNotContain(g.Explain, l => l.Contains("screening:"));
+    }
+
+    [Fact]
+    public void TheBuiltInProfilesScreenUltraAndInsaneAndKeepTheOtherSwitchesOff()
+    {
+        Assert.All(Profile.All, p =>
+        {
+            Assert.Equal(p.Level is ProfileLevel.Ultra or ProfileLevel.Insane, p.ScreenSearch);
+            Assert.False(p.PreferFasterDecoder, p.Name);
+            Assert.False(p.SimilarityOrder, p.Name);
+        });
+    }
+
     [Theory]
     [InlineData(false, new[] { Small, Full })]          // the switch is off
     [InlineData(true, new[] { 512 << 10, 1 << 20 })]    // the first rung already covers the 400 KiB group
@@ -503,20 +595,24 @@ public class PlannerSearchTests
         Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
     }
 
-    [Fact]
-    public async Task ScreeningUsesTheLargestEarlierSampleAtMostHalfTheLast()
+    [Theory]
+    [InlineData(new[] { 8 << 10, Small, Full }, Small)]  // 8 and 16 KiB both qualify: the larger is used
+    [InlineData(new[] { Small, 48 << 10, Full }, Small)] // 48 KiB is more than half of 64
+    [InlineData(new[] { 32 << 10, Full }, 32 << 10)]     // exactly half qualifies
+    public async Task ScreeningUsesTheLargestEarlierSampleAtMostHalfTheLast(int[] rungs, int small)
     {
-        // Rungs of 16, 48 and 64 KiB: 48 KiB is more than half of 64, so the steps are screened on the 16 KiB sample.
         using var t = new TempDir();
         var trials = new ScriptedTrials(LzmaLandscape);
-        var plan = await PlanFile(t, "book.txt", Book, Options(Screened() with { Rungs = [Small, 48 << 10, Full] }, trials));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened() with { Rungs = [.. rungs.Select(r => (long)r)] }, trials));
         var g = Assert.Single(plan.Groups);
-        Assert.Equal([Small, 48 << 10, Full], trials.Calls.Take(3).Select(c => c.SampleLength));
-        var climb = trials.Calls.Skip(3).ToList();
-        Assert.Equal([Small, Full, Small, Full, Small], climb.Select(c => c.SampleLength));
+        Assert.Equal(rungs, trials.Calls.Take(rungs.Length).Select(c => c.SampleLength));
+        var climb = trials.Calls.Skip(rungs.Length).ToList();
+        Assert.Equal([small, Full, small, Full, small], climb.Select(c => c.SampleLength));
         Assert.Equal([7, 1, 6, 1, 5], climb.Select(c => c.Specs.Length));
-        Assert.Contains($"  screening: 18 neighbour(s) on {Small:N0} B, 2 promoted to {Full:N0} B", g.Explain);
+        var (_, final) = AssertScreenedClimb(trials, Lzma3, small: small, rungs: rungs.Length);
+        Assert.Contains($"  screening: 18 neighbour(s) on {small:N0} B, 2 promoted to {Full:N0} B", g.Explain);
         Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+        Assert.Equal(final, g.Spec.ToString());
     }
 
     private static string MixedFolder(TempDir t)

@@ -230,6 +230,40 @@ public class SimilarityOrderTests
     }
 
     [Fact]
+    public async Task AGroupForcedToStoreKeepsTheNameOrder()
+    {
+        // Store gains nothing from a better order, so the files are not even read for it.
+        using var t = new TempDir();
+        var dir = Interleaved(t);
+        var options = Options(Profile.Max with { SimilarityOrder = true }, new ScriptedTrials((s, sample) => sample.Length)) with
+        {
+            ForcedPipeline = "store",
+        };
+        var plan = await new Planner(options).BuildAsync(Scanner.Scan([dir], ct: Ct), Ct);
+        var g = Assert.Single(plan.Groups);
+        Assert.True(g.Forced);
+        Assert.Equal(Enumerable.Range(1, 6).Select(k => $"a{k}.txt"), FileOrder(plan, g));
+        Assert.DoesNotContain(g.Explain, l => l.Contains("order:"));
+    }
+
+    [Fact]
+    public async Task AGroupWithAFileThatCannotBeReadKeepsTheNameOrder()
+    {
+        // a2.txt shrinks after the scan, so its signature cannot be computed: the group keeps the name order and says why.
+        // Balanced takes no samples, so nothing else in planning reads the missing bytes.
+        using var t = new TempDir();
+        var dir = Interleaved(t);
+        var scan = Scanner.Scan([dir], ct: Ct);
+        var shrunk = Path.Combine(dir, "a2.txt");
+        File.WriteAllBytes(shrunk, File.ReadAllBytes(shrunk)[..1000]);
+        var plan = await new Planner(Options(Profile.Balanced with { SimilarityOrder = true }, null)).BuildAsync(scan, Ct);
+        var g = Assert.Single(plan.Groups);
+        Assert.Equal(Enumerable.Range(1, 6).Select(k => $"a{k}.txt"), FileOrder(plan, g));
+        Assert.Contains(g.Explain, l => l.StartsWith("  order: by extension, name and path (", StringComparison.Ordinal)
+            && l.Contains("a2.txt") && l.EndsWith(" could not be read)", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task TheOrderDoesNotDependOnTheThreadCount()
     {
         using var t = new TempDir();
