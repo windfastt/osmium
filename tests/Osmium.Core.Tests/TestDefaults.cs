@@ -1,6 +1,29 @@
+using System.Runtime.CompilerServices;
 using Osmium.Core.Crypto;
 
 namespace Osmium.Core.Tests;
+
+/// <summary>
+/// In this test assembly only, <see cref="ProtectionPolicy.Default"/> allows weak protection, so that the tests that
+/// make small archives with a few iterations or kilobytes stay cheap. Every test of the refusal passes
+/// <see cref="ProtectionPolicy.Enforce"/>; Osmium itself never sets the switch (a test checks that).
+/// </summary>
+internal static class TestDefaults
+{
+#pragma warning disable CA2255 // The switch must be set before the first test, and only for this test assembly.
+    [ModuleInitializer]
+    internal static void AllowWeakProtectionInTests() => PasswordKdf.WeakAllowedByDefault = true;
+#pragma warning restore CA2255
+
+    /// <summary>Until disposed, the code this test runs sees what Osmium itself sees: weak protection is refused.</summary>
+    public static IDisposable AsOsmiumDoes() => new Scope();
+
+    private sealed class Scope : IDisposable
+    {
+        public Scope() => PasswordKdf.WeakAllowedHere = false;
+        public void Dispose() => PasswordKdf.WeakAllowedHere = null;
+    }
+}
 
 /// <summary>
 /// Key derivations at real sizes (256 MiB and more) run in this collection, never in parallel with each other or with

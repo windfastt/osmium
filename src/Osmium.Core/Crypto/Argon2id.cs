@@ -92,7 +92,7 @@ internal static unsafe class Argon2id
             }
             catch (Exception e) when (e is OutOfMemoryException or OverflowException)
             {
-                throw new InsufficientMemoryException($"The key derivation needs {bytes} bytes of memory.");
+                throw new WorkAreaUnavailableException(bytes);
             }
 
             // Steps 3 and 4: the first two blocks of every lane, B[i][0] = H′(H0 ‖ LE32(0) ‖ LE32(i)), B[i][1] likewise.
@@ -331,4 +331,10 @@ internal static unsafe class Argon2id
             CryptographicOperations.ZeroMemory(v);
         }
     }
+}
+
+/// <summary>The system could not give the work area (<see cref="Bytes"/> long); thrown only by its allocation.</summary>
+internal sealed class WorkAreaUnavailableException(long bytes) : OutOfMemoryException($"The key derivation could not get {bytes} bytes of memory.")
+{
+    public long Bytes { get; } = bytes;
 }
