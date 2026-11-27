@@ -115,15 +115,17 @@ public static class RecycleCandidates
     /// The verdict for each input. <paramref name="driveType"/> tells the type of the drive that holds a path; only
     /// <see cref="DriveType.Fixed"/> lets an input move.
     /// </summary>
-    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType) =>
-        Decide(facts, driveType, FileSystemQueries.System);
+    /// <param name="ct">The job's cancellation: once it is canceled, every input stays, because the job was canceled.</param>
+    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default) =>
+        Decide(facts, driveType, FileSystemQueries.System, ct);
 
-    /// <inheritdoc cref="Decide(RecycleFacts, Func{string, DriveType})"/>
+    /// <inheritdoc cref="Decide(RecycleFacts, Func{string, DriveType}, CancellationToken)"/>
     /// <param name="queries">What the rules ask the file system beyond its listings.</param>
-    internal static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries)
+    internal static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries, CancellationToken ct = default)
     {
+        if (ct.IsCancellationRequested) return RecycleDecision.KeepAll(facts.Inputs, Canceled);
         if (JobBlocker(facts) is { } blocker) return RecycleDecision.KeepAll(facts.Inputs, blocker);
-        var rules = new Rules(facts, driveType, queries);
+        var rules = new Rules(facts, driveType, queries, ct);
         var inputs = facts.Inputs.Select(i => (Given: i, Normal: Normalize(i))).ToList();
         var overlaps = new Overlaps(inputs.Where(i => i.Normal.Full is not null).Select(i => i.Normal.Full!));
         var verdicts = new List<InputVerdict>(inputs.Count);
@@ -135,7 +137,8 @@ public static class RecycleCandidates
                 continue;
             }
             string? reason;
-            try { reason = overlaps.Of(full) ?? Judge(full, rules, contents: null); }
+            try { reason = ct.IsCancellationRequested ? Canceled : overlaps.Of(full) ?? Judge(full, rules, contents: null); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { reason = Canceled; }
             catch (Exception e) { reason = $"it could not be checked ({e.Message})"; } // whatever went wrong, the input stays
             verdicts.Add(new InputVerdict(full, reason));
         }
@@ -160,7 +163,7 @@ public static class RecycleCandidates
     internal static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries, CancellationToken ct = default)
     {
         if (JobBlocker(facts) is { } blocker) return _ => blocker;
-        var rules = new Rules(facts, driveType, queries);
+        var rules = new Rules(facts, driveType, queries, ct);
         return input =>
         {
             try
@@ -403,6 +406,7 @@ public static class RecycleCandidates
         pending.Push((root, ""));
         while (pending.TryPop(out var next))
         {
+            rules.Ct.ThrowIfCancellationRequested();
             List<FileSystemInfo> children;
             try { children = [.. next.Dir.EnumerateFileSystemInfos("*", options)]; }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
@@ -446,8 +450,10 @@ public static class RecycleCandidates
     private readonly record struct Content(string Path, string? Rel, UInt128 Hash);
 
     /// <summary>What every input of a job is judged against.</summary>
-    private sealed class Rules(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries)
+    private sealed class Rules(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries, CancellationToken ct)
     {
+        /// <summary>The job's cancellation, checked once per folder listed.</summary>
+        public CancellationToken Ct { get; } = ct;
         /// <summary>The archive's full path.</summary>
         public string Archive { get; } = Path.GetFullPath(facts.Build!.Path);
         public Archived Archived { get; } = new(facts.ArchivedFiles, facts.ArchivedDirs);

@@ -409,7 +409,7 @@ public sealed class JobManager : IDisposable
                 // files), so the scan alone does not say what the archive holds.
                 var (files, dirs) = RecycleCandidates.InArchive(plan.Files.Select(f => f.Src), plan.Dirs, ReadIndex(result.Path, () => r.Password));
                 var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
-                decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf);
+                decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf, ct);
                 // The same rules once more for each input just before it moves: it may have changed since.
                 recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf, ct);
             }

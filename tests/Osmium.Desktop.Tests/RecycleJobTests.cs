@@ -298,11 +298,12 @@ public sealed class RecycleJobTests : IDisposable
     }
 
     [Fact]
-    public async Task ACancelWhileMovingKeepsWhatIsLeft()
+    public async Task ACancelWhileTheOriginalsAreCheckedMovesNothing()
     {
         JobManager? manager = null;
         _bin.Drives = _ =>
         {
+            // Asked while the job decides what may move, as when the app exits then.
             foreach (var active in manager!.Snapshot().Where(j => j.IsActive)) manager.Cancel(active.Id);
             return DriveType.Fixed;
         };
@@ -313,9 +314,11 @@ public sealed class RecycleJobTests : IDisposable
         Assert.Equal(new RecycleSummary(0, 2), job.Recycle);
         Assert.True(Directory.Exists(_photos));
         Assert.True(File.Exists(_notes));
+        Assert.Empty(_bin.Calls); // the decision stopped at once: nothing was handed over to be moved
         var log = jm.GetLog(job.Id);
         Assert.Contains($"kept {_photos}: the job was canceled", log);
-        Assert.Contains("warning: 2 of 2 items could not be moved to the Recycle Bin", log);
+        Assert.Contains($"kept {_notes}: the job was canceled", log);
+        Assert.DoesNotContain(log, l => l.Contains("could not be moved", StringComparison.Ordinal));
     }
 
     [Fact]

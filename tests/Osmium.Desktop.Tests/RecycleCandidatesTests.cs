@@ -86,7 +86,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("photos/sub/b.txt", "more text");
         Folder("photos/empty");
         string file = Write("notes.txt");
-        var d = RecycleCandidates.Decide(Facts([folder, file]), Fixed);
+        var d = RecycleCandidates.Decide(Facts([folder, file]), Fixed, Ct);
         Assert.Equal([folder, file], d.Move);
         Assert.Empty(d.Keep);
     }
@@ -97,8 +97,8 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         Write("in/a.txt");
         var facts = Facts([folder]);
-        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed).Move);
-        var d = RecycleCandidates.Decide(facts with { VerifiedBlocks = false }, Fixed);
+        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
+        var d = RecycleCandidates.Decide(facts with { VerifiedBlocks = false }, Fixed, Ct);
         Assert.Empty(d.Move);
         Assert.Contains("verification was off", Assert.Single(d.Keep).Reason);
     }
@@ -109,9 +109,9 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         Write("in/a.txt");
         var facts = Facts([folder]);
-        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed).Move);
+        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
         var warned = facts with { Build = facts.Build! with { Warnings = ["in/b.txt: cannot read (in use)"] } };
-        var d = RecycleCandidates.Decide(warned, Fixed);
+        var d = RecycleCandidates.Decide(warned, Fixed, Ct);
         Assert.Empty(d.Move);
         Assert.Contains("1 warning", Assert.Single(d.Keep).Reason);
     }
@@ -124,9 +124,9 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         Write("in/a.txt");
         var facts = Facts([folder]);
-        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed).Move);
-        Assert.Contains(reason, Assert.Single(RecycleCandidates.Decide(facts with { Outcome = outcome }, Fixed).Keep).Reason);
-        Assert.Contains("not completed", Assert.Single(RecycleCandidates.Decide(facts with { Build = null }, Fixed).Keep).Reason);
+        Assert.Equal([folder], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
+        Assert.Contains(reason, Assert.Single(RecycleCandidates.Decide(facts with { Outcome = outcome }, Fixed, Ct).Keep).Reason);
+        Assert.Contains("not completed", Assert.Single(RecycleCandidates.Decide(facts with { Build = null }, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
@@ -134,11 +134,11 @@ public sealed class RecycleCandidatesTests : IDisposable
     {
         string file = Write("a.txt");
         var facts = Facts([file]);
-        Assert.Equal([file], RecycleCandidates.Decide(facts, Fixed).Move);
+        Assert.Equal([file], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
         var other = facts with { Build = facts.Build! with { OutputBytes = 99 } };
-        Assert.Contains("not the 99 bytes", Assert.Single(RecycleCandidates.Decide(other, Fixed).Keep).Reason);
+        Assert.Contains("not the 99 bytes", Assert.Single(RecycleCandidates.Decide(other, Fixed, Ct).Keep).Reason);
         File.Delete(facts.Build!.Path);
-        Assert.Contains("archive is missing", Assert.Single(RecycleCandidates.Decide(facts, Fixed).Keep).Reason);
+        Assert.Contains("archive is missing", Assert.Single(RecycleCandidates.Decide(facts, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
@@ -153,12 +153,12 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("hidden/a.txt");
         string secret = Write("hidden/.secret"); // hidden on Unix by its name
         if (OperatingSystem.IsWindows()) File.SetAttributes(secret, FileAttributes.Hidden);
-        var d = RecycleCandidates.Decide(Facts([clean, excluded, hidden], new ScanOptions { Excludes = ["*.tmp"], IncludeHidden = false }), Fixed);
+        var d = RecycleCandidates.Decide(Facts([clean, excluded, hidden], new ScanOptions { Excludes = ["*.tmp"], IncludeHidden = false }), Fixed, Ct);
         Assert.Equal([clean], d.Move);
         Assert.Contains("not in the archive: " + Path.Combine("sub", "cache.tmp"), Reason(d, excluded));
         Assert.Contains("not in the archive: .secret (a hidden file)", Reason(d, hidden));
         // With hidden files included (the default) and no exclude pattern, the same folders move.
-        Assert.Equal([excluded, hidden], RecycleCandidates.Decide(Facts([excluded, hidden]), Fixed).Move);
+        Assert.Equal([excluded, hidden], RecycleCandidates.Decide(Facts([excluded, hidden]), Fixed, Ct).Move);
     }
 
     [Fact]
@@ -168,9 +168,9 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         Write("in/a.txt");
         File.SetAttributes(Write("in/desktop.cfg"), FileAttributes.System);
-        var d = RecycleCandidates.Decide(Facts([folder]), Fixed); // the scanner leaves system files out
+        var d = RecycleCandidates.Decide(Facts([folder]), Fixed, Ct); // the scanner leaves system files out
         Assert.Contains("desktop.cfg (a system file)", Assert.Single(d.Keep).Reason);
-        Assert.Equal([folder], RecycleCandidates.Decide(Facts([folder], new ScanOptions { IncludeSystem = true }), Fixed).Move);
+        Assert.Equal([folder], RecycleCandidates.Decide(Facts([folder], new ScanOptions { IncludeSystem = true }), Fixed, Ct).Move);
     }
 
     [Fact]
@@ -192,7 +192,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         File.SetLastWriteTimeUtc(inner, File.GetLastWriteTimeUtc(inner).AddSeconds(-30));
         Write("added/new.txt");
         File.Delete(removed);
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Equal([same], d.Move);
         Assert.Contains("changed after it was read", Reason(d, grown));
         Assert.Contains("changed after it was read", Reason(d, touched));
@@ -216,7 +216,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         if (!TryLink(Path.Combine(withLink, "link.txt"), Path.Combine(target, "data.txt"), directory: false)
             || !TryLink(Path.Combine(withJunction, "linked folder"), target, directory: true))
             Assert.Skip("symbolic links cannot be created here");
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Equal([plain], d.Move);
         Assert.Contains("holds a link (a junction, symbolic link or cloud file): link.txt", Reason(d, withLink));
         Assert.Contains("holds a link (a junction, symbolic link or cloud file): linked folder", Reason(d, withJunction));
@@ -232,12 +232,12 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("elsewhere/a.txt");
         Write("elsewhere/b.txt");
         var facts = Facts([file, folder]);
-        Assert.Equal([file, folder], RecycleCandidates.Decide(facts, Fixed).Move);
+        Assert.Equal([file, folder], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
         File.Delete(file);
         Directory.Delete(folder, recursive: true);
         if (!TryLink(file, Path.Combine(target, "a.txt"), directory: false) || !TryLink(folder, target, directory: true))
             Assert.Skip("symbolic links cannot be created here");
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Empty(d.Move);
         Assert.All(d.Keep, k => Assert.Contains("it is a link", k.Reason));
     }
@@ -247,18 +247,18 @@ public sealed class RecycleCandidatesTests : IDisposable
     {
         string folder = Folder("in");
         Write("in/a.txt");
-        Assert.Equal([folder], RecycleCandidates.Decide(Facts([folder]), Fixed).Move); // the archive next to it
+        Assert.Equal([folder], RecycleCandidates.Decide(Facts([folder]), Fixed, Ct).Move); // the archive next to it
         var inside = Facts([folder], archive: Path.Combine(folder, "in.osa"));
-        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(inside, Fixed).Keep).Reason);
+        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(inside, Fixed, Ct).Keep).Reason);
         var deeper = Facts([folder], archive: Path.Combine(Folder("in/sub"), "in.osa"));
-        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(deeper, Fixed).Keep).Reason);
+        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(deeper, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
     public void TheArchiveItselfStays()
     {
         string file = Write("a.osa");
-        var d = RecycleCandidates.Decide(Facts([file], archive: file), Fixed); // compressed onto itself with overwrite
+        var d = RecycleCandidates.Decide(Facts([file], archive: file), Fixed, Ct); // compressed onto itself with overwrite
         Assert.Equal("it is the archive", Assert.Single(d.Keep).Reason);
     }
 
@@ -275,8 +275,8 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("in/a.txt");
         string file = Write("b.txt");
         var facts = Facts([folder, file]);
-        Assert.Equal([folder, file], RecycleCandidates.Decide(facts, Fixed).Move);
-        var d = RecycleCandidates.Decide(facts, p => p == file ? type : DriveType.Fixed);
+        Assert.Equal([folder, file], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
+        var d = RecycleCandidates.Decide(facts, p => p == file ? type : DriveType.Fixed, Ct);
         Assert.Equal([folder], d.Move);
         Assert.Equal($"it is on {name}, which has no Recycle Bin", Reason(d, file));
     }
@@ -294,7 +294,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         string excludedFile = Write("two.tmp");
         string removableFile = Write("three.txt");
         var facts = Facts([moves, keeps, movesFile, excludedFile, removableFile], new ScanOptions { Excludes = ["Thumbs.db", "*.tmp"] });
-        var d = RecycleCandidates.Decide(facts, p => p == removableFile ? DriveType.Removable : DriveType.Fixed);
+        var d = RecycleCandidates.Decide(facts, p => p == removableFile ? DriveType.Removable : DriveType.Fixed, Ct);
         Assert.Equal(facts.Inputs, d.Inputs.Select(i => i.Path)); // in the order given
         Assert.Equal([moves, movesFile], d.Move);
         Assert.Equal([keeps, excludedFile, removableFile], d.Keep.Select(k => k.Path));
@@ -317,7 +317,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         var (files, dirs) = RecycleCandidates.InArchive(scanned, facts.ArchivedDirs, index);
         Assert.Equal(facts.ArchivedFiles, files); // each with the hash its entry stores
         Assert.Equal(facts.ArchivedDirs, dirs);
-        Assert.Equal([folder], RecycleCandidates.Decide(facts with { ArchivedFiles = files, ArchivedDirs = dirs }, Fixed).Move);
+        Assert.Equal([folder], RecycleCandidates.Decide(facts with { ArchivedFiles = files, ArchivedDirs = dirs }, Fixed, Ct).Move);
 
         // An index without b.txt, or with another size or time for a.txt, does not hold them.
         foreach (var damaged in new[]
@@ -330,14 +330,14 @@ public sealed class RecycleCandidatesTests : IDisposable
         {
             var (f2, d2) = RecycleCandidates.InArchive(scanned, facts.ArchivedDirs, damaged);
             Assert.Single(f2);
-            Assert.Contains("is not in the archive", Assert.Single(RecycleCandidates.Decide(facts with { ArchivedFiles = f2, ArchivedDirs = d2 }, Fixed).Keep).Reason);
+            Assert.Contains("is not in the archive", Assert.Single(RecycleCandidates.Decide(facts with { ArchivedFiles = f2, ArchivedDirs = d2 }, Fixed, Ct).Keep).Reason);
         }
 
         // A folder the index does not list as a folder is not in the archive either, even when it is empty.
         string empty = Folder("empty");
         var emptyFacts = Facts([empty]);
-        Assert.Equal([empty], RecycleCandidates.Decide(emptyFacts, Fixed).Move);
-        Assert.Equal("it is not in the archive", Assert.Single(RecycleCandidates.Decide(emptyFacts with { ArchivedDirs = [] }, Fixed).Keep).Reason);
+        Assert.Equal([empty], RecycleCandidates.Decide(emptyFacts, Fixed, Ct).Move);
+        Assert.Equal("it is not in the archive", Assert.Single(RecycleCandidates.Decide(emptyFacts with { ArchivedDirs = [] }, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
@@ -346,11 +346,11 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         string inner = Write("in/a.txt");
         string other = Write("b.txt");
-        var d = RecycleCandidates.Decide(Facts([folder, inner, other]), Fixed);
+        var d = RecycleCandidates.Decide(Facts([folder, inner, other]), Fixed, Ct);
         Assert.Equal([other], d.Move);
         Assert.Equal($"another input is inside it: {inner}", Reason(d, folder));
         Assert.Equal($"it is inside another input, {folder}", Reason(d, inner));
-        var twice = RecycleCandidates.Decide(Facts([other, other + Path.DirectorySeparatorChar]), Fixed);
+        var twice = RecycleCandidates.Decide(Facts([other, other + Path.DirectorySeparatorChar]), Fixed, Ct);
         Assert.Empty(twice.Move);
         Assert.Equal(2, twice.Keep.Count(k => k.Reason == "it was given more than once"));
     }
@@ -361,7 +361,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         string inner = Write("in/a.txt");
         string mixed = _root.TrimEnd(Path.DirectorySeparatorChar) + Path.AltDirectorySeparatorChar + "in" + Path.AltDirectorySeparatorChar + "a.txt"
             + Path.AltDirectorySeparatorChar;
-        var d = RecycleCandidates.Decide(Facts([inner]) with { Inputs = [mixed] }, Fixed);
+        var d = RecycleCandidates.Decide(Facts([inner]) with { Inputs = [mixed] }, Fixed, Ct);
         Assert.Equal(Path.GetFullPath(inner), Assert.Single(d.Inputs).Path);
         Assert.Equal(Path.GetFullPath(inner), RecycleCandidates.Display(mixed));
     }
@@ -370,7 +370,7 @@ public sealed class RecycleCandidatesTests : IDisposable
     public void RelativePathsAndRootsStay()
     {
         var facts = Facts([Write("a.txt")]);
-        var d = RecycleCandidates.Decide(facts with { Inputs = ["a.txt", Path.GetPathRoot(_root)!] }, Fixed);
+        var d = RecycleCandidates.Decide(facts with { Inputs = ["a.txt", Path.GetPathRoot(_root)!] }, Fixed, Ct);
         Assert.Empty(d.Move);
         Assert.Equal(2, d.Keep.Count);
         Assert.Equal("it is not a full path", d.Keep[0].Reason);
@@ -382,14 +382,14 @@ public sealed class RecycleCandidatesTests : IDisposable
         string file = Write("a.txt");
         var facts = Facts([file]);
         File.Delete(file);
-        Assert.Equal("it is no longer there", Assert.Single(RecycleCandidates.Decide(facts, Fixed).Keep).Reason);
+        Assert.Equal("it is no longer there", Assert.Single(RecycleCandidates.Decide(facts, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
     public void AFailingDriveQueryKeepsTheInput()
     {
         string file = Write("a.txt");
-        var d = RecycleCandidates.Decide(Facts([file]), _ => throw new IOException("the drive did not answer"));
+        var d = RecycleCandidates.Decide(Facts([file]), _ => throw new IOException("the drive did not answer"), Ct);
         Assert.Equal("it could not be checked (the drive did not answer)", Assert.Single(d.Keep).Reason);
     }
 
@@ -410,7 +410,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         string question = Write("what?.txt");
         string plain = Folder("plain");
         Write("plain/a.txt");
-        var d = RecycleCandidates.Decide(Facts([colon, dots, reserved, rootDots, question, plain]), Fixed);
+        var d = RecycleCandidates.Decide(Facts([colon, dots, reserved, rootDots, question, plain]), Fixed, Ct);
         Assert.Equal([plain], d.Move);
         Assert.Equal("Osmium cannot extract meeting: notes.txt under its name (invalid character U+003A)", Reason(d, colon));
         Assert.Equal("Osmium cannot extract the folder trailing. under its name (component ends with dot or space)", Reason(d, dots));
@@ -432,7 +432,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("in.bak/a.txt");
         var facts = Facts([inFolder, in2, inBak]);
         File.Delete(gone);
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Equal([inFolder, inBak], d.Move);
         Assert.Equal("b.txt is no longer there", Reason(d, in2));
     }
@@ -444,10 +444,10 @@ public sealed class RecycleCandidatesTests : IDisposable
         var facts = Facts([file]);
         var first = facts.ArchivedFiles[0];
         var twice = facts with { ArchivedFiles = [first, first with { Scanned = first.Scanned with { Size = first.Scanned.Size + 1 } }] };
-        Assert.Equal([file], RecycleCandidates.Decide(facts, Fixed).Move);
-        Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(twice, Fixed).Keep).Reason);
+        Assert.Equal([file], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
+        Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(twice, Fixed, Ct).Keep).Reason);
         var otherContents = facts with { ArchivedFiles = [first, first with { Hash = first.Hash + 1 }] };
-        Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(otherContents, Fixed).Keep).Reason);
+        Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(otherContents, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
@@ -464,7 +464,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         // Set after the scan (the scanner itself leaves placeholders out with a warning).
         File.SetAttributes(nested, FileAttributes.Offline);
         File.SetAttributes(file, FileAttributes.Offline);
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Equal([clean], d.Move);
         Assert.Equal("it holds a cloud placeholder whose contents are not on this PC: online only.txt", Reason(d, folder));
         Assert.Equal("it is a cloud placeholder whose contents are not on this PC", Reason(d, file));
@@ -477,12 +477,12 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("Photos");
         Write("Photos/a.txt");
         string typed = Path.Combine(_root, "PHOTOS");
-        Assert.Equal([typed], RecycleCandidates.Decide(Facts([typed]), Fixed).Move); // the scan used the same spelling
-        var twice = RecycleCandidates.Decide(Facts([folder, typed]), Fixed);
+        Assert.Equal([typed], RecycleCandidates.Decide(Facts([typed]), Fixed, Ct).Move); // the scan used the same spelling
+        var twice = RecycleCandidates.Decide(Facts([folder, typed]), Fixed, Ct);
         Assert.Empty(twice.Move);
         Assert.All(twice.Keep, k => Assert.Equal("it was given more than once", k.Reason));
         var inside = Facts([folder], archive: Path.Combine(_root, "photos", "photos.osa"));
-        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(inside, Fixed).Keep).Reason);
+        Assert.Equal("the archive is inside it", Assert.Single(RecycleCandidates.Decide(inside, Fixed, Ct).Keep).Reason);
     }
 
     [Fact]
@@ -519,7 +519,7 @@ public sealed class RecycleCandidatesTests : IDisposable
         var facts = Facts([file, folder, other]);
         EditKeepingSizeAndTime(file);
         EditKeepingSizeAndTime(inner);
-        Assert.Equal([file, folder, other], RecycleCandidates.Decide(facts, Fixed).Move); // sizes and times cannot tell
+        Assert.Equal([file, folder, other], RecycleCandidates.Decide(facts, Fixed, Ct).Move); // sizes and times cannot tell
         var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
         Assert.Equal("its contents no longer match the archive", recheck(file));
         Assert.Equal($"the contents of {Path.Combine("sub", "b.txt")} no longer match the archive", recheck(folder));
@@ -624,6 +624,30 @@ public sealed class RecycleCandidatesTests : IDisposable
     }
 
     [Fact]
+    public void ACanceledJobDecidesThatEveryInputStays()
+    {
+        string folder = Folder("in");
+        Write("in/a.txt");
+        Write("in/sub/b.txt");
+        string file = Write("c.txt");
+        var facts = Facts([folder, file]);
+        Assert.Equal([folder, file], RecycleCandidates.Decide(facts, Fixed, Ct).Move);
+        var canceled = RecycleCandidates.Decide(facts, Fixed, new CancellationToken(canceled: true));
+        Assert.Empty(canceled.Move);
+        Assert.All(canceled.Keep, k => Assert.Equal("the job was canceled", k.Reason));
+
+        // Canceled while a folder is being looked at (the drive is asked first): its listing stops there.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        Func<string, DriveType> cancels = _ =>
+        {
+            cts.Cancel();
+            return DriveType.Fixed;
+        };
+        var d = RecycleCandidates.Decide(facts with { Inputs = [folder] }, cancels, cts.Token);
+        Assert.Equal("the job was canceled", Reason(d, folder));
+    }
+
+    [Fact]
     public void ACancelDuringTheLastCheckKeepsTheInput()
     {
         string folder = Folder("in");
@@ -667,7 +691,7 @@ public sealed class RecycleCandidatesTests : IDisposable
             Streams = p => p == unlisted ? throw new IOException("the drive did not answer") : streams.GetValueOrDefault(p, []),
         };
         var facts = Facts([file, marked, folder, tagged, unlisted, plain]);
-        var d = RecycleCandidates.Decide(facts, Fixed, probe);
+        var d = RecycleCandidates.Decide(facts, Fixed, probe, Ct);
         Assert.Equal([marked, plain], d.Move);
         Assert.Equal("it holds data in an alternate stream that the archive does not keep: a.txt:notes", Reason(d, file));
         Assert.Equal($"it holds data in an alternate stream that the archive does not keep: {Path.Combine("sub", "b.txt")}:summary", Reason(d, folder));
@@ -697,14 +721,14 @@ public sealed class RecycleCandidatesTests : IDisposable
         // Names compared ignoring case, as Windows and extraction there compare them.
         var windows = new FileSystemQueries { NamesIgnoreCase = true };
         var facts = Facts([folder, nested, plain]);
-        var d = RecycleCandidates.Decide(facts, Fixed, windows);
+        var d = RecycleCandidates.Decide(facts, Fixed, windows, Ct);
         Assert.Equal([plain], d.Move);
         const string why = "it holds names that differ only in case ({0}), which extraction cannot restore as they are";
         Assert.Equal(string.Format(why, "Makefile, makefile"), Reason(d, folder));
         Assert.Equal(string.Format(why, "Docs, docs"), Reason(d, nested));
         Assert.Equal(string.Format(why, "Makefile, makefile"), RecycleCandidates.Recheck(facts, Fixed, windows, Ct)(folder));
         // Where names keep their case, both come back as they are.
-        Assert.Equal([folder, nested, plain], RecycleCandidates.Decide(facts, Fixed, windows with { NamesIgnoreCase = false }).Move);
+        Assert.Equal([folder, nested, plain], RecycleCandidates.Decide(facts, Fixed, windows with { NamesIgnoreCase = false }, Ct).Move);
     }
 
     [Fact]
@@ -731,7 +755,7 @@ public sealed class RecycleCandidatesTests : IDisposable
             Assert.Skip($"the drive of the temporary folder keeps no alternate streams ({e.Message})");
         }
         var facts = Facts([file, marked, folder, tagged, plain]);
-        var d = RecycleCandidates.Decide(facts, Fixed);
+        var d = RecycleCandidates.Decide(facts, Fixed, Ct);
         Assert.Equal([marked, plain], d.Move);
         Assert.Equal("it holds data in an alternate stream that the archive does not keep: a.txt:notes", Reason(d, file));
         Assert.Equal($"it holds data in an alternate stream that the archive does not keep: {Path.Combine("sub", "b.txt")}:summary", Reason(d, folder));
