@@ -243,6 +243,30 @@ public sealed class RecycleCandidatesTests : IDisposable
     }
 
     [Fact]
+    public void NothingMovesOnceTheArchiveChangedAfterItWasChecked()
+    {
+        string file = Write("a.txt");
+        var facts = Facts([file]);
+        string archive = facts.Build!.Path;
+        facts = facts with { ArchiveModifiedUtc = File.GetLastWriteTimeUtc(archive) };
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
+        Assert.Null(recheck(file));
+        File.SetLastWriteTimeUtc(archive, facts.ArchiveModifiedUtc!.Value.AddSeconds(5)); // written to, the same size
+        Assert.Equal("the archive changed after it was checked", recheck(file));
+        Assert.Equal("the archive changed after it was checked", Assert.Single(RecycleCandidates.Decide(facts, Fixed, Ct).Keep).Reason);
+
+        // Replaced by a link to a file of the same size and time.
+        File.SetLastWriteTimeUtc(archive, facts.ArchiveModifiedUtc.Value);
+        Assert.Null(recheck(file));
+        string elsewhere = Path.Combine(_root, "elsewhere.osa");
+        File.Copy(archive, elsewhere);
+        File.SetLastWriteTimeUtc(elsewhere, facts.ArchiveModifiedUtc.Value);
+        File.Delete(archive);
+        if (!TryLink(archive, elsewhere, directory: false)) Assert.Skip("symbolic links cannot be created here");
+        Assert.Equal("the archive changed after it was checked", recheck(file));
+    }
+
+    [Fact]
     public void AFolderHoldingTheArchiveStays()
     {
         string folder = Folder("in");

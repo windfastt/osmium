@@ -17,6 +17,11 @@ public sealed record RecycleFacts
     public required bool VerifiedBlocks { get; init; }
     /// <summary>The archive builder's result, or null when no archive was completed.</summary>
     public BuildResult? Build { get; init; }
+    /// <summary>
+    /// The archive's last-write time when its index was read back, or null before then. Once it is set, an archive
+    /// written to since, or one that has become a link or a cloud placeholder, lets nothing more move.
+    /// </summary>
+    public DateTime? ArchiveModifiedUtc { get; init; }
     /// <summary>The files the archive holds, each with the scan's record of it and the hash its index entry stores.</summary>
     public IReadOnlyList<ArchivedFile> ArchivedFiles { get; init; } = [];
     /// <summary>The scan's records of the folders the archive holds.</summary>
@@ -104,11 +109,23 @@ public static class RecycleCandidates
         if (facts.Build is not { } build) return "the archive was not completed";
         if (build.Warnings.Count > 0)
             return $"the archive builder reported {build.Warnings.Count} warning{(build.Warnings.Count == 1 ? "" : "s")} (unreadable, skipped or changed files)";
-        var archive = new FileInfo(build.Path);
-        if (!archive.Exists) return "the archive is missing";
-        if (archive.Length != build.OutputBytes)
-            return $"the archive is {archive.Length:N0} bytes, not the {build.OutputBytes:N0} bytes the builder reported";
-        return null;
+        try
+        {
+            var archive = new FileInfo(build.Path);
+            if (!archive.Exists) return "the archive is missing";
+            // Once its index was read back, the archive must stay as it was then: not written to, and no link or cloud
+            // placeholder in its place.
+            if (facts.ArchiveModifiedUtc is { } checkedAt
+                && (archive.LastWriteTimeUtc != checkedAt || (archive.Attributes & (FileAttributes.ReparsePoint | CloudPlaceholder)) != 0))
+                return "the archive changed after it was checked";
+            if (archive.Length != build.OutputBytes)
+                return $"the archive is {archive.Length:N0} bytes, not the {build.OutputBytes:N0} bytes the builder reported";
+            return null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            return $"the archive could not be checked ({e.Message})";
+        }
     }
 
     /// <summary>

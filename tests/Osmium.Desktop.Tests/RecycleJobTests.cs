@@ -613,6 +613,18 @@ public sealed class RecycleJobTests : IDisposable
     }
 
     [Fact]
+    public async Task NothingMovesWhenTheArchiveChangesBeforeTheMove()
+    {
+        string output = Path.Combine(_root, "out.osa");
+        _bin.BeforeMove = _ => File.SetLastWriteTimeUtc(output, File.GetLastWriteTimeUtc(output).AddSeconds(5));
+        using var jm = Manager(Settings());
+        var job = await Compress(jm, [_photos, _notes], output);
+        Assert.Equal(new RecycleSummary(0, 2), job.Recycle);
+        Assert.True(Directory.Exists(_photos));
+        Assert.Contains($"kept {_photos}: checked again just before it moved: the archive changed after it was checked", jm.GetLog(job.Id));
+    }
+
+    [Fact]
     public async Task NothingMovesWhenTheArchiveGoesBeforeTheMove()
     {
         string output = Path.Combine(_root, "out.osa");

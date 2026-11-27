@@ -407,10 +407,12 @@ public sealed class JobManager : IDisposable
             {
                 // A paused job checks and moves nothing until it is resumed.
                 j.Gate.WaitIfPaused(ct);
+                // The archive as its index is read: from now on it must stay so.
+                var checkedAt = File.GetLastWriteTimeUtc(result.Path);
                 // In the archive means listed by the archive's own index: the planner leaves files out (rules, unreadable
                 // files), so the scan alone does not say what the archive holds.
                 var (files, dirs) = RecycleCandidates.InArchive(plan.Files.Select(f => f.Src), plan.Dirs, ReadIndex(result.Path, () => r.Password));
-                var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
+                var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs, ArchiveModifiedUtc = checkedAt };
                 j.Gate.WaitIfPaused(ct);
                 decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf, ct);
                 // The same rules once more for each input just before it moves: it may have changed since.
