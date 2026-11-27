@@ -47,7 +47,7 @@ public sealed class CompressionSettings
     public DecodeSpeed DecodeSpeedWeight { get; set; } = DecodeSpeed.None;
     [Setting("Deduplication", Description = "Auto = profile default. Chunks finds repeats inside and across files (slower to plan).", Order = 2)]
     public DedupSetting Dedup { get; set; } = DedupSetting.Auto;
-    [Setting("Solid block size", Description = "0 = profile default. Larger blocks compress better but need more memory and limit parallelism.", Min = 0, Max = 1024, Unit = " MiB", Order = 3)]
+    [Setting("Solid block size", Description = "0 = profile default (Balanced: 32 MiB). Larger blocks compress better, most of all near-identical files or versions that would otherwise land in different blocks, but need more memory and limit parallelism.", Min = 0, Max = 1024, Unit = " MiB", Order = 3)]
     public int BlockSizeMiB { get; set; }
     [Setting("Verify every block", Description = "Decode each block and compare before writing it. Strongly recommended.", Order = 4, Dangerous = true,
         WarningText = "Turning verification off means a codec bug could produce an archive that does not extract.", WarnWhenOff = true)]

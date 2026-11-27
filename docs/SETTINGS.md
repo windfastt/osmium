@@ -30,7 +30,7 @@ Defaults for new archives.
 | **Default profile**<br>Store → Insane: higher profiles try more algorithms and take longer. | Balanced | Store · Fast · Balanced · Max · Ultra · Insane |  |
 | **Decode-speed weight**<br>Penalise pipelines that are slow to extract (context mixing decompresses at about 0.3 MB/s). | None | None · Light · Strong |  |
 | **Deduplication**<br>Auto = profile default. Chunks finds repeats inside and across files (slower to plan). | Auto | Auto · Off · Files · Chunks |  |
-| **Solid block size**<br>0 = profile default. Larger blocks compress better but need more memory and limit parallelism. | 0 | 0 – 1,024 MiB |  |
+| **Solid block size**<br>0 = profile default (Balanced: 32 MiB). Larger blocks compress better, most of all near-identical files or versions that would otherwise land in different blocks, but need more memory and limit parallelism. | 0 | 0 – 1,024 MiB |  |
 | **Verify every block**<br>Decode each block and compare before writing it. Strongly recommended. | on |  | **caution** |
 | **Store planner log in archive**<br>Lets 'Explain' show why each pipeline was chosen (archive-relative paths only). | on |  |  |
 | **Exclude patterns**<br>One glob per line, e.g. *.tmp or node_modules/** | `Thumbs.db`, `desktop.ini`, `*.osmium-part-*`, `*.osa.partial-*` |  |  |
