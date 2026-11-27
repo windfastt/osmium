@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Runtime.ExceptionServices;
 using Microsoft.Win32.SafeHandles;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -54,30 +55,47 @@ internal readonly record struct FrameHeader(long Offset, uint Flags, ulong Numbe
 internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null);
 
 /// <summary>
-/// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1) whatever happened to the
+/// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1, §8) whatever happened to the
 /// marker, version, flags, lengths, record types and algorithm ids around them: the archive id at offset 16, and the
-/// iterations, salt and verifier in the first extension record. They are used only once they authenticate a frame.
+/// key-derivation settings, salt and verifier in the first extension record, whose type, length and kdf id take one
+/// byte each (offsets 36 to 38). They are used only once they authenticate a frame.
 /// </summary>
-internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, int EncryptionRecordEnd, byte[] Head)
+/// <param name="KdfByteIntact">The kdf byte read 1 or 2, so only its layout was read; otherwise the fields were read in
+/// both layouts, each a candidate of its own.</param>
+internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, int EncryptionRecordEnd, byte[] Head, bool KdfByteIntact)
 {
-    public static KeyFields? Read(SalvageSource src)
+    /// <summary>The header bytes salvage reads: the fixed part, the record's three bytes, the longest settings (three
+    /// 10-byte varints), salt, cipher id and verifier, a creator record of up to 127 bytes and the CRC.</summary>
+    private const int HeadBytes = 36 + 3 + 30 + 32 + 1 + 16 + 2 + 127 + 4;
+
+    /// <summary>
+    /// The candidates: the layout of the kdf byte when it reads 1 or 2, else Argon2id first (what Osmium writes since
+    /// 0.2.0), then PBKDF2. A reading outside the limits a reader accepts is no candidate.
+    /// </summary>
+    public static List<KeyFields> Read(SalvageSource src)
     {
-        if (src.Length < 36 + 3 + 1 + 32 + 1 + 16) return null;
-        var head = src.Read(0, (int)Math.Min(src.Length, 36 + 3 + 10 + 32 + 1 + 16 + 2 + 127 + 4));
-        try
+        var found = new List<KeyFields>();
+        if (src.Length < 36 + 3 + 1 + 32 + 1 + 16) return found;
+        var head = src.Read(0, (int)Math.Min(src.Length, HeadBytes));
+        byte kdf = head[38];
+        bool intact = kdf is (byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id;
+        var layouts = intact ? [(KdfAlgorithm)kdf] : new[] { KdfAlgorithm.Argon2id, KdfAlgorithm.Pbkdf2Sha512 };
+        foreach (var layout in layouts)
         {
-            var r = new BlobReader(head.AsSpan(36 + 3)); // record type, record length and kdf id: one byte each
-            ulong iterations = r.U();
-            if (iterations is 0 or > ArchiveHeader.MaxKdfIterations) return null;
-            var salt = r.Raw(32).ToArray();
-            r.B(); // cipher id
-            var verifier = r.Raw(16).ToArray();
-            return new KeyFields(head.AsSpan(16, 16).ToArray(), new EncryptionInfo((int)iterations, salt, verifier), 36 + 3 + r.Position, head);
+            EncryptionInfo info;
+            int consumed;
+            try { info = EncryptionRecord.ReadFields(head.AsSpan(39), layout, checkCipher: false, out consumed); }
+            catch (CorruptDataException) { continue; }
+            if (info.Kdf.Check().Kind == KdfVerdictKind.Invalid) continue;
+            // The record as the writer made it: these bytes as they lie, with the kdf id of this layout and the only
+            // cipher there is (either byte may be what was damaged).
+            var record = new byte[1 + consumed];
+            record[0] = (byte)layout;
+            head.AsSpan(39, consumed).CopyTo(record.AsSpan(1));
+            record[^(EncryptionRecord.VerifierBytes + 1)] = EncryptionRecord.Aes256Gcm;
+            found.Add(new KeyFields(head.AsSpan(16, 16).ToArray(), info with { RecordBytes = record }, 39 + consumed, head, intact));
         }
-        catch (InvalidDataException)
-        {
-            return null;
-        }
+        return found;
     }
 
     /// <summary>

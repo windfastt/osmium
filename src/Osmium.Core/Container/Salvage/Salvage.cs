@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO.Hashing;
+using System.Runtime.ExceptionServices;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -59,7 +61,11 @@ internal sealed class SalvageRun : IDisposable
         _scanner = new FrameScanner(_src, o.Registry, o.Progress, ct);
     }
 
-    public void Dispose() => _src.Dispose();
+    public void Dispose()
+    {
+        _scanner.Key?.Key.Dispose(); // the key is zeroed when salvage ends
+        _src.Dispose();
+    }
 
     public SalvageResult Execute(Func<string?>? password)
     {
@@ -206,54 +212,100 @@ internal sealed class SalvageRun : IDisposable
 
     // ------------------------------------------------------------------ key
 
+    /// <summary>A way to derive this archive's key: the settings, the archive id, and the key fields read for them.</summary>
+    /// <param name="Settled">The kdf id is known (an intact or repaired header, or a kdf byte that reads 1 or 2): a refusal
+    /// of its settings ends salvage. A reading of a damaged kdf byte that would be refused only counts as one that does
+    /// not authenticate.</param>
+    private sealed record KeyCandidate(EncryptionInfo Info, byte[] ArchiveId, KeyFields? Fields, bool Settled);
+
     private KeyMaterial? ResolveKey(HeaderProbe probe, long firstFrame, Func<string?>? password, out string? problem)
     {
         problem = null;
+        var run = new KdfRun { MemoryLimitBytes = _o.MemoryBudget, Cancellation = _ct };
         if (probe.Header is { Encryption: { } enc } h)
         {
-            var key = ArchiveKey.Derive(Ask(password), enc.Salt, enc.Iterations);
-            if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
+            // Every check of the settings comes before the password is asked for.
+            PasswordKdf.Admit(enc.Kdf, run);
+            string pw = Ask(password);
+            PasswordKdf.CheckPasswordText(pw, creating: false);
+            var key = ArchiveKey.Derive(pw, enc, run);
+            if (!key.Matches(enc.Verifier))
+            {
+                key.Dispose();
+                throw new WrongPasswordException();
+            }
             return new KeyMaterial(key, h.ArchiveId, h.Raw);
         }
         // Container 1.1 keeps an intact copy of the header beside the copies of the index (FORMAT §4.1).
         string? copyProblem = null;
-        if (probe.Header is null && KeyFromHeaderCopy(probe, password, out copyProblem) is { } fromCopy) return fromCopy;
-        // The format keeps the salt and archive id only in the header. A damaged header may still hold them intact:
-        // they are used only if they authenticate frames (GCM), or the password verifier confirms them. They are read
-        // from the header with its CRC recomputed when that parses, else from their fixed places.
-        var fields = probe.Header is not null ? null : KeyFields.Read(_src);
-        if (probe.Header is null && (probe.Repaired?.Encryption ?? fields?.Encryption) is { } renc)
+        if (probe.Header is null && KeyFromHeaderCopy(probe, password, run, out copyProblem) is { } fromCopy) return fromCopy;
+        // A damaged header may still hold the key fields intact: they are used only if they authenticate frames (GCM),
+        // or the password verifier confirms them. They are read from the header with its CRC recomputed when that
+        // parses, else from their fixed places; when the kdf byte itself is damaged, in both layouts.
+        var fields = probe.Header is not null ? [] : KeyFields.Read(_src);
+        var candidates = new List<KeyCandidate>();
+        if (probe.Header is null && probe.Repaired?.Encryption is { } repairedInfo)
+            candidates.Add(new(repairedInfo, probe.Repaired.ArchiveId, fields.FirstOrDefault(f => f.Encryption.Kdf.Algorithm == repairedInfo.Kdf.Algorithm), Settled: true));
+        else if (probe.Header is null)
+            candidates.AddRange(fields.Select(f => new KeyCandidate(f.Encryption, f.ArchiveId, f, f.KdfByteIntact)));
+        if (candidates.Count == 0)
         {
-            byte[] id = probe.Repaired?.Encryption is not null ? probe.Repaired.ArchiveId : fields!.ArchiveId;
-            var key = ArchiveKey.Derive(Ask(password), renc.Salt, renc.Iterations);
-            bool verifierMatches = key.Matches(renc.Verifier);
-            // The footer at the end of the file keeps the first 8 bytes of the archive id too.
-            var ids = new List<byte[]> { id };
-            if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(id) != ft.IdPrefix)
+            problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
+                + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
+                + "encrypted salvage needs an intact header";
+            return null;
+        }
+
+        // Every candidate is admitted before the password is asked for.
+        var admitted = new List<KeyCandidate>();
+        Exception? firstRefusal = null;
+        foreach (var c in candidates)
+        {
+            try
             {
-                var patched = (byte[])id.Clone();
+                PasswordKdf.Admit(c.Info.Kdf, run);
+                admitted.Add(c);
+            }
+            catch (Exception e) when (!c.Settled && e is KdfMemoryLimitException or KdfCostException or WeakProtectionException)
+            {
+                firstRefusal ??= e;
+            }
+        }
+        if (admitted.Count == 0) ExceptionDispatchInfo.Throw(firstRefusal!);
+
+        string password0 = Ask(password);
+        PasswordKdf.CheckPasswordText(password0, creating: false);
+        bool anyVerifierMatched = false;
+        foreach (var c in admitted)
+        {
+            var key = ArchiveKey.Derive(password0, c.Info, run);
+            bool verifierMatches = key.Matches(c.Info.Verifier);
+            anyVerifierMatched |= verifierMatches;
+            // The footer at the end of the file keeps the first 8 bytes of the archive id too.
+            var ids = new List<byte[]> { c.ArchiveId };
+            if (probe.EndFooter is { } ft && BinaryPrimitives.ReadUInt64LittleEndian(c.ArchiveId) != ft.IdPrefix)
+            {
+                var patched = (byte[])c.ArchiveId.Clone();
                 BinaryPrimitives.WriteUInt64LittleEndian(patched, ft.IdPrefix);
                 ids.Add(patched);
             }
-            foreach (var candidate in ids)
+            foreach (var id in ids)
             {
-                bool? authenticates = _scanner.Authenticates(key, candidate);
+                bool? authenticates = _scanner.Authenticates(key, id);
                 if (authenticates != true && !(authenticates is null && verifierMatches)) continue;
                 _notes.Add("The archive header is damaged, but the key-derivation data and archive id read from it authenticate the frames.");
                 // The index binds the exact header bytes: try the header as found and as a writer would have made it.
                 var rebuilt = new List<byte[]>();
                 if (probe.Repaired is { } repaired) rebuilt.Add(repaired.Raw);
-                if (fields is not null) rebuilt.AddRange(fields.Rebuilds(candidate, firstFrame));
-                return new KeyMaterial(key, candidate, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList());
+                if (c.Fields is { } f) rebuilt.AddRange(f.Rebuilds(id, firstFrame));
+                return new KeyMaterial(key, id, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList());
             }
-            problem = verifierMatches
-                ? "the archive header is damaged: the password matches it, but the archive id needed to authenticate the frames does not"
-                : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
-            return null;
+            key.Dispose();
+            if (verifierMatches) break; // the password and these settings belong together: another reading cannot be them
         }
-        problem = copyProblem ?? "the archive header, which holds the key-derivation salt and the archive id, is damaged or missing, "
-            + "and no intact spare copy of it was found (archives of Osmium 0.1 and small archives have none): "
-            + "encrypted salvage needs an intact header";
+        problem = anyVerifierMatched
+            ? "the archive header is damaged: the password matches it, but the archive id needed to authenticate the frames does not"
+            : "the archive header is damaged, and the password could not be confirmed against it (a wrong password, or damaged key-derivation data)";
         return null;
 
         static string Ask(Func<string?>? pw) => pw?.Invoke() ?? throw new PasswordRequiredException();
@@ -266,7 +318,7 @@ internal sealed class SalvageRun : IDisposable
     /// used only when its archive id agrees with the footer at the end of the file, when there is one; when that footer
     /// vouches for it, a password it does not accept is wrong. It is used once frames authenticate under it.
     /// </summary>
-    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, out string? problem)
+    private KeyMaterial? KeyFromHeaderCopy(HeaderProbe probe, Func<string?>? password, KdfRun run, out string? problem)
     {
         problem = null;
         var copies = new List<ArchiveHeader>();
@@ -287,17 +339,25 @@ internal sealed class SalvageRun : IDisposable
             pos = fits ? end : fh.Offset + 1;
         }
         if (copies.Count == 0) return null;
+        // A copy checks out as a header, so its settings are settled: a refusal of them ends salvage, before the password.
+        foreach (var h in copies) PasswordKdf.Admit(h.Encryption!.Kdf, run);
         string pw = password?.Invoke() ?? throw new PasswordRequiredException();
+        PasswordKdf.CheckPasswordText(pw, creating: false);
         bool refused = false;
         foreach (var h in copies.AsEnumerable().Reverse()) // the last one first: the copy beside the index at the end
         {
-            var key = ArchiveKey.Derive(pw, h.Encryption!.Salt, h.Encryption.Iterations);
-            if (!key.Matches(h.Encryption.Verifier))
+            var key = ArchiveKey.Derive(pw, h.Encryption!, run);
+            if (!key.Matches(h.Encryption!.Verifier))
             {
+                key.Dispose();
                 refused |= probe.EndFooter is not null;
                 continue;
             }
-            if (_scanner.Authenticates(key, h.ArchiveId) == false) continue;
+            if (_scanner.Authenticates(key, h.ArchiveId) == false)
+            {
+                key.Dispose();
+                continue;
+            }
             _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
             return new KeyMaterial(key, h.ArchiveId, h.Raw);
         }
