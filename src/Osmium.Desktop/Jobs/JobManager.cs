@@ -411,7 +411,7 @@ public sealed class JobManager : IDisposable
                 var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
                 decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf);
                 // The same rules once more for each input just before it moves: it may have changed since.
-                recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf);
+                recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf, ct);
             }
         }
         catch (Exception e)
