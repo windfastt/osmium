@@ -532,10 +532,11 @@ public sealed class Planner(PlanOptions o)
     private readonly record struct Screen(byte[] Sample, double Score);
 
     /// <summary>
-    /// The largest earlier rung's sample that is at most half the last one, so that compressing the promoted neighbours
-    /// on both samples costs less than compressing every neighbour on the last: the previous rung when the group fills
-    /// the profile's rungs (1 of 4 MiB for Ultra, 4 of 16 MiB for Insane), an earlier one or none for a group that ends
-    /// between rungs. Every candidate of the last rung took part in every earlier rung, so its score there is known.
+    /// The largest earlier rung's sample that is at most half the last one, so that screening a step with enough
+    /// neighbours costs less than compressing all of them on the last (<see cref="ScreeningPays"/> decides per step): the
+    /// previous rung when the group fills the profile's rungs (1 of 4 MiB for Ultra, 4 of 16 MiB for Insane), an earlier
+    /// one or none for a group that ends between rungs. Every candidate of the last rung took part in every earlier rung,
+    /// so its score there is known.
     /// </summary>
     private static Screen? ScreeningSample(List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)> earlier, int last, PipelineSpec best)
     {
@@ -545,10 +546,19 @@ public sealed class Planner(PlanOptions o)
         return null;
     }
 
+    /// <summary>
+    /// Whether screening a step of <paramref name="n"/> neighbours can cut its work: compressing all of them on the
+    /// smaller sample and up to <paramref name="keep"/> on the full one must cost less than compressing all of them on the
+    /// full sample. It cannot when there are few neighbours: with n ≤ 2, every promising neighbour is compressed twice.
+    /// </summary>
+    internal static bool ScreeningPays(int n, int keep, long small, long full) => n * small + (long)keep * full < n * full;
+
     /// <param name="screen">When set, each step compresses its neighbours on this smaller sample first and only the best
     /// max(2, ⌈n / η⌉) of them, and of those only the ones within <see cref="ScreenMargin"/> of the incumbent, also on
-    /// <paramref name="sample"/>. A move needs the same gain on <paramref name="sample"/> as without screening, and the
-    /// budget still counts every neighbour generated.</param>
+    /// <paramref name="sample"/>, unless that cannot cut the step's work (<see cref="ScreeningPays"/>): such a step tries
+    /// its neighbours on <paramref name="sample"/> only, and if it moves, the rest of the search is not screened (the new
+    /// incumbent has no score on the smaller sample). A move needs the same gain on <paramref name="sample"/> as without
+    /// screening, and the budget still counts every neighbour generated.</param>
     /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same
     /// check the candidates passed (the sample is usually much smaller than the blocks it stands for).</param>
     private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, Screen? screen,
@@ -556,25 +566,25 @@ public sealed class Planner(PlanOptions o)
     {
         int budget = o.Profile.SearchEvals;
         var tried = new HashSet<PipelineSpec> { best };
-        int screened = 0, promoted = 0;
+        int screened = 0, promoted = 0, screenLength = screen?.Sample.Length ?? 0;
         while (budget > 0)
         {
             var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, biggestBlock)).Take(budget).ToList();
             if (neighbours.Count == 0) break;
             budget -= neighbours.Count;
             var candidates = neighbours;
-            var smallScores = new Dictionary<PipelineSpec, double>();
-            if (screen is { } sc)
+            Dictionary<PipelineSpec, double>? smallScores = null;
+            int keep = Math.Max(2, (int)Math.Ceiling(neighbours.Count / (double)o.Profile.Eta));
+            if (screen is { } sc && ScreeningPays(neighbours.Count, keep, sc.Sample.Length, sample.Length))
             {
                 var small = await trials.RunAsync(neighbours, sc.Sample, ct);
-                int keep = Math.Max(2, (int)Math.Ceiling(neighbours.Count / (double)o.Profile.Eta));
                 var promising = neighbours.Select((s, i) => (s, score: small[i] < 0 ? double.MaxValue : Objective(s, small[i], sc.Sample.Length)))
                     .OrderBy(t => t.score).ThenBy(t => t.s.ToString(), StringComparer.Ordinal)
                     .Take(keep).Where(t => t.score <= sc.Score * (1 + ScreenMargin)).ToList();
                 screened += neighbours.Count;
                 promoted += promising.Count;
                 if (promising.Count == 0) break; // nothing promising: as if no neighbour were better
-                foreach (var (s, score) in promising) smallScores[s] = score;
+                smallScores = promising.ToDictionary(t => t.s, t => t.score);
                 candidates = [.. promising.Select(t => t.s)];
             }
             var sizes = await trials.RunAsync(candidates, sample, ct);
@@ -585,12 +595,12 @@ public sealed class Planner(PlanOptions o)
                 g.Explain.Add($"  search: {top.s} improves {bestScore:N0} → {top.score:N0}");
                 best = top.s;
                 bestScore = top.score;
-                if (screen is { } moved) screen = moved with { Score = smallScores[best] };
+                screen = screen is { } moved && smallScores is not null ? moved with { Score = smallScores[best] } : null;
             }
             else break;
         }
-        if (screen is { } used && screened > 0)
-            g.Explain.Add($"  screening: {screened} neighbour(s) on {used.Sample.Length:N0} B, {promoted} promoted to {sample.Length:N0} B");
+        if (screened > 0)
+            g.Explain.Add($"  screening: {screened} neighbour(s) on {screenLength:N0} B, {promoted} promoted to {sample.Length:N0} B");
         return best;
     }
 
