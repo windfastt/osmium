@@ -59,7 +59,7 @@ public sealed record Profile
     public static readonly Profile Balanced = new()
     {
         Name = "balanced", Level = ProfileLevel.Balanced, Description = "Smart per-type defaults (LZMA / PPMd / zstd with filters). Fast to decompress.",
-        SampleWindows = 16, BlockCap = 64L << 20, LzmaDict = 32L << 20,
+        SampleWindows = 16, BlockCap = 32L << 20, LzmaDict = 32L << 20,
     };
 
     public static readonly Profile Max = new()

@@ -160,7 +160,7 @@ Each watched folder (Settings → Watch folders) has: path, include subfolders, 
 |---|---|---|---|---|---|---|---|---|
 | `store` | 0 | — | 1 | 0 | 64M | no | Off | No compression; packaging only. |
 | `fast` | 1 | — | 1 | 0 | 16M | no | Off | zstd level 3; quick to make and to open. |
-| `balanced` | 16 | — | 1 | 0 | 64M | no | Files | Smart per-type defaults (LZMA / PPMd / zstd with filters). Fast to decompress. |
+| `balanced` | 16 | — | 1 | 0 | 32M | no | Files | Smart per-type defaults (LZMA / PPMd / zstd with filters). Fast to decompress. |
 | `max` | 32 | 1M | 4 | 0 | 256M | no | Files | Trial-compresses a few candidates per group; no context mixing, so it still opens fast. |
 | `ultra` | 64 | 1M → 4M | 10 | 24 | 512M | yes (mem 22) | Files | Context mixing allowed, two sample rungs and parameter search. |
 | `insane` | 128 | 256K → 1M → 4M → 16M | 40 | 48 | 1G | yes (mem 24) | Chunks | Everything: up to 40 candidates, 4 rungs, deep search, top-2 race on full blocks, chunk dedup. Very slow; CM archives also decompress slowly. |
