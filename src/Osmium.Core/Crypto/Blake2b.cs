@@ -38,8 +38,10 @@ internal sealed class Blake2b
         10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0,
     ];
 
-    private readonly ulong[] _h = new ulong[8];
-    private readonly byte[] _buffer = new byte[BlockBytes];
+    // Pinned, so that the garbage collector never leaves a copy behind: the buffer holds message bytes (the password,
+    // when Argon2id computes H0) until Final wipes it.
+    private readonly ulong[] _h = GC.AllocateArray<ulong>(8, pinned: true);
+    private readonly byte[] _buffer = GC.AllocateArray<byte>(BlockBytes, pinned: true);
     private int _buffered;
     private ulong _t0, _t1; // the 128-bit count of message bytes compressed so far
     private readonly int _outputLength;

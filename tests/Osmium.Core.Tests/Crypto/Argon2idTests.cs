@@ -42,6 +42,20 @@ public class Argon2idTests
         foreach (int threads in new[] { 1, 2, 3, 4, 8, 0, -1 }) Assert.Equal(c.Tag, Tag(c, threads));
     }
 
+    [Theory]
+    [InlineData(1, 512, 64)]  // the most lanes a reader accepts with the least memory: segments of two blocks
+    [InlineData(3, 512, 64)]
+    [InlineData(2, 8, 1)]
+    public void TheSmallestSegmentsWork(int t, int m, int p)
+    {
+        // Two blocks per segment: the first segment of each lane computes nothing after its first two blocks, and the
+        // reference set of every later block is still never empty. Threads do not change the result.
+        var c = new Argon2Case("70617373", "00112233445566778899aabbccddeeff", "", "", t, m, p, 32, "");
+        string one = Tag(c, 1);
+        Assert.Equal(one, Tag(c, 8));
+        Assert.Equal(64, one.Length);
+    }
+
     [Fact]
     public void ArgumentsOutsideTheAlgorithmsRangeAreRefusedBeforeAnyAllocation()
     {
