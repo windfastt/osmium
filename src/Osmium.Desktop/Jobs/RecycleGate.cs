@@ -131,7 +131,7 @@ public sealed class RecycleGate
 
     /// <summary>
     /// What the system did with <paramref name="path"/>. False when it deleted something rather than moved it to the
-    /// Recycle Bin: the operation must then stop.
+    /// Recycle Bin, or moved something that was not handed over: the operation must then stop.
     /// </summary>
     /// <param name="own">The item whose sink reports; null for the sink of the whole operation.</param>
     /// <param name="path">What the system deleted; null when it names no path.</param>
@@ -159,10 +159,12 @@ public sealed class RecycleGate
             }
             if (owner is null)
             {
-                // Moved although not handed over: reported once, when the shell names it.
-                if (hrDelete >= 0 && key is not null)
-                    _others.TryAdd(key, new RecycleOutcome(key, true, "the operation moved it to the Recycle Bin, although it was not handed over", binPath));
-                return true;
+                if (hrDelete < 0) return true;
+                // Moved although not handed over: reported once, when the shell names it, and nothing after it moves.
+                string what = key ?? "(an item the shell named no path for)";
+                _others.TryAdd(what, new RecycleOutcome(what, true, "the operation moved it to the Recycle Bin, although it was not handed over", binPath));
+                _stopped ??= $"{what}: the operation moved it although it was not handed over";
+                return false;
             }
             if (key is not null && !string.Equals(key, owner.Key, StringComparison.OrdinalIgnoreCase)) return true; // part of an item
             if (hrDelete < 0)

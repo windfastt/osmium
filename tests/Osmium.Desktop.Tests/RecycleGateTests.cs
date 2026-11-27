@@ -177,13 +177,21 @@ public sealed class RecycleGateTests : IDisposable
         Assert.False(gate.PostDelete(item, _folder, 0, recycled: false, null));
         Assert.Equal("the shell deleted it, or part of it, rather than moved it to the Recycle Bin", gate.Outcome(item, 0, aborted: true).Reason);
         Assert.NotNull(gate.PreDelete(recycles: true, other, _file));
+    }
 
-        // Something not handed over that went is reported too.
-        gate = Gate();
-        gate.Expect(_folder);
-        string elsewhere = Path.Combine(_root, "other.txt");
-        Assert.True(gate.PostDelete(null, elsewhere, 0, recycled: true, null));
-        Assert.Equal(new RecycleOutcome(elsewhere, true, "the operation moved it to the Recycle Bin, although it was not handed over"), Assert.Single(gate.Others()));
+    [Fact]
+    public void SomethingMovedThatWasNotHandedOverStopsTheOperation()
+    {
+        var gate = Gate();
+        var item = gate.Expect(_folder)!;
+        string elsewhere = Path.Combine(_root, "other.txt"), bin = Path.Combine(_root, "bin", "$R0002");
+        Assert.False(gate.PostDelete(null, elsewhere, 0, recycled: true, bin));
+        Assert.Equal(new RecycleOutcome(elsewhere, true, "the operation moved it to the Recycle Bin, although it was not handed over", bin), Assert.Single(gate.Others()));
+        // Nothing after it is approved.
+        string why = $"{elsewhere}: the operation moved it although it was not handed over";
+        Assert.Equal(why, gate.PreDelete(recycles: true, item, _folder));
+        Assert.Empty(_rechecked);
+        Assert.Equal($"an earlier item failed ({why})", gate.Outcome(item, 0, aborted: true).Reason);
     }
 
     [Fact]

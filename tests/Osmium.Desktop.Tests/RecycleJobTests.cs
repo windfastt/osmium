@@ -407,6 +407,10 @@ public sealed class RecycleJobTests : IDisposable
         var gone = j with { Recycle = new RecycleSummary(1, 0, 1) };
         Assert.EndsWith("\nOriginals: 1 moved to the Recycle Bin, 0 kept, 1 no longer in place and not confirmed in the Recycle Bin", TrayText.Completion(gone).Body);
         Assert.EndsWith("Originals: 3 moved to the Recycle Bin, 1 kept, 1 no longer in place and not confirmed in the Recycle Bin", TrayText.Aggregate([j, gone]).Body);
+
+        // Items the operation affected although they were not to move are counted, and said.
+        var others = j with { Recycle = new RecycleSummary(1, 0, Others: 2) };
+        Assert.EndsWith("Originals: 3 moved to the Recycle Bin, 1 kept, 2 other items affected, which were not to move", TrayText.Aggregate([j, others]).Body);
     }
 
     [Fact]
@@ -437,8 +441,10 @@ public sealed class RecycleJobTests : IDisposable
         _bin.ReportsWhatElseItTakes = true;
         using var jm = Manager(Settings());
         var job = await Compress(jm, [page]);
-        Assert.Equal(new RecycleSummary(1, 0), job.Recycle);
-        Assert.Contains($"warning: the Recycle Bin operation also affected {pageFiles}, which was not to move: it went along with {page}", jm.GetLog(job.Id));
+        Assert.Equal(new RecycleSummary(1, 0, Others: 1), job.Recycle);
+        var log = jm.GetLog(job.Id);
+        Assert.Contains($"warning: the Recycle Bin operation also affected {pageFiles}, which was not to move: it went along with {page}", log);
+        Assert.Contains("originals: 1 moved to the Recycle Bin, 0 kept, 1 other item affected, which was not to move", log);
     }
 
     [Fact]
