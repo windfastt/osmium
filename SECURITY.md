@@ -40,7 +40,7 @@ In scope:
   space despite its checks, writes outside the destination folder (absolute, drive-letter or UNC paths, `..`,
   alternate data streams, reserved device names), replaces files it should not, drops the Mark of the Web, or gets
   damaged data past verification.
-- **Encryption.** Weaknesses in the password-based encryption (AES-256-GCM, PBKDF2-HMAC-SHA512, HKDF), leaks of what
+- **Encryption.** Weaknesses in the password-based encryption (AES-256-GCM, Argon2id, PBKDF2-HMAC-SHA512, HKDF), leaks of what
   it is meant to hide (file and folder names, sizes, times, content), or changes to an encrypted archive that go
   undetected.
 - **The cluster channel.** Getting past the key check, recovering the cluster key, reading or changing traffic,
@@ -54,8 +54,10 @@ Documented behavior, not a vulnerability:
 
 - The checksums of unencrypted archives (CRC-32, XXH3, XXH128) detect damage, not deliberate changes. Anyone who can
   write an unencrypted archive can change it.
-- An encrypted archive shows that it is an Osmium archive, the version that created it, the key-derivation salt and
-  iteration count, and the number and sizes of its blocks.
+- Without the password, an encrypted archive shows: that it is an Osmium archive, its container version, its archive
+  id and flags, the key-derivation settings and salt, the number of blocks and the size of each block, the length of
+  the file list (padded, so only roughly), and the archive's total size. File names, file sizes, times, methods, the
+  creator and the contents are encrypted.
 - Workers see the content of the samples and blocks they compress, and anyone who has the cluster key is trusted.
   PC names, core counts and memory sizes are sent unencrypted during the handshake. A helper sends its own to any PC
   on the network that presents the cluster's identifier (visible in discovery broadcasts), before that PC has proven
@@ -67,6 +69,17 @@ Documented behavior, not a vulnerability:
 - The builds are not code-signed yet, so Windows SmartScreen may warn.
 - Problems in third-party components belong with their maintainers (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)); please tell us if Osmium is affected.
+
+**Memory.** While Osmium checks a password, the key and the memory the key derivation works in can be written
+to the Windows pagefile or hibernation file. Osmium wipes them as soon as it is done, but it cannot wipe
+password text held by the .NET runtime (strings cannot be wiped) or what the system has already written out.
+If that matters, turn off the hibernation file and clear the pagefile at shutdown.
+
+**Genuine builds.** Osmium refuses encrypted archives that are not protected as it protects them (see
+[docs/FORMAT.md](docs/FORMAT.md), section 5). A reader can check all of this, but it cannot prove that a writer did
+not leak the password through fields that must look random (salt, archive id). The defence is using genuine builds,
+which can be checked with the release's provenance attestation (`gh attestation verify <file> --repo
+windfastt/osmium`) and, once releases are signed, the code signature.
 
 ## After you report
 

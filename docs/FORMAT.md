@@ -9,8 +9,8 @@ overflow); `svarint` = zig-zag + LEB128; `bytes` = varint length + raw; `str` = 
 [Header] [Frame 0] [Frame 1] … [Frame n-1] [Index frame] [Footer 32 B]
 [Header] [Frame 0] [Frame 1] … [Frame n-1] [Spare index frame] [Header copy] [Index frame] [Footer 32 B]   (§4.1)
 ```
-Frames are written in completion order (parallel compression finishes out of order); a block's **frame number** is
-its position in the file. Segments in the index refer to frame numbers. An archive may carry spare copies of the index
+Block frames are written in the order of the plan, whatever order parallel compression finishes them in, so the
+layout says nothing about timing; a block's **frame number** is its position in the file. Segments in the index refer to frame numbers. An archive may carry spare copies of the index
 frame and the header (second line, §4.1); readers never depend on them being there.
 
 ## 1. Header
@@ -27,7 +27,15 @@ frame and the header (second line, §4.1); readers never depend on them being th
 | 36+extLen | 4 | CRC-32 of all preceding header bytes |
 
 Extension records:
-- **1 EncryptionInfo** (critical): `u8 kdf (1 = PBKDF2-HMAC-SHA512) · varint iterations · u8[32] salt · u8 aead (1 = AES-256-GCM) · u8[16] verifier`
+- **1 EncryptionInfo** (critical, at most one). The value starts with `u8 kdf`; the rest depends on it:
+  - kdf 1 = PBKDF2-HMAC-SHA512: `varint iterations · u8[32] salt · u8 aead · u8[16] verifier`
+  - kdf 2 = Argon2id, version 0x13 (RFC 9106): `varint timeCost · varint memoryKiB · varint lanes · u8[32] salt ·
+    u8 aead · u8[16] verifier`, with nothing after the verifier
+
+  aead 1 = AES-256-GCM. Another kdf or aead id means the archive needs a newer version of Osmium (or was damaged or
+  changed: the header is read before anything can be authenticated, §2.1). A known kdf or aead record is never
+  extended: new parameters always come with a new id. A header with two EncryptionInfo records is damaged. §5 says
+  how the record is used and which values a reader accepts.
 - **2 Creator** (ignorable): `str`, e.g. `Osmium 0.1.0`. Written in unencrypted archives only: an encrypted archive
   keeps its creator in the encrypted index (`creator`, §3), so that the release that made it is not readable without
   the password. Readers show the index's `creator`, else this record (archives of Osmium 0.1.x and encrypted archives
@@ -145,6 +153,10 @@ varint metaCount · (str key · bytes value)*        e.g. "creator" (UTF-8, what
   segments; every directory (including empty ones) is stored so attributes and times can be restored.
 - Reader invariants: no duplicate paths; Σ segment lengths = size; offset + length ≤ rawSize of the frame; rawSize ≤ 2^30;
   path ≤ 32 KiB; stageCount ≤ 8; decodeMemKiB ≤ the configured limit (otherwise ask before decoding).
+- Readers check the index as they decode it, before they allocate anything for what it declares: every count against
+  the bytes that are left (at the fewest bytes an item can take), the entry count and every path's depth against their
+  own limits, and the path text the front coding builds up against a cap (64 bytes per byte of index, at least 64 MiB
+  and at most 1 GiB), as a path may repeat most of the one before it in a few bytes.
 - Unknown metadata keys are ignored.
 
 ## 4. Footer (last 32 bytes)
@@ -231,16 +243,65 @@ metadata keys it does not know; it never reads B or H. Archives with spare copie
 any other archive does (§10).
 
 ## 5. Encryption
-- `master = PBKDF2-HMAC-SHA512(UTF-8(NFC(password)), salt[32], iterations, 32 bytes)`; default 600 000 iterations
-  (stored, so tunable per archive).
-- `Kenc = HKDF-Expand(SHA-256, master, 32, "osmium/v1/aead")`;
-  `verifier = HKDF-Expand(SHA-256, master, 16, "osmium/v1/verify")` compared in constant time → instant
-  "wrong password" without touching data.
-- Salt is random per archive ⇒ `Kenc` is unique per archive ⇒ (frameNumber, 0) nonces never repeat.
-- The spare copy of the index frame (§4.1) is a byte copy of the sealed index frame: the index is sealed once and the
-  same ciphertext is written twice, so no nonce is ever used for two different plaintexts.
-- Plaintext metadata that remains: header (and its copy, §4.1), frame headers (block count and sizes), footer. File
-  names, methods and content are encrypted.
+Encryption uses only standard, published algorithms. An encrypted archive is meant to stay safe with every detail of
+this format known, except the password.
+1. **Password.** The password in Unicode normalisation form C, encoded as UTF-8, for every kdf. Osmium refuses empty
+   passwords and passwords that are not valid text (an unpaired surrogate) when it creates an archive; a reader treats
+   them as wrong without deriving.
+2. **Key derivation**, by the header's kdf id (§1). kdf 2 (the default since 0.2.0): `master = Argon2id(P, S, t, m, p,
+   T = 32)` (RFC 9106, version 0x13, type 2) with the password bytes P, the 32-byte salt S and the header's time cost
+   t, memory m (KiB) and lanes p; the secret K and the associated data X are empty. Osmium's presets are Standard
+   (1 GiB, 2 passes, 4 lanes), Strong (2 GiB, 3 passes, 4 lanes) and Maximum (4 GiB, 3 passes, 4 lanes). kdf 1
+   (Osmium 0.1, and the Compatible protection, 600 000 iterations by default): `master = PBKDF2-HMAC-SHA512(P, salt,
+   iterations, 32 bytes)`.
+3. **Keys.** `Kenc = HKDF-Expand(SHA-256, master, 32, "osmium/v1/aead")`; `verifier = HKDF-Expand(SHA-256, master, 16,
+   "osmium/v1/verify")`, compared in constant time, so a wrong password fails after one derivation and before any
+   data is read. The verifier lets a guess be checked as fast as decrypting the file list would; each guess costs one
+   key derivation.
+4. **Frames.** AES-256-GCM with `Kenc`, nonce `u64 frameNumber ‖ u32 0`, AAD `archiveId ‖ u64 frameNumber`; the index
+   frame's AAD also holds the exact header bytes, so changing the kdf id, its parameters, the salt or the flags makes
+   the index fail authentication (§2.1).
+5. **Uniqueness.** The salt is 32 random bytes per archive, so `Kenc` is unique per archive. A frame number is sealed
+   at most once per key: the `(frameNumber, 0)` nonces never repeat, and a writer that failed stops for good instead
+   of sealing again. The spare copy of the index (§4.1) is a byte copy of sealed bytes, not a second encryption; any
+   future re-encrypted copy gets its own frame number.
+6. **Padding.** In kdf 2 archives the plaintext of the index frame ends in zero bytes up to the Padmé length (`L`
+   rounded up so that its low `E − S` bits are zero, `E = ⌊log2 L⌋`, `S = ⌊log2 E⌋ + 1`). `payloadLen` stays exact; a
+   reader checks that the padding is zero. kdf 1 archives are never padded.
+7. **Limits** a reader checks before it derives: Argon2id `1 ≤ t ≤ 16`, `1 ≤ p ≤ 64`, `8·p ≤ m ≤ 8 388 608` (8 GiB),
+   `t·m ≤ 33 554 432`; PBKDF2 `1 ≤ iterations ≤ 20 000 000`. Outside them the archive is refused as damaged. Within
+   them a reader asks before it uses more memory than its configured memory limit, as for `decodeMemKiB`, and before
+   it does more work than the strongest preset (`t·m > 12 582 912`). All of these checks come before the password is
+   asked for. The index frame is at most 256 MiB.
+8. **Minimum protection.** Osmium writes at least Argon2id with m = 256 MiB and t·m = 768 MiB-passes, or PBKDF2 with
+   100 000 iterations. Below that a reader asks before it opens an archive (the command line needs
+   `--allow-weak-protection`): such an archive comes from Osmium 0.1's command line with a low `--kdf-iterations`, or
+   from modified software. The minimum never rises.
+9. **Encrypted means encrypted.** In an archive whose header says encrypted, every frame must be encrypted and
+   authenticate, and every frame header must match the index (its number, its length and its flags, with no flag the
+   reader does not know); a reader refuses anything else before it lists or writes anything, and no setting lifts
+   that. When every block it reads fails authentication, the archive is refused the same way; when only some do, those
+   blocks are damage. Every other byte is header, frame header, an exact copy of one of them, zero padding, the
+   header-copy trailer or the footer. A reader refuses, unless the user agrees to open the archive anyway (the extra
+   bytes are then ignored and a warning says so; of a header and a header copy that differ, the one the index
+   authenticates is used): unknown ignorable header records; more than one Creator record, or one longer than 64
+   bytes or with control characters; bytes after the PBKDF2 verifier; `gapBefore` other than 0; blocks that do not end
+   where the spare copy B or the index frame begins; a B that differs from the index frame; a header copy that differs
+   from the header; non-zero header-copy padding; and a header-copy trailer of a newer version.
+10. **Extending encrypted archives.** New information goes inside the encrypted index, or is signalled by a critical
+   flag or a critical (odd-type) record, so that older readers say "needs a newer version". Plaintext ignorable
+   records, unreferenced frames and newer header-copy trailers are never added to encrypted archives; the reserved
+   ignorable types and frame magics of §9 are for unencrypted archives.
+11. **What stays visible**: that this is an Osmium archive, the container version, the archive id, the flags, the
+   key-derivation settings and salt, the frame headers (the number of blocks and their sizes), the length of the index
+   frame (padded in kdf 2 archives), and the footer. File names, sizes, times, methods, the creator and contents are
+   encrypted. Compressed sizes say something about the content: they let someone who has a candidate file check
+   whether the archive probably holds it, and when files an attacker chooses share a solid block with secret files,
+   the compressed size can reveal parts of the secret (compression oracle). Keep files that others choose out of
+   encrypted archives that hold secrets when sizes matter.
+12. **What a reader cannot check**: whether a writer leaked the password through fields that must look random (salt,
+   archive id). Use genuine builds; their provenance can be checked (`gh attestation verify <file> --repo
+   windfastt/osmium`) and, once releases are signed, their code signature.
 
 ## 6. Integrity checks
 1. Header CRC, footer CRC + magic + archive id match.
@@ -298,24 +359,31 @@ index's offsets:
    giving its pipeline, sizes and hashes; file names, folders and times are lost. A frame that may belong to another
    archive is written as `block-<frame number>-at-<offset>.bin` and never stands for this archive's block. An
    unencrypted frame does not name its archive, so where the frames stop following one another the report says so.
-6. Encryption: the salt, iterations and archive id are kept in the header and, in archives with spare copies, in the
-   header copy H (§4.1), which opening uses when the header fails. Salvage reads them from the header at offset 0. When
-   that is damaged, it looks for an intact H beside each index frame (frame headers are not encrypted, so index frames
-   are found without the key) whose archive id matches the footer at the end of the file when there is one, and uses
-   it once its password verifier accepts the password and frames authenticate under it; when that footer vouches for H
-   and the verifier refuses the password, the password is wrong. Otherwise it reads them from the damaged header (the
-   footer keeps the first 8 bytes of the id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so
-   when the header is damaged elsewhere its key fields, read from their fixed places, still yield the blocks once they
-   authenticate a frame. The index frame also binds the exact header bytes: salvage rebuilds the header from those fields as a writer
-   makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x; without a Creator record, as
-   encrypted headers are written since 0.2.0, then with the creator text found in the damaged header; with every flag
-   set a writer of this version uses), and a rebuild that authenticates the index restores the file names. Without
-   the key fields, encrypted frames cannot be decrypted.
-   No frame that is not encrypted is ever written from an encrypted archive; the report says why the archive counts as
-   encrypted. An intact header decides. Without one, the archive counts as encrypted when an intact header copy, the
-   index frame the footer at the end points to, the damaged header, or a password given before salvage started says
-   so; otherwise that index frame or the damaged header saying it is not encrypted settles it; with none of them left,
-   any encrypted frame found makes it encrypted.
+6. Encryption: the key-derivation settings, the salt and the archive id exist only in the header and, in archives with
+   spare copies, in the header copy H (§4.1), which opening uses when the header fails (the footer keeps the first 8
+   bytes of the id). Salvage reads them from the header at offset 0. When that is damaged, it looks for an intact H
+   beside each index frame (frame headers are not encrypted, so index frames are found without the key) whose archive
+   id matches the footer at the end of the file when there is one, and uses it once its password verifier accepts the
+   password and frames authenticate under it; when that footer vouches for H and the verifier refuses the password,
+   the password is wrong. Otherwise it reads them from the damaged header. Block frames are authenticated with
+   `archiveId ‖ frameNumber` alone, so when the header is damaged elsewhere its key fields, read from their fixed
+   places (the record at offset 36; for kdf 2 the three varints after the kdf byte, then salt, cipher id and
+   verifier), still yield the blocks once they authenticate a frame. When the kdf byte itself is damaged, kdf 2 is
+   tried first, then kdf 1; a reading that would be refused (too weak, too much memory or work) counts as one that
+   does not authenticate. The limits of §5 apply before every derivation, and every check of the settings comes
+   before the password is asked for. The index frame also binds the exact header bytes: salvage rebuilds the header
+   from those fields as a writer makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x;
+   without a Creator record first, as encrypted headers are written since 0.2.0, then with the creator text found in
+   the damaged header; with every flag set a writer of this version uses), and a rebuild that authenticates the index
+   restores the file names. Without the key fields, encrypted frames cannot be decrypted.
+
+   Salvage never writes a frame that is not encrypted from an archive that counts as encrypted, and the report says
+   why it counts as encrypted. An intact header decides. Without one, the archive counts as encrypted when an intact
+   header copy, the index frame the footer at the end points to, the damaged header, or a password given before
+   salvage started says so; otherwise that index frame or the damaged header saying it is not encrypted settles it
+   (an unencrypted archive whose damage uncovers an encrypted archive stored in one of its blocks is still salvaged);
+   with none of them left, any encrypted frame found makes it encrypted. Salvage never writes a frame whose padding is
+   not zero.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
    (`--force` lifts both in the CLI).
 8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, which must be this
@@ -329,9 +397,9 @@ So that later versions can add them without clashing, these are reserved; this v
 - Frame flag bit 2: an explicit nonce, for archives that can be appended to later. A reader that does not know it says
   an unencrypted archive needs a newer version (§2.2); in an encrypted archive it comes with a critical header flag,
   since a frame flag alone is refused there as a change (§2.1).
-- Header extension types 4 and 6 (ignorable) and 3 and 5 (critical, §1).
-- Frame magics `ORDR` and `ORPR` (recovery records) and `OCHK` (checkpoints). Readers skip bytes that no index
-  references, so such frames never disturb an older reader.
+- Header extension types 4 and 6 (ignorable; in unencrypted archives only, §5 item 10) and 3 and 5 (critical, §1).
+- Frame magics `ORDR` and `ORPR` (recovery records) and `OCHK` (checkpoints), in unencrypted archives only (§5 item
+  10). Readers skip bytes that no index references, so such frames never disturb an older reader.
 
 ## 10. Compatibility
 
@@ -340,6 +408,8 @@ So that later versions can add them without clashing, these are reserved; this v
 | 1.0 (written by 0.1.x) | opens, tests, extracts | opens, tests, extracts; no spare copies |
 | 1.1 whose blocks use only methods 0.1.x knows, with or without spare copies | opens, tests, extracts: the spare copies and the minor version never stop it | opens, tests, extracts; uses the spare copies when the index frame or header is damaged |
 | 1.1 with a block made with a method new in 0.2.0 (such as `cm2` or `x86v2`, §2.2) | refuses the whole archive while reading the index, saying it was made by a newer version; nothing is extracted | opens it; only blocks that a reader does not know fail, and the other files extract |
+| Encrypted with Argon2id (kdf 2, the default protection since 0.2.0) | refuses it before asking for the password: "Unsupported key-derivation function."; nothing is extracted | opens, tests, extracts with the password |
+| Encrypted with PBKDF2 (kdf 1: archives of 0.1.x, and the Compatible protection since 0.2.0) | opens, tests, extracts with the password (a 0.2.0 archive has no Creator record; 0.1.x shows no creator) | opens, tests, extracts with the password; one below 100 000 iterations only after the user agrees (§5 item 8) |
 
 The index carries a copy of every block's pipeline, so 0.1.x meets a method it does not know while reading the index;
 readers from 0.2.0 on give such a block a stand-in and fail only that block (§2.2).
