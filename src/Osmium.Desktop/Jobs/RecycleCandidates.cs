@@ -62,9 +62,11 @@ public sealed record RecycleDecision(IReadOnlyList<InputVerdict> Inputs)
 /// and a fresh listing that includes hidden, system and excluded files finds exactly the files the archive holds
 /// below it (same relative paths, sizes and last-write times) and otherwise only folders: no links, junctions or
 /// cloud placeholders, and not the archive itself. A folder then moves as one item. Either way, Osmium's extractor
-/// must accept every name involved (<see cref="PathSafety.Validate"/>): an entry it refuses would not come back. And
-/// neither the item nor anything in it holds data in a named stream (Windows' alternate data streams), which the
-/// archive does not keep; only the mark of the web (Zone.Identifier) may be left behind.</item>
+/// must accept every name involved (<see cref="PathSafety.Validate"/>): an entry it refuses would not come back, nor
+/// would one of two names in a folder that differ only in case where names ignore case (a folder Windows keeps
+/// case-sensitive can hold both). And neither the item nor anything in it holds data in a named stream (Windows'
+/// alternate data streams), which the archive does not keep; only the mark of the web (Zone.Identifier) may be left
+/// behind.</item>
 /// <item>It is on a fixed local drive. Removable and network drives have no Recycle Bin, so their files would be
 /// deleted for good; the drive type comes from the caller, so these rules run anywhere.</item>
 /// </list>
@@ -113,12 +115,15 @@ public static class RecycleCandidates
     /// The verdict for each input. <paramref name="driveType"/> tells the type of the drive that holds a path; only
     /// <see cref="DriveType.Fixed"/> lets an input move.
     /// </summary>
-    /// <param name="streams">The names of the named data streams of a file or folder; by default what the file system
-    /// says (Windows keeps them, other systems none).</param>
-    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, Func<string, IReadOnlyList<string>>? streams = null)
+    public static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType) =>
+        Decide(facts, driveType, FileSystemQueries.System);
+
+    /// <inheritdoc cref="Decide(RecycleFacts, Func{string, DriveType})"/>
+    /// <param name="queries">What the rules ask the file system beyond its listings.</param>
+    internal static RecycleDecision Decide(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries)
     {
         if (JobBlocker(facts) is { } blocker) return RecycleDecision.KeepAll(facts.Inputs, blocker);
-        var rules = new Rules(facts, driveType, streams);
+        var rules = new Rules(facts, driveType, queries);
         var inputs = facts.Inputs.Select(i => (Given: i, Normal: Normalize(i))).ToList();
         var overlaps = new Overlaps(inputs.Where(i => i.Normal.Full is not null).Select(i => i.Normal.Full!));
         var verdicts = new List<InputVerdict>(inputs.Count);
@@ -147,12 +152,15 @@ public static class RecycleCandidates
     /// a time through one 1 MiB buffer.
     /// </summary>
     /// <param name="ct">Stops the reading: the input then stays, because the job was canceled.</param>
-    /// <param name="streams">As for <see cref="Decide"/>.</param>
-    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default,
-        Func<string, IReadOnlyList<string>>? streams = null)
+    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default) =>
+        Recheck(facts, driveType, FileSystemQueries.System, ct);
+
+    /// <inheritdoc cref="Recheck(RecycleFacts, Func{string, DriveType}, CancellationToken)"/>
+    /// <param name="queries">What the rules ask the file system beyond its listings.</param>
+    internal static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries, CancellationToken ct = default)
     {
         if (JobBlocker(facts) is { } blocker) return _ => blocker;
-        var rules = new Rules(facts, driveType, streams);
+        var rules = new Rules(facts, driveType, queries);
         return input =>
         {
             try
@@ -278,11 +286,30 @@ public static class RecycleCandidates
         }
         foreach (var path in archived.Under(prefix))
             if (!listed.Contains(path)) return $"{path[prefix.Length..]} is no longer there";
+        if (rules.NamesIgnoreCase && CaseClash(found.Select(f => f.Rel).Concat(folders)) is var (first, second))
+            return $"it holds names that differ only in case ({first}, {second}), which extraction cannot restore as they are";
         // Folders need not be in the archive, but a folder with a name extraction refuses would not come back.
         foreach (var rel in folders.Order(StringComparer.Ordinal))
             if (PathSafety.Validate(root.RelPath + "/" + rel.Replace(Path.DirectorySeparatorChar, '/')) is { } unsafeFolder)
                 return $"Osmium cannot extract the folder {rel} under its name ({unsafeFolder})";
         contents?.AddRange(held);
+        return null;
+    }
+
+    /// <summary>
+    /// Two of the files and folders below an input (their paths below it) that lie in one folder and have names that are
+    /// equal when case is ignored, the first in ordinal order first; null when there are none. A folder that keeps case
+    /// (on Windows, one marked case-sensitive) can hold both, but extraction there would give one of them another name.
+    /// </summary>
+    private static (string First, string Second)? CaseClash(IEnumerable<string> rels)
+    {
+        var byFolder = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var rel in rels.Order(StringComparer.Ordinal))
+        {
+            string folder = Path.GetDirectoryName(rel) ?? "", name = Path.GetFileName(rel);
+            if (!byFolder.TryGetValue(folder, out var names)) byFolder[folder] = names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (!names.TryAdd(name, rel)) return (names[name], rel);
+        }
         return null;
     }
 
@@ -419,14 +446,16 @@ public static class RecycleCandidates
     private readonly record struct Content(string Path, string? Rel, UInt128 Hash);
 
     /// <summary>What every input of a job is judged against.</summary>
-    private sealed class Rules(RecycleFacts facts, Func<string, DriveType> driveType, Func<string, IReadOnlyList<string>>? streams)
+    private sealed class Rules(RecycleFacts facts, Func<string, DriveType> driveType, FileSystemQueries queries)
     {
         /// <summary>The archive's full path.</summary>
         public string Archive { get; } = Path.GetFullPath(facts.Build!.Path);
         public Archived Archived { get; } = new(facts.ArchivedFiles, facts.ArchivedDirs);
         public Func<string, DriveType> DriveOf { get; } = driveType;
         /// <summary>The names of the named data streams of a file or folder.</summary>
-        public Func<string, IReadOnlyList<string>> Streams { get; } = streams ?? FileFacts.NamedStreams;
+        public Func<string, IReadOnlyList<string>> Streams { get; } = queries.Streams;
+        /// <inheritdoc cref="FileSystemQueries.NamesIgnoreCase"/>
+        public bool NamesIgnoreCase { get; } = queries.NamesIgnoreCase;
     }
 
     /// <summary>The scan's records of what the archive holds, by full path.</summary>

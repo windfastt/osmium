@@ -12,6 +12,22 @@ namespace Osmium.Desktop.Jobs;
 /// </summary>
 internal readonly record struct FileStamp(ulong Volume, UInt128 Id, long Changed);
 
+/// <summary>What the rules for moving originals ask the file system beyond its listings; tests replace parts of it.</summary>
+internal sealed record FileSystemQueries
+{
+    /// <summary>What this system answers.</summary>
+    public static FileSystemQueries System { get; } = new();
+
+    /// <summary>The names of the named data streams of a file or folder.</summary>
+    public Func<string, IReadOnlyList<string>> Streams { get; init; } = FileFacts.NamedStreams;
+
+    /// <summary>
+    /// File names ignore case here (Windows, macOS), as extraction does when it writes them: two names in one folder
+    /// that differ only in case cannot both come back as they are.
+    /// </summary>
+    public bool NamesIgnoreCase { get; init; } = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+}
+
 /// <summary>What the file system knows about a file or folder beyond its listing, for deciding whether it may move.</summary>
 internal static class FileFacts
 {

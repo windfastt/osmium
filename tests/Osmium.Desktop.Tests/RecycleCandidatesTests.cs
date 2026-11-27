@@ -662,8 +662,10 @@ public sealed class RecycleCandidatesTests : IDisposable
             [inner] = ["Zone.Identifier", "summary"],
             [tagged] = ["thumbnail"], // a stream on the folder itself
         };
-        Func<string, IReadOnlyList<string>> probe = p =>
-            p == unlisted ? throw new IOException("the drive did not answer") : streams.GetValueOrDefault(p, []);
+        var probe = new FileSystemQueries
+        {
+            Streams = p => p == unlisted ? throw new IOException("the drive did not answer") : streams.GetValueOrDefault(p, []),
+        };
         var facts = Facts([file, marked, folder, tagged, unlisted, plain]);
         var d = RecycleCandidates.Decide(facts, Fixed, probe);
         Assert.Equal([marked, plain], d.Move);
@@ -673,11 +675,36 @@ public sealed class RecycleCandidatesTests : IDisposable
         Assert.Equal("the alternate streams of unlisted.txt could not be listed (the drive did not answer)", Reason(d, unlisted));
 
         // The last check applies the same rule, so a stream added since the decision keeps the item too.
-        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct, probe);
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, probe, Ct);
         Assert.Null(recheck(marked));
         Assert.Null(recheck(plain));
         streams[Path.GetFullPath(Path.Combine(plain, "d.txt"))] = ["notes"];
         Assert.Equal("it holds data in an alternate stream that the archive does not keep: d.txt:notes", recheck(plain));
+    }
+
+    [Fact]
+    public void NamesThatDifferOnlyInCaseKeepTheFolderWhereNamesIgnoreCase()
+    {
+        string folder = Folder("in");
+        Write("in/Makefile", "all: one");
+        Write("in/makefile", "all: two");
+        string nested = Folder("nested");
+        Write("nested/Docs/a.txt");
+        Write("nested/docs", "a file named like the folder beside it");
+        string plain = Folder("plain");
+        Write("plain/Makefile");
+        if (Directory.GetFiles(folder).Length != 2) Assert.Skip("this folder ignores case, so it cannot hold both names");
+        // Names compared ignoring case, as Windows and extraction there compare them.
+        var windows = new FileSystemQueries { NamesIgnoreCase = true };
+        var facts = Facts([folder, nested, plain]);
+        var d = RecycleCandidates.Decide(facts, Fixed, windows);
+        Assert.Equal([plain], d.Move);
+        const string why = "it holds names that differ only in case ({0}), which extraction cannot restore as they are";
+        Assert.Equal(string.Format(why, "Makefile, makefile"), Reason(d, folder));
+        Assert.Equal(string.Format(why, "Docs, docs"), Reason(d, nested));
+        Assert.Equal(string.Format(why, "Makefile, makefile"), RecycleCandidates.Recheck(facts, Fixed, windows, Ct)(folder));
+        // Where names keep their case, both come back as they are.
+        Assert.Equal([folder, nested, plain], RecycleCandidates.Decide(facts, Fixed, windows with { NamesIgnoreCase = false }).Move);
     }
 
     [Fact]
