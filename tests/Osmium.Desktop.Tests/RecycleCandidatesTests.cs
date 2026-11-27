@@ -736,12 +736,14 @@ public sealed class RecycleCandidatesTests : IDisposable
         string folder = Folder("in");
         Write("in/Makefile", "all: one");
         Write("in/makefile", "all: two");
+        // Checked before anything else is written: where the folder ignores case, the second name above was the same
+        // file, and a file named like a folder beside it cannot be created at all.
+        if (Directory.GetFiles(folder).Length != 2) Assert.Skip("this folder ignores case, so it cannot hold both names");
         string nested = Folder("nested");
         Write("nested/Docs/a.txt");
         Write("nested/docs", "a file named like the folder beside it");
         string plain = Folder("plain");
         Write("plain/Makefile");
-        if (Directory.GetFiles(folder).Length != 2) Assert.Skip("this folder ignores case, so it cannot hold both names");
         // Names compared ignoring case, as Windows and extraction there compare them.
         var windows = new FileSystemQueries { NamesIgnoreCase = true };
         var facts = Facts([folder, nested, plain]);
