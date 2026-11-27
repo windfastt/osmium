@@ -1,5 +1,8 @@
+using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Osmium.Core.Crypto;
 
 namespace Osmium.Desktop.Settings;
 
@@ -11,6 +14,8 @@ public enum DedupSetting { Auto, Off, Files, Chunks }
 public enum PriorityLevel { Idle, BelowNormal, Normal }
 public enum CloseAction { MinimizeToTray, Exit }
 public enum ProfileName { Store, Fast, Balanced, Max, Ultra, Insane }
+/// <summary>How new encrypted archives derive their key (<see cref="SecuritySettings.Kdf"/>).</summary>
+public enum PasswordProtection { Standard, Strong, Maximum, Compatible }
 
 [SettingsCategory("General", Order = 0, Glyph = "", Description = "Appearance, startup and notifications.")]
 public sealed class GeneralSettings
@@ -122,12 +127,36 @@ public sealed class PerformanceSettings
 [SettingsCategory("Security", Order = 6, Glyph = "", Description = "Encryption defaults.")]
 public sealed class SecuritySettings
 {
-    [Setting("Encrypt new archives by default", Description = "AES-256-GCM; file names are encrypted too.", Order = 0)]
+    [Setting("Encrypt new archives by default", Description = "Ticks Encrypt on the Compress page. Explorer quick-compress and watch folders do not encrypt.", Order = 0)]
     public bool EncryptByDefault { get; set; }
-    [Setting("Key-derivation iterations", Description = "PBKDF2-SHA512 cost. Higher = slower brute force (and slower to open).", Min = 100_000, Max = 20_000_000, Order = 1, Advanced = true)]
-    public int KdfIterations { get; set; } = 600_000;
-    [Setting("Remember passwords until Osmium exits", Order = 2)]
+    [Setting("Password protection", Description = "How much work every password guess costs, for new encrypted archives. Standard: Argon2id with 1 GiB of memory, about a second to open. Strong: 2 GiB, about three times as long. Maximum: 4 GiB, about six times as long; PCs with less than 8 GB of memory may not open it. Compatible: PBKDF2, which Osmium 0.1 can open, but guessing is far cheaper.", Order = 1)]
+    public PasswordProtection Protection { get; set; } = PasswordProtection.Standard;
+    [Setting("PBKDF2 iterations", Description = "For Compatible protection only. Higher = slower guessing and slower to open.", Min = 100_000, Max = 20_000_000, Order = 2, Advanced = true, VisibleWhen = "Protection=Compatible")]
+    public int KdfIterations { get; set; } = KdfPresets.CompatibleIterations;
+    [Setting("Remember passwords until Osmium exits", Order = 3)]
     public bool RememberForSession { get; set; }
+
+    /// <summary>
+    /// The key-derivation settings new encrypted archives get. A settings file edited by hand may hold anything: an
+    /// unknown protection is Standard, and with Compatible, iterations outside the setting's range are refused with
+    /// <see cref="ArgumentException"/> before any work starts.
+    /// </summary>
+    public KdfParameters Kdf()
+    {
+        switch (Protection)
+        {
+            case PasswordProtection.Strong: return KdfPresets.Strong;
+            case PasswordProtection.Maximum: return KdfPresets.Maximum;
+            case PasswordProtection.Compatible:
+                var range = typeof(SecuritySettings).GetProperty(nameof(KdfIterations))!.GetCustomAttribute<SettingAttribute>()!;
+                if (KdfIterations < range.Min || KdfIterations > range.Max)
+                    throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
+                        $"The PBKDF2 iterations in the settings must be between {range.Min:N0} and {range.Max:N0}."));
+                return KdfPresets.Compatible(KdfIterations);
+            default:
+                return KdfPresets.Standard;
+        }
+    }
 }
 
 [SettingsCategory("Integration", Order = 7, Glyph = "", Description = "Explorer and Windows integration.")]
