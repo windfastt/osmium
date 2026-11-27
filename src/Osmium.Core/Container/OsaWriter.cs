@@ -50,6 +50,11 @@ public sealed record OsaWriterOptions
     internal Action<int>? TestBeforeWrite { get; init; }
     /// <summary>The largest index frame this writer writes (<see cref="Osa.MaxIndexFrameBytes"/>; tests lower it).</summary>
     internal long MaxIndexFrame { get; init; } = Osa.MaxIndexFrameBytes;
+    /// <summary>Tests only: header records after the ones Osmium writes, as other software might add them (the index is
+    /// sealed over them, so only the reader's own rules can refuse them).</summary>
+    internal IReadOnlyList<(ulong Type, byte[] Value)>? TestExtraHeaderRecords { get; init; }
+    /// <summary>Tests only: bytes after the verifier in the EncryptionInfo record, as other software might write them.</summary>
+    internal byte[]? TestEncryptionRecordSuffix { get; init; }
 
     /// <summary>The key derivation these options ask for (null without a password).</summary>
     internal KdfParameters? ResolvedKdf => Password is null ? null : Kdf ?? (KdfIterations is { } n ? KdfParameters.Pbkdf2(n) : KdfPresets.Default);
@@ -116,6 +121,7 @@ public sealed class OsaWriter : IDisposable
             // The work area is wiped and freed when this returns: compression never runs next to it.
             _key = ArchiveKey.Derive(_options.Password!, new EncryptionInfo(kdf, salt, new byte[EncryptionRecord.VerifierBytes]), run, creating: true);
             enc = new EncryptionInfo(kdf, salt, _key.Verifier);
+            if (_options.TestEncryptionRecordSuffix is { } suffix) enc = enc with { RecordBytes = [.. enc.RecordBytes, .. suffix] };
         }
         _header = new ArchiveHeader
         {
@@ -124,6 +130,7 @@ public sealed class OsaWriter : IDisposable
             ArchiveId = _options.TestFixedArchiveId?.ToArray() ?? RandomNumberGenerator.GetBytes(16),
             Encryption = enc,
             Creator = _options.Creator,
+            ExtraRecords = _options.TestExtraHeaderRecords,
         };
         try
         {

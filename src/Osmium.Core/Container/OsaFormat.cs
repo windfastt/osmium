@@ -168,6 +168,7 @@ public sealed class ArchiveHeader
         var ext = new BlobWriter();
         if (Encryption is { } e) ext.U(1).Bytes(e.RecordBytes);
         if (Creator is not null) ext.U(2).Str(Creator);
+        foreach (var (type, value) in ExtraRecords ?? []) ext.U(type).Bytes(value);
         var extBytes = ext.ToArray();
         var buf = new byte[36 + extBytes.Length + 4];
         Osa.Magic.CopyTo(buf);
@@ -208,6 +209,7 @@ public sealed class ArchiveHeader
 
         EncryptionInfo? enc = null;
         string? creator = null;
+        int ignored = 0, creators = 0, creatorBytes = 0;
         var r = new BlobReader(rest.AsSpan(0, (int)extLen));
         while (!r.End)
         {
@@ -222,9 +224,12 @@ public sealed class ArchiveHeader
                     break;
                 case 2:
                     creator = Encoding.UTF8.GetString(val);
+                    creators++;
+                    creatorBytes = val.Length;
                     break;
                 default:
                     if ((type & 1) == 1) throw new NewerVersionException($"archive feature #{type}");
+                    ignored++; // a newer version's ignorable record: kept out of encrypted archives (FORMAT §5)
                     break;
             }
         }
@@ -234,8 +239,33 @@ public sealed class ArchiveHeader
         var raw = new byte[36 + extLen + 4];
         all.CopyTo(raw, 0);
         rest.AsSpan((int)extLen).CopyTo(raw.AsSpan(36 + (int)extLen));
-        return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length, Raw = raw };
+        return new ArchiveHeader
+        {
+            Minor = minor, Flags = flags, ArchiveId = fixedPart.AsSpan(16, 16).ToArray(), Encryption = enc, Creator = creator, Length = raw.Length,
+            Raw = raw, IgnoredRecords = ignored, CreatorRecords = creators, CreatorBytes = creatorBytes,
+        };
     }
+
+    /// <summary>Tests only: records written after the ones Osmium writes (see <see cref="OsaWriterOptions.TestExtraHeaderRecords"/>).</summary>
+    internal IReadOnlyList<(ulong Type, byte[] Value)>? ExtraRecords { get; init; }
+
+    /// <summary>Ignorable records of types this version does not know (read, skipped).</summary>
+    internal int IgnoredRecords { get; private init; }
+    /// <summary>How many Creator records the header holds, and the length in bytes of the last.</summary>
+    internal int CreatorRecords { get; private init; }
+    internal int CreatorBytes { get; private init; }
+
+    /// <summary>
+    /// In an encrypted archive, what the header holds beyond what Osmium writes, as plaintext beside the ciphertext
+    /// (FORMAT §5): an ignorable record of an unknown type, more than one Creator record, a Creator record longer than 64
+    /// bytes or with control characters, or bytes after the verifier of a PBKDF2 record. Null when there is none.
+    /// </summary>
+    internal string? UnprotectedRoom() =>
+        IgnoredRecords > 0 ? "an ignorable header record of a type this version does not know"
+        : CreatorRecords > 1 ? "more than one Creator record"
+        : CreatorBytes > 64 || (Creator?.Any(char.IsControl) ?? false) ? "a Creator record that is long or holds control characters"
+        : Encryption is { ExtraBytes: > 0 } ? "bytes after the password check value"
+        : null;
 }
 
 /// <summary>Footer (FORMAT §4).</summary>

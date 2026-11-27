@@ -140,12 +140,77 @@ public sealed class OsaReader : IDisposable
             if (ft.IndexOffset < header.Length || ft.IndexOffset + ft.IndexLength + Osa.FooterSize != length)
                 throw new CorruptDataException("Index location is invalid (truncated or appended file?).");
 
+            // Encrypted archives: every byte is header, frame header, authenticated ciphertext, an exact copy of one of
+            // them, zero padding, the header-copy trailer or the footer (FORMAT §5). What else is found is refused before
+            // anything is listed, unless the user agreed; then it is ignored, and the warnings say so.
+            bool allowWeak = PasswordKdf.Resolve(options.Protection) == ProtectionPolicy.AllowWeak;
+            var unprotected = new List<UnprotectedDataException>();
+            var candidates = new List<ArchiveHeader> { header };
             if (header.Encrypted)
             {
                 // An index frame that is not encrypted under a header that says encrypted is refused before the password
                 // is asked for (a frame header whose CRC fails is damage, left to the spare copy).
                 if (ReadFrameHeader(handle, ft.IndexOffset) is { } ih && (ih.Flags & Osa.FrameFlagEncrypted) == 0) throw new ModifiedArchiveException();
-                var enc = header.Encryption!;
+                if (header.UnprotectedRoom() is not null) unprotected.Add(new UnprotectedDataException(mayBeDamage: false));
+                var different = CheckHeaderCopy(handle, ft, header, usedSpareHeader, unprotected);
+                RefuseUnlessAllowed(unprotected, allowWeak);
+                // Header and header copy both check out and differ: with the user's agreement, each is tried, and the one
+                // whose bytes authenticate the file list is used.
+                if (different is not null) candidates.Add(different);
+            }
+
+            string? password = null;
+            ArchiveIndex? index = null;
+            bool usedSpareIndex = false;
+            Exception? firstError = null;
+            foreach (var candidate in candidates)
+            {
+                try
+                {
+                    key = candidate.Encrypted ? KeyFor(candidate) : null;
+                    try
+                    {
+                        index = ReadIndex(handle, ft.IndexOffset, ft.IndexLength, ft.IndexOffset, candidate, key, registry);
+                    }
+                    catch (Exception e) when (IsDamage(e))
+                    {
+                        index = IndexFromCopy(handle, ft, candidate, key, registry) ?? Rethrow<ArchiveIndex>(e);
+                        usedSpareIndex = true;
+                    }
+                    header = candidate;
+                    break;
+                }
+                catch (Exception e) when (candidates.Count > 1 && (e is WrongPasswordException || IsDamage(e)))
+                {
+                    key?.Dispose();
+                    key = null;
+                    firstError ??= e;
+                }
+            }
+            if (index is null) Rethrow(firstError!);
+            if (header != candidates[0]) warnings.Add(UsedTheHeaderThatAuthenticates);
+            if (usedSpareIndex) warnings.Add(UsedSpareIndex);
+            if (header.Encrypted) CheckBlockFrameHeaders(handle, index);
+            var spares = FindSpares(handle, index, ft, header, out bool damaged, out bool newer);
+            if (header.Encrypted)
+            {
+                CheckLayout(handle, index, ft, header, spares, usedSpareIndex, unprotected);
+                RefuseUnlessAllowed(unprotected, allowWeak);
+                if (unprotected.Count > 0) warnings.Add(IgnoredUnprotectedData);
+            }
+            if (damaged && !usedSpareIndex) warnings.Add(SpareDamaged);
+            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
+                usedSpareHeader, usedSpareIndex)
+            {
+                SpareCopyStatus = spares is not null ? SpareCopyStatus.Present : newer ? SpareCopyStatus.Newer
+                    : damaged ? SpareCopyStatus.Damaged : SpareCopyStatus.None,
+            };
+
+            // The key for this header's settings: the checks that need no password first, then the cached key or the
+            // password (asked at most once in this open), one derivation and the verifier.
+            ArchiveKey KeyFor(ArchiveHeader h)
+            {
+                var enc = h.Encryption!;
                 var run = new KdfRun
                 {
                     MemoryLimitBytes = options.KdfMemoryLimit, Policy = options.Protection, AllowSlow = options.AllowSlowKdf,
@@ -154,39 +219,21 @@ public sealed class OsaReader : IDisposable
                 PasswordKdf.Admit(enc.Kdf, run);
                 if (options.KeyCache?.TryGet(enc, out var cached) == true)
                 {
-                    key = cached;
-                    if (!key.Matches(enc.Verifier)) throw new WrongPasswordException(); // a wrong key is a wrong password
+                    if (cached.Matches(enc.Verifier)) return cached;
+                    cached.Dispose();
+                    throw new WrongPasswordException(); // a wrong key is a wrong password
                 }
-                else
+                password ??= options.Password?.Invoke() ?? throw new PasswordRequiredException();
+                PasswordKdf.CheckPasswordText(password, creating: false);
+                var derived = ArchiveKey.Derive(password, enc, run);
+                if (!derived.Matches(enc.Verifier))
                 {
-                    var pw = options.Password?.Invoke() ?? throw new PasswordRequiredException();
-                    PasswordKdf.CheckPasswordText(pw, creating: false);
-                    key = ArchiveKey.Derive(pw, enc, run);
-                    if (!key.Matches(enc.Verifier)) throw new WrongPasswordException();
-                    options.KeyCache?.Add(enc, key);
+                    derived.Dispose();
+                    throw new WrongPasswordException();
                 }
+                options.KeyCache?.Add(enc, derived);
+                return derived;
             }
-            ArchiveIndex index;
-            bool usedSpareIndex = false;
-            try
-            {
-                index = ReadIndex(handle, ft.IndexOffset, ft.IndexLength, ft.IndexOffset, header, key, registry);
-            }
-            catch (Exception e) when (IsDamage(e))
-            {
-                index = IndexFromCopy(handle, ft, header, key, registry) ?? Rethrow<ArchiveIndex>(e);
-                warnings.Add(UsedSpareIndex);
-                usedSpareIndex = true;
-            }
-            if (header.Encrypted) CheckBlockFrameHeaders(handle, index);
-            var spares = FindSpares(handle, index, ft, header, out bool damaged, out bool newer);
-            if (damaged && !usedSpareIndex) warnings.Add(SpareDamaged);
-            return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
-                usedSpareHeader, usedSpareIndex)
-            {
-                SpareCopyStatus = spares is not null ? SpareCopyStatus.Present : newer ? SpareCopyStatus.Newer
-                    : damaged ? SpareCopyStatus.Damaged : SpareCopyStatus.None,
-            };
         }
         catch
         {
@@ -221,6 +268,102 @@ public sealed class OsaReader : IDisposable
     }
 
     internal const string IndexTooLarge = "The file list of this archive is larger than Osmium accepts (more than 256 MiB).";
+    internal const string IgnoredUnprotectedData = "This archive holds data outside its protected parts; Osmium ignored it.";
+    internal const string UsedTheHeaderThatAuthenticates =
+        "The header of this encrypted archive and its spare copy differ; Osmium used the one the file list authenticates.";
+
+    /// <summary>Refuses with the first finding (one that cannot be damage before one that can), unless the user agreed.</summary>
+    private static void RefuseUnlessAllowed(List<UnprotectedDataException> found, bool allowWeak)
+    {
+        if (found.Count > 0 && !allowWeak) throw found.OrderBy(e => e.MayBeDamage).First();
+    }
+
+    /// <summary>
+    /// An encrypted archive's header copy H, when a trailer before the index frame checks out (whether the archive
+    /// should have one, its index says; <see cref="CheckLayout"/>): a trailer of a newer writer, padding that is not
+    /// zero, or header bytes that differ from an intact header at offset 0 are room for plaintext (and may be damage).
+    /// Returns H's header when it checks out as this archive's header and differs from the one at offset 0.
+    /// </summary>
+    private static ArchiveHeader? CheckHeaderCopy(ArchiveFile handle, ArchiveFooter ft, ArchiveHeader header, bool usedSpareHeader, List<UnprotectedDataException> found)
+    {
+        if (ReadTrailer(handle, ft.IndexOffset) is not { } t) return null;
+        if (t.Newer)
+        {
+            found.Add(new UnprotectedDataException(mayBeDamage: true));
+            return null;
+        }
+        long at = ft.IndexOffset - t.CopyLength;
+        var bytes = new byte[t.HeaderLength]; // at most the longest header (the trailer's lengths were checked)
+        if (at < header.Length || !TryRead(handle, at, bytes))
+        {
+            found.Add(new UnprotectedDataException(mayBeDamage: true));
+            return null;
+        }
+        if (!ZerosAt(handle, at + t.HeaderLength, t.PaddingLength)) found.Add(new UnprotectedDataException(mayBeDamage: true));
+        if (usedSpareHeader || bytes.AsSpan().SequenceEqual(header.Raw)) return null; // standing in for a damaged header, or the same
+        ArchiveHeader? copy = null;
+        try { copy = ArchiveHeader.Read(new MemoryStream(bytes, writable: false)); }
+        catch (Exception e) when (IsDamage(e) || e is NewerVersionException or ModifiedArchiveException) { }
+        if (copy is { Encrypted: true } && copy.Length == t.HeaderLength && BinaryPrimitives.ReadUInt64LittleEndian(copy.ArchiveId) == ft.IdPrefix)
+        {
+            found.Add(new UnprotectedDataException(mayBeDamage: true, UnprotectedDataException.CopiesDifferMessage));
+            return copy;
+        }
+        found.Add(new UnprotectedDataException(mayBeDamage: true));
+        return null;
+    }
+
+    /// <summary>
+    /// After the index of an encrypted archive authenticated: its blocks follow the header without gaps (gapBefore 0)
+    /// and end where the spare copy B starts (the index names it) or, without spare copies, where the index frame
+    /// starts; and B is a byte-for-byte copy of the index frame A. When A failed and B stood in for it, A is damage that
+    /// B replaced, as a header copy replaces a damaged header.
+    /// </summary>
+    private static void CheckLayout(ArchiveFile handle, ArchiveIndex index, ArchiveFooter ft, ArchiveHeader header, Spares? spares,
+        bool usedSpareIndex, List<UnprotectedDataException> found)
+    {
+        long end = header.Length;
+        bool gap = false;
+        foreach (var b in index.Blocks)
+        {
+            gap |= b.Offset != end;
+            end = b.Offset + b.FrameLength;
+        }
+        if (gap) found.Add(new UnprotectedDataException(mayBeDamage: false));
+        if (index.Metadata.TryGetValue(ArchiveIndex.SparesKey, out var v))
+        {
+            if (v.Length != 8 || (ulong)end != BinaryPrimitives.ReadUInt64LittleEndian(v)) found.Add(new UnprotectedDataException(mayBeDamage: false));
+            if (spares is null || (!usedSpareIndex && !SameBytesAt(handle, spares.IndexCopyOffset, ft.IndexOffset, ft.IndexLength)))
+                found.Add(new UnprotectedDataException(mayBeDamage: true));
+        }
+        else if (end != ft.IndexOffset) found.Add(new UnprotectedDataException(mayBeDamage: false));
+    }
+
+    private static bool SameBytesAt(ArchiveFile handle, long a, long b, long count)
+    {
+        var x = new byte[(int)Math.Min(Math.Max(count, 1), 1 << 20)];
+        var y = new byte[x.Length];
+        for (long done = 0; done < count;)
+        {
+            int n = (int)Math.Min(x.Length, count - done);
+            if (!TryRead(handle, a + done, x.AsSpan(0, n)) || !TryRead(handle, b + done, y.AsSpan(0, n))) return false;
+            if (!x.AsSpan(0, n).SequenceEqual(y.AsSpan(0, n))) return false;
+            done += n;
+        }
+        return true;
+    }
+
+    private static bool ZerosAt(ArchiveFile handle, long offset, long count)
+    {
+        var x = new byte[(int)Math.Min(Math.Max(count, 1), 1 << 16)];
+        for (long done = 0; done < count;)
+        {
+            int n = (int)Math.Min(x.Length, count - done);
+            if (!TryRead(handle, offset + done, x.AsSpan(0, n)) || x.AsSpan(0, n).ContainsAnyExcept((byte)0)) return false;
+            done += n;
+        }
+        return true;
+    }
 
     /// <summary>A frame header whose marker and CRC check out: flags, number and body length.</summary>
     private readonly record struct FrameHead(uint Flags, ulong Number, long BodyLength);
@@ -477,31 +620,9 @@ public sealed class OsaReader : IDisposable
         return problems;
     }
 
-    private bool SameBytes(long a, long b, long count)
-    {
-        var x = new byte[(int)Math.Min(count, 1 << 20)];
-        var y = new byte[x.Length];
-        for (long done = 0; done < count;)
-        {
-            int n = (int)Math.Min(x.Length, count - done);
-            if (!TryRead(_handle, a + done, x.AsSpan(0, n)) || !TryRead(_handle, b + done, y.AsSpan(0, n))) return false;
-            if (!x.AsSpan(0, n).SequenceEqual(y.AsSpan(0, n))) return false;
-            done += n;
-        }
-        return true;
-    }
+    private bool SameBytes(long a, long b, long count) => SameBytesAt(_handle, a, b, count);
 
-    private bool Zeros(long offset, long count)
-    {
-        var x = new byte[(int)Math.Min(Math.Max(count, 1), 1 << 16)];
-        for (long done = 0; done < count;)
-        {
-            int n = (int)Math.Min(x.Length, count - done);
-            if (!TryRead(_handle, offset + done, x.AsSpan(0, n)) || x.AsSpan(0, n).ContainsAnyExcept((byte)0)) return false;
-            done += n;
-        }
-        return true;
-    }
+    private bool Zeros(long offset, long count) => ZerosAt(_handle, offset, count);
 
     private static BlockBody ReadFrame(ArchiveFile h, long offset, long frameLength, ulong expectedFrame,
         ArchiveHeader header, ArchiveKey? key, MethodRegistry reg, bool isIndex)

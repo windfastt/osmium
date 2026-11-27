@@ -347,7 +347,8 @@ public class ReaderPolicyTests
     public void AHeaderByteTheFileListBindsCannotBeChanged(string kdf)
     {
         using var t = new TempDir();
-        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf, SpareCopyPolicy.Always), 3000, 3000);
+        // (with a header copy, the reader would find that the two differ: that case has its own tests below)
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
         var b = File.ReadAllBytes(path);
         EncryptedArchives.EditHeader(b, h => h[14] ^= 0x01); // the experimental flag (bit 16), CRC fixed
         File.WriteAllBytes(path, b);
@@ -466,6 +467,256 @@ public class ReaderPolicyTests
         SalvageKdfTests.AssertRestored(r, t.Sub("out"));
     }
 
+    // ------------------------------------------------------------------ item 3: no room for plaintext beside the ciphertext
+
+    private static OsaOpenOptions Allowed(string? password = Pw) => new() { Password = () => password, Protection = ProtectionPolicy.AllowWeak };
+
+    /// <summary>Refused under Osmium's own policy (M1 or M3 as given); opens with a warning when the user agreed.</summary>
+    internal static void AssertRoomRefusedUnlessAllowed(string path, bool mayBeDamage, string? message = null)
+    {
+        using (TestDefaults.AsOsmiumDoes())
+        {
+            var e = Assert.Throws<UnprotectedDataException>(() => OsaReader.Open(path, () => Pw));
+            Assert.Equal(mayBeDamage, e.MayBeDamage);
+            Assert.Equal(message ?? (mayBeDamage ? UnprotectedDataException.MayBeDamageMessage : ModifiedArchiveException.DefaultMessage), e.Message);
+            Assert.Throws<UnprotectedDataException>(() => ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw }, Ct));
+            using var r = OsaReader.Open(path, Allowed());
+            Assert.Contains(OsaReader.IgnoredUnprotectedData, r.Warnings);
+            using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw, AllowWeakProtection = true }, Ct);
+            Assert.Contains(OsaReader.IgnoredUnprotectedData, s.Warnings);
+        }
+    }
+
+    /// <param name="kdf">"pbkdf2" (100,000 iterations), "argon2id" (small: weak, so refused under Osmium's own policy
+    /// before any check after the password), "floor" (the lightest Argon2id Osmium accepts), or "none".</param>
+    internal static string WriteRoom(TempDir t, string kdf, OsaWriterOptions? extra = null, SpareCopyPolicy spares = SpareCopyPolicy.Never)
+    {
+        var o = kdf == "none" ? new OsaWriterOptions { SpareCopies = spares }
+            : kdf == "floor" ? Options("argon2id", spares) with { Kdf = KdfPresets.Floor }
+            : Options(kdf, spares);
+        if (extra is not null) o = o with { TestExtraHeaderRecords = extra.TestExtraHeaderRecords, TestEncryptionRecordSuffix = extra.TestEncryptionRecordSuffix };
+        return EncryptedArchives.WriteWithFolder(t.Sub($"{kdf}-{Guid.NewGuid():N}.osa"), o, 3000, 3000);
+    }
+
+    public static TheoryData<string> Kdfs => ["pbkdf2", "argon2id"];
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void AnIgnorableHeaderRecordOfAnUnknownTypeIsRoomInAnEncryptedArchiveOnly(string kdf)
+    {
+        using var t = new TempDir();
+        var record = new OsaWriterOptions { TestExtraHeaderRecords = [(4, "hello, anyone"u8.ToArray())] };
+        AssertRoomRefusedUnlessAllowed(WriteRoom(t, kdf, record), mayBeDamage: false);
+        using var plain = OsaReader.Open(WriteRoom(t, "none", record)); // FORMAT §9: unencrypted archives keep accepting it
+        Assert.Empty(plain.Warnings);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void AnUnusualCreatorRecordIsRoom(string kdf)
+    {
+        using var t = new TempDir();
+        AssertRoomRefusedUnlessAllowed(WriteRoom(t, kdf, new OsaWriterOptions { TestExtraHeaderRecords = [(2, new byte[65].Select(_ => (byte)'x').ToArray())] }), mayBeDamage: false);
+        AssertRoomRefusedUnlessAllowed(WriteRoom(t, kdf, new OsaWriterOptions { TestExtraHeaderRecords = [(2, "Osmium\n0.2.0"u8.ToArray())] }), mayBeDamage: false);
+        using var plain = OsaReader.Open(WriteRoom(t, "none", new OsaWriterOptions { TestExtraHeaderRecords = [(2, "Osmium\n0.2.0"u8.ToArray())] }));
+        Assert.Empty(plain.Warnings);
+    }
+
+    [Fact]
+    public void BytesAfterThePbkdf2VerifierAreRoom()
+    {
+        using var t = new TempDir();
+        AssertRoomRefusedUnlessAllowed(WriteRoom(t, "pbkdf2", new OsaWriterOptions { TestEncryptionRecordSuffix = [0x42] }), mayBeDamage: false);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void ARecordInBothHeadersIsRoomWhenTheHeaderCopyStandsIn(string kdf)
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, kdf, new OsaWriterOptions { TestExtraHeaderRecords = [(4, "room"u8.ToArray())] }, SpareCopyPolicy.Always);
+        var b = File.ReadAllBytes(path);
+        b[12] ^= 0x04; // header 0 damaged (its CRC fails): the copy, which holds the record too, stands in
+        File.WriteAllBytes(path, b);
+        AssertRoomRefusedUnlessAllowed(path, mayBeDamage: false);
+        using var r = OsaReader.Open(path, Allowed());
+        Assert.Contains(OsaReader.UsedSpareHeader, r.Warnings);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void ARecordInHeaderZeroWithACleanCopyIsRefusedAndNotTakenForDamage(string kdf)
+    {
+        using var t = new TempDir();
+        string clean = WriteRoom(t, kdf, spares: SpareCopyPolicy.Always);
+        // header 0 replaced by one with a record more (its CRC is right); H is the original, clean header
+        var original = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(clean)));
+        var records = new List<(ulong, byte[])> { (1, original.Encryption!.RecordBytes) };
+        if (original.Creator is { } c) records.Add((2, System.Text.Encoding.UTF8.GetBytes(c)));
+        records.Add((4, "room"u8.ToArray()));
+        var changed = HeaderKdfTests.Header(original.Flags, [.. records]);
+        original.ArchiveId.CopyTo(changed, 16);
+        EncryptedArchives.EditHeader(changed, _ => { });
+        string path = t.Sub("changed.osa");
+        File.WriteAllBytes(path, EncryptedArchives.Graft(changed, File.ReadAllBytes(clean)));
+        using (TestDefaults.AsOsmiumDoes())
+        {
+            var e = Assert.Throws<UnprotectedDataException>(() => OsaReader.Open(path, () => Pw));
+            Assert.False(e.MayBeDamage); // the record is reported first, not "used its spare copy"
+        }
+    }
+
+    /// <summary>A copy of <paramref name="path"/> with <paramref name="change"/> applied to its bytes.</summary>
+    internal static string Variant(TempDir t, string path, string name, Action<byte[]> change)
+    {
+        var b = File.ReadAllBytes(path);
+        change(b);
+        string p = t.Sub(name + "-" + Guid.NewGuid().ToString("N")[..6] + ".osa");
+        File.WriteAllBytes(p, b);
+        return p;
+    }
+
+    internal static readonly byte[] Marker = "KNOWN-PLAINTEXT-MARKER"u8.ToArray();
+
+    /// <summary>The marker in the body of B, the spare copy of the index frame (its frame header still checks out).</summary>
+    internal static string MarkerInSpareFileList(TempDir t, string path)
+    {
+        var tail = SpareArchives.TailOf(path, Pw);
+        return Variant(t, path, "spare", b => Marker.CopyTo(b, tail.SpareOffset + Osa.FrameHeaderSize + 40));
+    }
+
+    [Fact]
+    public void BytesInTheSpareFileListAreRoom() =>
+        BytesInTheSpareFileListAreRoomFor("pbkdf2"); // Argon2id: in the heavy collection (it needs settings above the minimum)
+
+    internal static void BytesInTheSpareFileListAreRoomFor(string kdf)
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, kdf, spares: SpareCopyPolicy.Always);
+        AssertRoomRefusedUnlessAllowed(MarkerInSpareFileList(t, path), mayBeDamage: true);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void BytesInTheHeaderCopysPaddingOrANewerTrailerAreRoom(string kdf)
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, kdf, spares: SpareCopyPolicy.Always);
+        var tail = SpareArchives.TailOf(path, Pw);
+        var marker = Marker;
+        string Variant(string name, Action<byte[]> change) => ReaderPolicyTests.Variant(t, path, name, change);
+        // in H's padding (after the header bytes, before the trailer)
+        AssertRoomRefusedUnlessAllowed(Variant("padding", b => marker.CopyTo(b, tail.HeaderCopyOffset + tail.HeaderLength + 8)), mayBeDamage: true);
+        // a trailer flag set, its CRC right: a newer writer's H, which in an encrypted archive is room
+        AssertRoomRefusedUnlessAllowed(Variant("trailer", b =>
+        {
+            var trailer = b.AsSpan((int)tail.TrailerOffset, SpareCopies.TrailerSize);
+            trailer[4] = 1;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(trailer[28..], Osa.Crc(trailer[..28]));
+        }), mayBeDamage: true);
+        // the same bytes in an unencrypted archive: it opens, as before (Test reports the damaged copies)
+        string plainPath = WriteRoom(t, "none", spares: SpareCopyPolicy.Always);
+        var plainTail = SpareArchives.TailOf(plainPath, null);
+        var pb = File.ReadAllBytes(plainPath);
+        marker.CopyTo(pb, plainTail.HeaderCopyOffset + plainTail.HeaderLength + 8);
+        File.WriteAllBytes(plainPath, pb);
+        using var plain = OsaReader.Open(plainPath);
+        Assert.Empty(plain.Warnings);
+    }
+
+    /// <summary>Re-encodes and re-seals the file list after <paramref name="change"/> edits its raw bytes (padded again
+    /// for Argon2id archives).</summary>
+    private static void RewriteIndex(string path, Func<byte[], byte[]> change)
+    {
+        var header = ArchiveHeader.Read(new MemoryStream(File.ReadAllBytes(path)));
+        bool pad = header.Encryption!.Kdf.Algorithm == KdfAlgorithm.Argon2id;
+        EncryptedArchives.ResealIndex(path, plain =>
+        {
+            var body = BlockBody.Parse(plain, MethodRegistry.Default, "the index", paddingAllowed: pad);
+            var raw = change(PipelineExecutor.Decode(body.Descriptor, body.Payload, CodecContext.None));
+            var (desc, payload) = PipelineExecutor.Encode(body.Descriptor.Spec, raw, CodecContext.None);
+            var prefix = new BlockBody(desc, BlockBody.Hash128(raw), payload).SerializePrefix();
+            var result = new byte[pad ? BlockBody.PaddedLength(prefix.Length + payload.Length) : prefix.Length + payload.Length];
+            prefix.CopyTo(result, 0);
+            payload.CopyTo(result, prefix.Length);
+            return result;
+        });
+    }
+
+    [Fact]
+    public void AGapBeforeTheFirstBlockIsRoom() =>
+        AGapBeforeTheFirstBlockIsRoomFor("pbkdf2"); // Argon2id: in the heavy collection (it needs settings above the minimum)
+
+    internal static void AGapBeforeTheFirstBlockIsRoomFor(string kdf)
+    {
+        using var t = new TempDir();
+        string written = WriteRoom(t, kdf);
+        var b = File.ReadAllBytes(written);
+        var header = ArchiveHeader.Read(new MemoryStream(b));
+        // one byte after the header, and an index (re-sealed with the key) whose first block says gapBefore = 1
+        var shifted = (byte[])[.. b.AsSpan(0, header.Length), 0x7A, .. b.AsSpan(header.Length)];
+        long offset = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(shifted.AsSpan(shifted.Length - 32));
+        long length = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(shifted.AsSpan(shifted.Length - 24));
+        new ArchiveFooter(offset + 1, length, System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(header.ArchiveId)).Serialize().CopyTo(shifted, shifted.Length - 32);
+        string path = t.Sub("gap.osa");
+        File.WriteAllBytes(path, shifted);
+        RewriteIndex(path, raw =>
+        {
+            var r = new IO.BlobReader(raw);
+            r.U(); // index version
+            r.U(); // block count
+            r.U(); // length of the first block record
+            Assert.Equal(0, raw[r.Position]); // its gapBefore
+            raw[r.Position] = 1;
+            return raw;
+        });
+        AssertRoomRefusedUnlessAllowed(path, mayBeDamage: false);
+        using var opened = OsaReader.Open(path, Allowed());
+        Assert.Equal(header.Length + 1, opened.Blocks[0].Offset);
+        Assert.Equal((3, 0), (Extractor.Test(opened, null, Ct).FilesOk, 0));
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void BytesAfterTheFooterAreStillRefused(string kdf)
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, kdf);
+        var original = File.ReadAllBytes(path);
+        // appended: the end of the file is no footer
+        File.WriteAllBytes(path, [.. original, .. "after the end"u8]);
+        Assert.Equal(OsaReader.EndDamaged, Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(path, Allowed())).Message);
+        // appended before a copy of the footer: the footer no longer places the index frame at the end
+        File.WriteAllBytes(path, [.. original, .. "after the end"u8, .. original.AsSpan(original.Length - Osa.FooterSize)]);
+        Assert.Contains("Index location is invalid", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(path, Allowed())).Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(Kdfs))]
+    public void ChangedKeyDerivationSettingsWithAnIntactCopySayTheCopiesDifferNotWrongPassword(string kdf)
+    {
+        using var t = new TempDir();
+        string path = WriteRoom(t, kdf, spares: SpareCopyPolicy.Always);
+        var b = File.ReadAllBytes(path);
+        // one more iteration (PBKDF2: 100,000 is three bytes either way), or one more KiB (Argon2id: 64 is one byte)
+        EncryptedArchives.EditHeader(b, h => h[kdf == "pbkdf2" ? 39 : 40]++);
+        File.WriteAllBytes(path, b);
+        using (TestDefaults.AsOsmiumDoes())
+        {
+            int asked = 0;
+            var e = Assert.Throws<UnprotectedDataException>(() => OsaReader.Open(path, () => { asked++; return Pw; }));
+            Assert.Equal(UnprotectedDataException.CopiesDifferMessage, e.Message);
+            Assert.True(e.MayBeDamage);
+            Assert.Equal(0, asked);
+        }
+        // with the user's agreement, the copy's settings are tried too, and the header that authenticates the file list wins
+        int calls = 0;
+        using var r = OsaReader.Open(path, new OsaOpenOptions { Password = () => { calls++; return Pw; }, Protection = ProtectionPolicy.AllowWeak });
+        Assert.Equal(1, calls); // the password is asked for once
+        Assert.Contains(OsaReader.UsedTheHeaderThatAuthenticates, r.Warnings);
+        Assert.Equal((3, 0), (Extractor.Test(r, null, Ct).FilesOk, 0));
+    }
+
     [Fact]
     public void TheSourceGivesTheCostQuestionToItsCaller()
     {
@@ -481,6 +732,20 @@ public class ReaderPolicyTests
 [Collection(HeavyKeyDerivation.Name)]
 public class MinimumProtectionHeavyTests
 {
+    [Fact]
+    public void BytesInTheSpareFileListOfAnArgon2idArchiveAreRoom()
+    {
+        Argon2idHeavyTests.SkipUnlessMemoryFor(KdfPresets.Floor.MemoryBytes);
+        ReaderPolicyTests.BytesInTheSpareFileListAreRoomFor("floor");
+    }
+
+    [Fact]
+    public void AGapBeforeTheFirstBlockOfAnArgon2idArchiveIsRoom()
+    {
+        Argon2idHeavyTests.SkipUnlessMemoryFor(KdfPresets.Floor.MemoryBytes);
+        ReaderPolicyTests.AGapBeforeTheFirstBlockIsRoomFor("floor");
+    }
+
     [Fact]
     public void TheLightestPresetOpensUnderOsmiumsOwnPolicy()
     {
