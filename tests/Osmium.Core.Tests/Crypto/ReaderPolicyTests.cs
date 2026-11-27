@@ -396,6 +396,76 @@ public class ReaderPolicyTests
         Assert.Throws<NewerVersionException>(() => r.ReadBlock(1));
     }
 
+    // ------------------------------------------------------------------ item 2: the minimum protection
+
+    private static OsaOpenOptions Enforced(Func<string?> password) => new() { Password = password, Protection = ProtectionPolicy.Enforce };
+
+    [Theory]
+    [InlineData(99_999, false)]
+    [InlineData(100_000, true)]
+    public void Pbkdf2IsRefusedBelowOneHundredThousandIterations(int iterations, bool opens)
+    {
+        using var t = new TempDir();
+        string path = WriterSafetyTests.Write(t.Sub("a.osa"), new OsaWriterOptions { Password = Pw, KdfIterations = iterations });
+        int asked = 0;
+        string Ask() { asked++; return Pw; }
+        if (opens)
+        {
+            using (OsaReader.Open(path, Enforced(Ask))) { }
+            Assert.Equal(1, asked);
+            return;
+        }
+        var e = Assert.Throws<WeakProtectionException>(() => OsaReader.Open(path, Enforced(Ask)));
+        Assert.Equal(0, asked); // nothing was derived either: the password comes after the check
+        Assert.Contains("(PBKDF2, 99,999 iterations)", e.Message);
+        Assert.Contains("Osmium 0.1's command line could make such archives with --kdf-iterations", e.Message);
+    }
+
+    [Theory]
+    [InlineData(2, 262_144, 4)]  // 512 MiB-passes: less work than the minimum
+    [InlineData(3, 262_143, 4)]  // less memory than the minimum
+    [InlineData(1, 64 << 10, 4)]
+    public void Argon2idBelowTheLightestProtectionIsRefused(int t, int m, int p)
+    {
+        using var dir = new TempDir();
+        // written with settings whose varints have the same lengths, then given these (the refusal comes first)
+        var written = KdfParameters.Argon2id(1, m >= 1 << 14 ? 1 << 14 : 1 << 7, 1);
+        string path = WriterSafetyTests.Write(dir.Sub("a.osa"), new OsaWriterOptions { Password = Pw, Kdf = written });
+        EncryptedArchives.ReplaceRecord(path, EncryptedArchives.Argon2Record(t, m, p));
+        using var seams = new KdfSeams();
+        int asked = 0;
+        var e = Assert.Throws<WeakProtectionException>(() => OsaReader.Open(path, Enforced(() => { asked++; return Pw; })));
+        Assert.Equal((0, 0L), (asked, seams.Allocations));
+        Assert.Equal(KdfParameters.Argon2id(t, m, p), e.Parameters);
+        Assert.Equal($"This archive is protected more weakly than any Osmium preset ({e.Parameters.CostText()}). It may have been made by modified software.", e.Message);
+    }
+
+    [Theory]
+    [InlineData("pbkdf2-weak")]
+    [InlineData("argon2id")]
+    public void WeakProtectionOpensWhenTheUserAgreed(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), kdf);
+        Assert.Throws<WeakProtectionException>(() => OsaReader.Open(path, Enforced(() => Pw)));
+        using var r = OsaReader.Open(path, new OsaOpenOptions { Password = () => Pw, Protection = ProtectionPolicy.AllowWeak });
+        Assert.Equal((3, 0), (Extractor.Test(r, null, Ct).FilesOk, 0));
+    }
+
+    [Fact]
+    public void SalvageRefusesWeakProtectionUnlessAllowed()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.Write(t.Sub("a.osa"), "pbkdf2-weak");
+        int asked = 0;
+        Assert.Throws<WeakProtectionException>(() => SalvageKdfTests.Salvage(path, t.Sub("out"), () => { asked++; return Pw; },
+            new SalvageOptions { Protection = ProtectionPolicy.Enforce, MemoryBudget = 1L << 30 }));
+        Assert.Equal(0, asked);
+        Assert.False(Directory.Exists(t.Sub("out")));
+        var r = SalvageKdfTests.Salvage(path, t.Sub("out"), () => Pw, new SalvageOptions { Protection = ProtectionPolicy.AllowWeak, MemoryBudget = 1L << 30 });
+        SalvageKdfTests.AssertRestored(r, t.Sub("out"));
+    }
+
     [Fact]
     public void TheSourceGivesTheCostQuestionToItsCaller()
     {
@@ -404,5 +474,23 @@ public class ReaderPolicyTests
         EncryptedArchives.ReplaceRecord(path, EncryptedArchives.Argon2Record(16, 1 << 20, 4));
         Assert.Throws<KdfCostException>(() => ArchiveSources.Open(path,
             new ArchiveOpenOptions { Password = () => EncryptedArchives.Password, Limits = ImportLimits.Default with { MemoryBudgetBytes = 2L << 30 } }, Ct));
+    }
+}
+
+/// <summary>The lightest protection a reader accepts without asking (256 MiB): in the heavy collection.</summary>
+[Collection(HeavyKeyDerivation.Name)]
+public class MinimumProtectionHeavyTests
+{
+    [Fact]
+    public void TheLightestPresetOpensUnderOsmiumsOwnPolicy()
+    {
+        Argon2idHeavyTests.SkipUnlessMemoryFor(KdfPresets.Floor.MemoryBytes);
+        using var t = new TempDir();
+        using (TestDefaults.AsOsmiumDoes())
+        {
+            string path = WriterSafetyTests.Write(t.Sub("a.osa"), new OsaWriterOptions { Password = EncryptedArchives.Password, Kdf = KdfPresets.Floor });
+            using var r = OsaReader.Open(path, new OsaOpenOptions { Password = () => EncryptedArchives.Password, KdfMemoryLimit = 1L << 30 });
+            Assert.Equal(KdfPresets.Floor, r.Header.Encryption!.Kdf);
+        }
     }
 }

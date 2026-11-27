@@ -26,6 +26,13 @@ public static class Salvage
     /// <exception cref="WrongPasswordException">The header is intact and the password does not match it.</exception>
     /// <exception cref="NewerVersionException">The header is intact but uses a format feature of a newer version.</exception>
     /// <exception cref="CorruptDataException">The file holds no Osmium archive data at all.</exception>
+    /// <exception cref="WeakProtectionException">The archive is protected more weakly than any Osmium preset and
+    /// <see cref="SalvageOptions.Protection"/> does not allow it (before the password is asked for).</exception>
+    /// <exception cref="KdfMemoryLimitException">Its key derivation needs more than <see cref="SalvageOptions.MemoryBudget"/>.</exception>
+    /// <exception cref="KdfCostException">Its key derivation takes more work than the strongest preset, and
+    /// <see cref="SalvageOptions.AllowSlowKdf"/> is not set.</exception>
+    /// <exception cref="ModifiedArchiveException">The archive says it is encrypted, but frames where its authenticated
+    /// index places blocks are not, or none of its blocks authenticates. Nothing is written.</exception>
     public static SalvageResult Run(string archivePath, string destination, Func<string?>? password = null,
         SalvageOptions? options = null, CancellationToken ct = default)
     {
@@ -221,7 +228,7 @@ internal sealed class SalvageRun : IDisposable
     private KeyMaterial? ResolveKey(HeaderProbe probe, long firstFrame, Func<string?>? password, out string? problem)
     {
         problem = null;
-        var run = new KdfRun { MemoryLimitBytes = _o.MemoryBudget, Cancellation = _ct };
+        var run = new KdfRun { MemoryLimitBytes = _o.MemoryBudget, Policy = _o.Protection, AllowSlow = _o.AllowSlowKdf, Cancellation = _ct };
         if (probe.Header is { Encryption: { } enc } h)
         {
             // Every check of the settings comes before the password is asked for.

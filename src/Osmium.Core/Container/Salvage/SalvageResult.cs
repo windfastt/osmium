@@ -11,7 +11,13 @@ public sealed record SalvageOptions
     public bool RestoreTimes { get; init; } = true;
     public bool RestoreAttributes { get; init; } = true;
     public int MaxParallelBlocks { get; init; } = Math.Max(1, Environment.ProcessorCount);
+    /// <summary>Memory for decoding, and the most the key derivation of an encrypted archive may use.</summary>
     public long MemoryBudget { get; init; } = MemoryBudgets.Default();
+    /// <summary>Whether an encrypted archive protected more weakly than any Osmium preset, or holding data outside its
+    /// protected parts, is refused (the default) or salvaged after the user agreed.</summary>
+    public Crypto.ProtectionPolicy Protection { get; init; } = Crypto.ProtectionPolicy.Default;
+    /// <summary>Allow a key derivation that takes more work than the strongest preset (the user agreed).</summary>
+    public bool AllowSlowKdf { get; init; }
     /// <summary>
     /// When the recovered index describes more than this many times the data its blocks hold (heavy deduplication or
     /// a decompression bomb), or without an index the block files would be this many times the archive's size, nothing
