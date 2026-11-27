@@ -136,6 +136,11 @@ Filters are chosen by analysis/trials, never blindly: a filter that does not shr
 - **Safety**: `<name>.osa.partial-xxxx` output, fsync, rename; never touches sources; refuses to overwrite an existing
   archive unless asked; extraction writes `*.osmium-part-xxxx`, verifies the file hash, then renames; paths are
   validated with Windows rules on every OS (FORMAT §7); a source that changes while being read fails the job.
+  Sources are read only while they are the file the scan saw: never through a link, never a pipe or a device, and of
+  the scanned size, modification time and file id (creation time where there is no id). Known limit: the scan
+  records file ids on Linux only (Windows gives none without opening every file), so on Windows and macOS a file put
+  in a source's place with the same size, modification time and creation time is read as the source; a link in its
+  place is refused.
 ## 7. Analysis (`Osmium.Core/Analysis`)
 
 ### 7.1 Reading and sampling
