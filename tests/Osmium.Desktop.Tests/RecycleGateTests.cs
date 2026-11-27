@@ -58,7 +58,7 @@ public sealed class RecycleGateTests : IDisposable
         Assert.Empty(_rechecked);
         Assert.Equal(RecycleGate.CannotTake, gate.Outcome(item, 0, aborted: true).Reason);
         // The operation stops: nothing after it goes either.
-        Assert.Equal($"the operation stopped before it ({_folder}: {RecycleGate.CannotTake})", gate.Outcome(other, 0, aborted: true).Reason);
+        Assert.Equal($"an earlier item failed ({_folder}: {RecycleGate.CannotTake})", gate.Outcome(other, 0, aborted: true).Reason);
         Assert.NotNull(gate.PreDelete(recycles: true, other, _file));
     }
 
@@ -184,6 +184,45 @@ public sealed class RecycleGateTests : IDisposable
         string elsewhere = Path.Combine(_root, "other.txt");
         Assert.True(gate.PostDelete(null, elsewhere, 0, recycled: true, null));
         Assert.Equal(new RecycleOutcome(elsewhere, true, "the operation moved it to the Recycle Bin, although it was not handed over"), Assert.Single(gate.Others()));
+    }
+
+    [Fact]
+    public void AnItemAfterOneThatFailedSaysSo()
+    {
+        const int SharingViolation = unchecked((int)0x8007_0020);
+        string third = Path.Combine(_root, "third.txt");
+        var gate = Gate();
+        var first = gate.Expect(_folder)!;
+        var second = gate.Expect(_file)!;
+        var unreached = gate.Expect(third)!;
+        Assert.Null(gate.PreDelete(recycles: true, first, _folder));
+        Assert.True(gate.PostDelete(first, _folder, SharingViolation, recycled: false, null)); // the shell could not move it
+        // The shell goes on to the next item, which is refused: the operation has stopped.
+        Assert.NotNull(gate.PreDelete(recycles: true, second, _file));
+        string why = $"an earlier item failed ({_folder}: the shell could not move it)";
+        Assert.Equal(why, gate.Outcome(second, 0, aborted: true).Reason);
+        Assert.Equal(why, gate.Outcome(unreached, 0, aborted: true).Reason);
+        // The item that failed keeps its own reason, also when the shell asks about part of it again.
+        Assert.NotNull(gate.PreDelete(recycles: true, first, _child));
+        Assert.StartsWith("the shell could not move it: ", gate.Outcome(first, 0, aborted: true).Reason);
+    }
+
+    [Fact]
+    public void AnItemAfterACancelSaysTheJobWasCanceled()
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var gate = new RecycleGate(_ =>
+        {
+            cts.Cancel();
+            return null;
+        }, cts.Token);
+        var first = gate.Expect(_folder)!;
+        var second = gate.Expect(_file)!;
+        var unreached = gate.Expect(Path.Combine(_root, "third.txt"))!;
+        Assert.Equal("the job was canceled", gate.PreDelete(recycles: true, first, _folder));
+        Assert.NotNull(gate.PreDelete(recycles: true, second, _file));
+        Assert.Equal("the job was canceled", gate.Outcome(second, 0, aborted: true).Reason);
+        Assert.Equal("the job was canceled", gate.Outcome(unreached, 0, aborted: true).Reason);
     }
 
     [Fact]

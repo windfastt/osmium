@@ -40,7 +40,11 @@ public sealed class RecycleGate
     private readonly Dictionary<string, Item> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _holders = new(StringComparer.OrdinalIgnoreCase); // folders that hold an item
     private readonly Dictionary<string, RecycleOutcome> _others = new(StringComparer.OrdinalIgnoreCase); // by path, once
-    private string? _stopped;
+    private string? _stopped; // why the operation stopped, once it has
+    private bool _stoppedByCancel;
+
+    /// <summary>Why an item stays that the operation did not reach, or reached only once it had stopped.</summary>
+    private string StoppedEarlier => _stoppedByCancel ? RecycleCandidates.Canceled : $"an earlier item failed ({_stopped})";
 
     /// <param name="recheck">The last check of an item, with the path it was handed over as: a reason keeps it where it is.</param>
     /// <param name="ct">The job's cancellation: once it is canceled, nothing more is deleted.</param>
@@ -92,7 +96,14 @@ public sealed class RecycleGate
             var owner = key is null ? null : Owner(key);
             if (owner is not null) owner.Reached = true;
             if (own is not null) own.Reached = true;
-            if (_stopped is { } stopped) return stopped;
+            if (_stopped is { } stopped)
+            {
+                // The operation stopped at an earlier item: this one stays, and says so, unless it has an outcome of
+                // its own already (it failed, moved or was deleted itself).
+                var waiting = own ?? owner;
+                if (waiting is { Failed: 0, Recycled: false, Destroyed: false }) waiting.Refusal ??= StoppedEarlier;
+                return stopped;
+            }
             string? refusal =
                 !recycles ? CannotTake
                 : _ct.IsCancellationRequested ? RecycleCandidates.Canceled
@@ -113,6 +124,7 @@ public sealed class RecycleGate
             var blame = own ?? owner;
             if (blame is not null) blame.Refusal ??= refusal;
             _stopped = blame is null ? refusal : $"{blame.Path}: {refusal}";
+            _stoppedByCancel = refusal == RecycleCandidates.Canceled;
             return refusal;
         }
     }
@@ -180,7 +192,7 @@ public sealed class RecycleGate
             if (item.Refusal is { } refusal) return new RecycleOutcome(item.Path, false, refusal);
             if (item.Failed != 0) return new RecycleOutcome(item.Path, false, "the shell could not move it: " + Describe(item.Failed));
             if (!item.Reached)
-                return new RecycleOutcome(item.Path, false, _stopped is { } why ? $"the operation stopped before it ({why})"
+                return new RecycleOutcome(item.Path, false, _stopped is not null ? StoppedEarlier
                     : _ct.IsCancellationRequested ? RecycleCandidates.Canceled
                     : performed < 0 ? "the operation stopped before it: " + Describe(performed)
                     : aborted ? "the operation stopped before it" : "the shell did not move it");
