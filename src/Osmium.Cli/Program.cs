@@ -100,8 +100,21 @@ namespace Osmium.Cli
         internal bool PasswordRead { get; set; }
         public string? Get(string n) => _opts.GetValueOrDefault(Read(n));
         public string Get(string n, string d) => _opts.GetValueOrDefault(Read(n)) ?? d;
-        public long Size(string n, long d) => Has(n) ? ParamValues.ParseNumber(Get(n)!) : d;
-        public int Int(string n, int d) => Has(n) ? int.Parse(Get(n)!, CultureInfo.InvariantCulture) : d;
+        /// <summary>A size such as 8G, 512M or 4096; one too large for a number is an error that names the option.</summary>
+        public long Size(string n, long d)
+        {
+            if (!Has(n)) return d;
+            try { return ParamValues.ParseNumber(Get(n)!); }
+            catch (OverflowException) { throw new ArgumentException($"--{n} is too large: give a size such as 8G or 512M."); }
+        }
+
+        /// <summary>A whole number; anything else, or one too large, is an error that names the option.</summary>
+        public int Int(string n, int d)
+        {
+            if (!Has(n)) return d;
+            return int.TryParse(Get(n), NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v
+                : throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"--{n} must be a whole number (at most {int.MaxValue:N0})."));
+        }
     }
 
     internal static partial class Cli

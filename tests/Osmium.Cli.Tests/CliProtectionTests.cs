@@ -129,6 +129,27 @@ public sealed class CliProtectionTests : IDisposable
     }
 
     [Theory]
+    [InlineData("--kdf-iterations", "99999999999")]
+    [InlineData("--kdf-iterations", "many")]
+    [InlineData("--threads", "99999999999")]
+    [InlineData("--decode-speed", "99999999999")]
+    public async Task ANumberThatIsNotAWholeNumberIsAnErrorThatNamesItsOption(string option, string value)
+    {
+        var r = await WithPassword("a", P("out.osa"), P("in"), "--profile", "store", "-q", "--protection", "compatible", option, value);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains($"error: {option} must be a whole number (at most 2,147,483,647).", r.Error);
+        Assert.False(File.Exists(P("out.osa")));
+    }
+
+    [Fact]
+    public async Task ASizeTooLargeForANumberIsAnErrorThatNamesItsOption()
+    {
+        var r = await Run("", "t", Write("c.osa", Compatible), "--mem", "99999999999G");
+        Assert.Equal(1, r.ExitCode);
+        Assert.Contains("error: --mem is too large: give a size such as 8G or 512M.", r.Error);
+    }
+
+    [Theory]
     [InlineData("--protection", "strong")]
     [InlineData("--hide-sizes", null)]
     public async Task ProtectionWithoutAPasswordIsAnError(string option, string? value)
