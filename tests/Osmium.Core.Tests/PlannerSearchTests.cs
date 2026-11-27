@@ -394,6 +394,47 @@ public class PlannerSearchTests
         Assert.Equal(screened.Count, screened.Distinct().Count()); // no neighbour is tried twice
     }
 
+    /// <summary>Scripted sizes, and a weak reference to every sample it is given: at the search's first call it collects
+    /// garbage and notes which samples are still alive.</summary>
+    private sealed class SampleWatcher(Func<PipelineSpec, byte[], long> size, int rungs) : ITrialRunner
+    {
+        private readonly Dictionary<int, WeakReference<byte[]>> _samples = [];
+        private int _calls;
+
+        public HashSet<int> AliveDuringSearch { get; } = [];
+
+        public Task<long[]> RunAsync(IReadOnlyList<PipelineSpec> specs, byte[] sample, CancellationToken ct)
+        {
+            var sizes = specs.Select(s => size(s, sample)).ToArray();
+            lock (_samples)
+            {
+                _samples.TryAdd(sample.Length, new WeakReference<byte[]>(sample));
+                if (++_calls == rungs + 1)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                    foreach (var (length, w) in _samples)
+                        if (w.TryGetTarget(out _)) AliveDuringSearch.Add(length);
+                }
+            }
+            return Task.FromResult(sizes);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, new[] { Small, Full })] // the search screens on 16 KiB: the 8 KiB sample is not needed
+    [InlineData(false, new[] { Full })]       // without screening the search needs only the last sample
+    public async Task OnlyTheSamplesTheSearchUsesOutliveTheRungs(bool screen, int[] alive)
+    {
+        using var t = new TempDir();
+        var watcher = new SampleWatcher(LzmaLandscape, rungs: 3);
+        var profile = Screened(on: screen) with { Rungs = [8 << 10, Small, Full] };
+        var plan = await PlanFile(t, "book.txt", Book, Options(profile, watcher));
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), Assert.Single(plan.Groups).Spec!.ToString());
+        Assert.Equal(alive, watcher.AliveDuringSearch.Order());
+    }
+
     [Theory]
     [InlineData(false, new[] { Small, Full })]          // the switch is off
     [InlineData(true, new[] { 512 << 10, 1 << 20 })]    // the first rung already covers the 400 KiB group

@@ -446,8 +446,9 @@ public sealed class Planner(PlanOptions o)
         }
 
         var alive = allowed.Take(p.MaxCandidates).ToList();
-        // The candidates of the last rung that produced results, best first, with their objective on its sample; and
-        // the earlier rungs, whose smaller samples the parameter search can screen its steps on.
+        // The candidates of the last rung that produced results, best first, with their objective on its sample; and,
+        // when the search is screened, the earlier rungs it could still screen on, with the scores of the candidates
+        // that took part in the rung after them.
         var ranked = new List<(PipelineSpec Spec, double Score)>();
         byte[] sample = [];
         var earlier = new List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)>();
@@ -459,8 +460,16 @@ public sealed class Planner(PlanOptions o)
                 .OrderBy(t => Objective(t.s, t.size, next.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
             g.Explain.Add($"  rung {next.Length:N0} B: " + string.Join(", ", results.Select(t => $"{t.s} = {t.size:N0}")));
             if (results.Count == 0) break;
-            if (ranked.Count > 0) earlier.Add((sample, ranked.ToDictionary(t => t.Spec, t => t.Score)));
+            if (p.ScreenSearch && p.SearchEvals > 0 && ranked.Count > 0)
+            {
+                var tried = alive.ToHashSet();
+                earlier.Add((sample, ranked.Where(t => tried.Contains(t.Spec)).ToDictionary(t => t.Spec, t => t.Score)));
+            }
             sample = next;
+            // A kept sample at most half the current one also qualifies for any later, larger last sample, so the
+            // smaller ones before it can no longer be chosen.
+            int usable = earlier.FindLastIndex(e => 2L * e.Sample.Length <= sample.Length);
+            if (usable > 0) earlier.RemoveRange(0, usable);
             ranked = [.. results.Select(t => (t.s, Objective(t.s, t.size, next.Length)))];
             int keep = Math.Max(2, (int)Math.Ceiling(ranked.Count / (double)p.Eta));
             alive = ranked.Take(keep).Select(t => t.Spec).ToList();
@@ -482,11 +491,10 @@ public sealed class Planner(PlanOptions o)
             if (store is not null && scores[best] > scores[store] * 0.99) best = store;
         }
 
-        if (p.SearchEvals > 0 && !best.IsStore)
-        {
-            Screen? screen = p.ScreenSearch ? ScreeningSample(earlier, sample.Length, best) : null;
-            best = await HillClimbAsync(g, best, scores[best], sample, screen, biggestBlock, trials, ct);
-        }
+        bool search = p.SearchEvals > 0 && !best.IsStore;
+        Screen? screen = search && p.ScreenSearch ? ScreeningSample(earlier, sample.Length, best) : null;
+        earlier.Clear(); // only the screening sample, if any, lives on during the search
+        if (search) best = await HillClimbAsync(g, best, scores[best], sample, screen, biggestBlock, trials, ct);
 
         g.Spec = best;
         if (p.RaceTopTwo)
