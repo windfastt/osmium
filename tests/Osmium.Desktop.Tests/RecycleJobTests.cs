@@ -564,6 +564,55 @@ public sealed class RecycleJobTests : IDisposable
     }
 
     [Fact]
+    public async Task APausedJobMovesNothingUntilItIsResumed()
+    {
+        using var jm = Manager(Settings());
+        var real = jm.ReadIndex;
+        using var paused = new ManualResetEventSlim();
+        var id = Guid.Empty;
+        jm.ReadIndex = (path, password) =>
+        {
+            jm.Pause(id); // once the archive is written, before the originals are checked
+            paused.Set();
+            return real(path, password);
+        };
+        var finished = NextFinished(jm);
+        id = jm.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [_photos, _notes], Output = Path.Combine(_root, "out.osa") });
+        Assert.True(paused.Wait(Timeout, Ct));
+        await Task.Delay(300, Ct); // time enough to go on, if it did
+        Assert.Equal(JobState.Paused, jm.Snapshot().Single(j => j.Id == id).State);
+        Assert.Empty(_bin.Calls);
+        Assert.True(Directory.Exists(_photos));
+        jm.Resume(id);
+        var job = await finished.WaitAsync(Timeout, Ct);
+        Assert.Equal(new RecycleSummary(2, 0), job.Recycle);
+    }
+
+    [Fact]
+    public async Task APauseWhileTheOriginalsMoveHoldsTheNextOne()
+    {
+        using var paused = new ManualResetEventSlim();
+        JobManager? manager = null;
+        _bin.BeforeMove = p =>
+        {
+            if (p != _photos) return;
+            foreach (var active in manager!.Snapshot().Where(j => j.IsActive)) manager.Pause(active.Id);
+            paused.Set();
+        };
+        using var jm = Manager(Settings());
+        manager = jm;
+        var finished = NextFinished(jm);
+        var id = jm.Enqueue(new JobRequest { Kind = JobKind.Compress, Inputs = [_photos, _notes], Output = Path.Combine(_root, "out.osa") });
+        Assert.True(paused.Wait(Timeout, Ct));
+        await Task.Delay(300, Ct);
+        Assert.Empty(_bin.Moved); // held before its last check
+        Assert.True(Directory.Exists(_photos));
+        jm.Resume(id);
+        var job = await finished.WaitAsync(Timeout, Ct);
+        Assert.Equal(new RecycleSummary(2, 0), job.Recycle);
+    }
+
+    [Fact]
     public async Task NothingMovesWhenTheArchiveGoesBeforeTheMove()
     {
         string output = Path.Combine(_root, "out.osa");

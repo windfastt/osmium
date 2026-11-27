@@ -405,14 +405,27 @@ public sealed class JobManager : IDisposable
             else if (RecycleCandidates.JobBlocker(facts) is { } blocker) decision = RecycleDecision.KeepAll(r.Inputs, blocker);
             else
             {
+                // A paused job checks and moves nothing until it is resumed.
+                j.Gate.WaitIfPaused(ct);
                 // In the archive means listed by the archive's own index: the planner leaves files out (rules, unreadable
                 // files), so the scan alone does not say what the archive holds.
                 var (files, dirs) = RecycleCandidates.InArchive(plan.Files.Select(f => f.Src), plan.Dirs, ReadIndex(result.Path, () => r.Password));
                 var archived = facts with { ArchivedFiles = files, ArchivedDirs = dirs };
+                j.Gate.WaitIfPaused(ct);
                 decision = RecycleCandidates.Decide(archived, _recycler.DriveTypeOf, ct);
                 // The same rules once more for each input just before it moves: it may have changed since.
-                recheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf, ct);
+                var lastCheck = RecycleCandidates.Recheck(archived, _recycler.DriveTypeOf, ct);
+                recheck = path =>
+                {
+                    try { j.Gate.WaitIfPaused(ct); }
+                    catch (OperationCanceledException) { return RecycleCandidates.Canceled; }
+                    return lastCheck(path);
+                };
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            decision = RecycleDecision.KeepAll(r.Inputs, RecycleCandidates.Canceled);
         }
         catch (Exception e)
         {
