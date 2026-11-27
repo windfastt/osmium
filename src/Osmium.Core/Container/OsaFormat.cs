@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Security.Cryptography;
 using System.Text;
+using Osmium.Core.Crypto;
 using Osmium.Core.IO;
 using Osmium.Core.Pipeline;
 
@@ -31,12 +32,119 @@ public static class Osa
     public static uint Crc(ReadOnlySpan<byte> data) => Crc32.HashToUInt32(data);
 }
 
-public sealed record EncryptionInfo(int Iterations, byte[] Salt, byte[] Verifier);
+/// <summary>
+/// The header's EncryptionInfo record (FORMAT §1, §5): how the key is derived, the 32-byte salt and the 16-byte
+/// password check value. Holds no key.
+/// </summary>
+public sealed record EncryptionInfo(KdfParameters Kdf, byte[] Salt, byte[] Verifier)
+{
+    /// <summary>PBKDF2 with <paramref name="iterations"/>, as Osmium 0.1 writes it.</summary>
+    public EncryptionInfo(int iterations, byte[] salt, byte[] verifier) : this(KdfParameters.Pbkdf2(iterations), salt, verifier) { }
+
+    /// <summary>A copy (<c>with</c>) serializes its own record again.</summary>
+    private EncryptionInfo(EncryptionInfo other)
+    {
+        Kdf = other.Kdf;
+        Salt = other.Salt;
+        Verifier = other.Verifier;
+    }
+
+    /// <summary>PBKDF2 iterations; 0 for Argon2id.</summary>
+    public int Iterations => Kdf.Algorithm == KdfAlgorithm.Pbkdf2Sha512 ? Kdf.Iterations : 0;
+
+    private byte[]? _record;
+
+    /// <summary>The record's value bytes exactly as stored (as read, or as this version writes them): salvage writes
+    /// them again verbatim, and the key cache tells archives apart by them.</summary>
+    internal byte[] RecordBytes { get => _record ??= EncryptionRecord.Write(this); init => _record = value; }
+
+    /// <summary>Bytes after the verifier in a kdf 1 record as read (readers of kdf 1 ignore them; kdf 2 has none).</summary>
+    internal int ExtraBytes { get; init; }
+
+    public override string ToString() => $"EncryptionInfo {{ {Kdf.Describe()} }}";
+}
+
+/// <summary>
+/// The value of header record 1 (FORMAT §1): <c>u8 kdf</c>, then for kdf 1 <c>varint iterations</c>, for kdf 2
+/// <c>varint timeCost · varint memoryKiB · varint lanes</c>, then <c>u8[32] salt · u8 aead · u8[16] verifier</c>.
+/// The header reader and salvage share this parser and its checks.
+/// </summary>
+internal static class EncryptionRecord
+{
+    public const string InvalidMessage = "The encryption settings in this archive's header are invalid.";
+    public const int SaltBytes = 32, VerifierBytes = 16;
+    public const byte Aes256Gcm = 1;
+
+    public static byte[] Write(EncryptionInfo e)
+    {
+        var w = new BlobWriter().B((byte)e.Kdf.Algorithm);
+        switch (e.Kdf.Algorithm)
+        {
+            case KdfAlgorithm.Pbkdf2Sha512: w.U((ulong)e.Kdf.Iterations); break;
+            case KdfAlgorithm.Argon2id: w.U((ulong)e.Kdf.TimeCost).U((ulong)e.Kdf.MemoryKiB).U((ulong)e.Kdf.Lanes); break;
+            default: throw new ArgumentException($"Key derivation function {(byte)e.Kdf.Algorithm} cannot be written.");
+        }
+        if (e.Salt.Length != SaltBytes || e.Verifier.Length != VerifierBytes) throw new ArgumentException("The salt is 32 bytes and the verifier 16.");
+        return w.Raw(e.Salt).B(Aes256Gcm).Raw(e.Verifier).ToArray();
+    }
+
+    /// <summary>
+    /// Record 1 in its reading order (FORMAT §5): the kdf id (unknown: <see cref="NewerVersionException"/>), the fields
+    /// of its layout (missing or malformed: <see cref="CorruptDataException"/>), the cipher id (unknown:
+    /// <see cref="NewerVersionException"/>), for kdf 2 nothing after the verifier, then the hard limits. Allocates only
+    /// the salt and the verifier.
+    /// </summary>
+    public static EncryptionInfo Read(ReadOnlySpan<byte> value)
+    {
+        if (value.IsEmpty) throw new CorruptDataException(InvalidMessage);
+        byte kdf = value[0];
+        if (kdf is not ((byte)KdfAlgorithm.Pbkdf2Sha512 or (byte)KdfAlgorithm.Argon2id)) throw new NewerVersionException($"key derivation function {kdf}");
+        var info = ReadFields(value[1..], (KdfAlgorithm)kdf, checkCipher: true, out int consumed);
+        int extra = value.Length - 1 - consumed;
+        if (kdf == (byte)KdfAlgorithm.Argon2id && extra != 0) throw new CorruptDataException(InvalidMessage);
+        if (info.Kdf.Check() is { Kind: KdfVerdictKind.Invalid } v) throw new CorruptDataException(v.Reason!);
+        return info with { RecordBytes = value.ToArray(), ExtraBytes = extra };
+    }
+
+    /// <summary>
+    /// The fields after the kdf byte, read in the layout of <paramref name="kdf"/>; <paramref name="consumed"/> is how
+    /// many bytes they took. Salvage reads them where they lie in a damaged header and does not check the cipher id
+    /// (there is one). Missing bytes or a malformed varint: <see cref="CorruptDataException"/>. Values beyond an int are
+    /// kept as int.MaxValue, which the limits refuse.
+    /// </summary>
+    public static EncryptionInfo ReadFields(ReadOnlySpan<byte> fields, KdfAlgorithm kdf, bool checkCipher, out int consumed)
+    {
+        try
+        {
+            var r = new BlobReader(fields);
+            KdfParameters p;
+            if (kdf == KdfAlgorithm.Pbkdf2Sha512) p = KdfParameters.Pbkdf2(Clamp(r.U()));
+            else
+            {
+                int t = Clamp(r.U()), m = Clamp(r.U()), lanes = Clamp(r.U());
+                p = KdfParameters.Argon2id(t, m, lanes);
+            }
+            var salt = r.Raw(SaltBytes).ToArray();
+            byte cipher = r.B();
+            if (checkCipher && cipher != Aes256Gcm) throw new NewerVersionException($"cipher {cipher}");
+            var verifier = r.Raw(VerifierBytes).ToArray();
+            consumed = r.Position;
+            return new EncryptionInfo(p, salt, verifier);
+        }
+        catch (InvalidDataException)
+        {
+            throw new CorruptDataException(InvalidMessage);
+        }
+
+        static int Clamp(ulong v) => v > int.MaxValue ? int.MaxValue : (int)v;
+    }
+}
 
 /// <summary>Archive header (FORMAT §1).</summary>
 public sealed class ArchiveHeader
 {
-    public const int MaxKdfIterations = 20_000_000;
+    /// <summary><see cref="KdfLimits.MaxPbkdf2Iterations"/>.</summary>
+    public const int MaxKdfIterations = KdfLimits.MaxPbkdf2Iterations;
     /// <summary>The exact serialized header bytes (bound into the index's AEAD data).</summary>
     public byte[] Raw { get; private set; } = [];
     /// <summary>The archive's own minor version (offset 10): 0 for archives of Osmium 0.1.x, 1 since 0.2.0.</summary>
@@ -53,11 +161,7 @@ public sealed class ArchiveHeader
     public byte[] Serialize()
     {
         var ext = new BlobWriter();
-        if (Encryption is { } e)
-        {
-            var v = new BlobWriter().B(1).U((ulong)e.Iterations).Raw(e.Salt).B(1).Raw(e.Verifier).ToArray();
-            ext.U(1).Bytes(v);
-        }
+        if (Encryption is { } e) ext.U(1).Bytes(e.RecordBytes);
         if (Creator is not null) ext.U(2).Str(Creator);
         var extBytes = ext.ToArray();
         var buf = new byte[36 + extBytes.Length + 4];
@@ -107,14 +211,9 @@ public sealed class ArchiveHeader
             switch (type)
             {
                 case 1:
-                    var er = new BlobReader(val);
-                    if (er.B() is var kdf and not 1) throw new NewerVersionException($"key derivation function {kdf}");
-                    int iters = er.Int(100_000_000);
-                    if (iters > MaxKdfIterations) throw new CorruptDataException($"Key derivation cost {iters} exceeds the safety limit.");
-                    var salt = er.Raw(32).ToArray();
-                    if (er.B() is var aead and not 1) throw new NewerVersionException($"cipher {aead}");
-                    var verifier = er.Raw(16).ToArray();
-                    enc = new EncryptionInfo(iters, salt, verifier);
+                    // At most one: a later record would otherwise replace an earlier one that salvage reads.
+                    if (enc is not null) throw new CorruptDataException(EncryptionRecord.InvalidMessage);
+                    enc = EncryptionRecord.Read(val);
                     break;
                 case 2:
                     creator = Encoding.UTF8.GetString(val);
@@ -160,27 +259,70 @@ public readonly record struct ArchiveFooter(long IndexOffset, long IndexLength, 
     }
 }
 
-/// <summary>Password-derived keys and AES-256-GCM sealing of frame bodies (FORMAT §5).</summary>
-public sealed class ArchiveKey
+/// <summary>
+/// Password-derived keys and AES-256-GCM sealing of frame bodies (FORMAT §5). The encryption key lives in a pinned
+/// array that <see cref="Dispose"/> zeroes; after that, sealing and opening throw.
+/// </summary>
+public sealed class ArchiveKey : IDisposable
 {
-    public const int DefaultIterations = 600_000;
+    /// <summary>PBKDF2 iterations of Compatible protection (<see cref="KdfPresets.CompatibleIterations"/>).</summary>
+    public const int DefaultIterations = KdfPresets.CompatibleIterations;
     private readonly byte[] _kenc;
+    private volatile bool _disposed;
+    /// <summary>The password check value derived with the key (16 bytes; the header stores it).</summary>
     public byte[] Verifier { get; }
 
     private ArchiveKey(byte[] kenc, byte[] verifier) { _kenc = kenc; Verifier = verifier; }
 
-    public static ArchiveKey Derive(string password, byte[] salt, int iterations)
+    /// <summary>
+    /// Derives the keys for <paramref name="info"/> through <see cref="PasswordKdf"/>: the reader's checks (or, with
+    /// <paramref name="creating"/>, the writer's) come first, then the password text, then one derivation; the master
+    /// key is wiped.
+    /// </summary>
+    public static ArchiveKey Derive(string password, EncryptionInfo info, KdfRun? run = null, bool creating = false)
     {
-        var pw = Encoding.UTF8.GetBytes(password.Normalize(NormalizationForm.FormC));
-        var master = Rfc2898DeriveBytes.Pbkdf2(pw, salt, iterations, HashAlgorithmName.SHA512, 32);
-        var kenc = HKDF.Expand(HashAlgorithmName.SHA256, master, 32, "osmium/v1/aead"u8.ToArray());
-        var ver = HKDF.Expand(HashAlgorithmName.SHA256, master, 16, "osmium/v1/verify"u8.ToArray());
-        CryptographicOperations.ZeroMemory(master);
-        CryptographicOperations.ZeroMemory(pw);
-        return new ArchiveKey(kenc, ver);
+        ArgumentNullException.ThrowIfNull(info);
+        var master = PasswordKdf.DeriveMaster(password, info.Salt, info.Kdf, run ?? new KdfRun(), creating);
+        try { return FromMaster(master); }
+        finally { CryptographicOperations.ZeroMemory(master); }
     }
 
+    /// <summary>PBKDF2 with a bare salt and iteration count, without the reader's minimum (for callers that hold no
+    /// header record).</summary>
+    public static ArchiveKey Derive(string password, byte[] salt, int iterations) =>
+        Derive(password, new EncryptionInfo(iterations, salt, new byte[EncryptionRecord.VerifierBytes]), new KdfRun { Policy = ProtectionPolicy.AllowWeak });
+
+    /// <summary>Kenc = HKDF-Expand(SHA-256, master, 32, "osmium/v1/aead"); verifier = HKDF-Expand(SHA-256, master, 16,
+    /// "osmium/v1/verify").</summary>
+    internal static ArchiveKey FromMaster(ReadOnlySpan<byte> master)
+    {
+        var kenc = GC.AllocateArray<byte>(32, pinned: true);
+        var verifier = new byte[EncryptionRecord.VerifierBytes];
+        HKDF.Expand(HashAlgorithmName.SHA256, master, kenc, "osmium/v1/aead"u8);
+        HKDF.Expand(HashAlgorithmName.SHA256, master, verifier, "osmium/v1/verify"u8);
+        return new ArchiveKey(kenc, verifier);
+    }
+
+    /// <summary>Compares in constant time.</summary>
     public bool Matches(byte[] verifier) => CryptographicOperations.FixedTimeEquals(Verifier, verifier);
+
+    public bool IsDisposed => _disposed;
+
+    /// <summary>Zeroes the encryption key.</summary>
+    public void Dispose()
+    {
+        _disposed = true;
+        CryptographicOperations.ZeroMemory(_kenc);
+    }
+
+    private byte[] Kenc
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _kenc;
+        }
+    }
 
     private static void Nonce(Span<byte> nonce, ulong frame)
     {
@@ -204,7 +346,7 @@ public sealed class ArchiveKey
         var output = new byte[plaintext.Length + 16];
         Span<byte> nonce = stackalloc byte[12];
         Nonce(nonce, frame);
-        using var gcm = new AesGcm(_kenc, 16);
+        using var gcm = new AesGcm(Kenc, 16);
         gcm.Encrypt(nonce, plaintext, output.AsSpan(0, plaintext.Length), output.AsSpan(plaintext.Length), Aad(archiveId, frame, headerBytes));
         return output;
     }
@@ -215,7 +357,7 @@ public sealed class ArchiveKey
         var output = new byte[sealedData.Length - 16];
         Span<byte> nonce = stackalloc byte[12];
         Nonce(nonce, frame);
-        using var gcm = new AesGcm(_kenc, 16);
+        using var gcm = new AesGcm(Kenc, 16);
         try
         {
             gcm.Decrypt(nonce, sealedData[..^16], sealedData[^16..], output, Aad(archiveId, frame, headerBytes));

@@ -231,8 +231,8 @@ public class ForwardCompatibilityTests
         Assert.Equal($"{Newer}it uses archive feature #3.",
             Assert.ThrowsAny<NewerVersionException>(() => ReadHeader(Header(0, new BlobWriter().U(3).Bytes([1]).ToArray()))).Message);
         Assert.Equal($"{Newer}it uses archive flag 0x0002.", Assert.ThrowsAny<NewerVersionException>(() => ReadHeader(Header(2, []))).Message);
-        Assert.Equal($"{Newer}it uses key derivation function 2.",
-            Assert.ThrowsAny<NewerVersionException>(() => ReadHeader(Header(Osa.FlagEncrypted, new BlobWriter().U(1).Bytes([2]).ToArray()))).Message);
+        Assert.Equal($"{Newer}it uses key derivation function 3.",
+            Assert.ThrowsAny<NewerVersionException>(() => ReadHeader(Header(Osa.FlagEncrypted, new BlobWriter().U(1).Bytes([3]).ToArray()))).Message);
         Assert.Equal($"{Newer}it uses index version 2.",
             Assert.ThrowsAny<NewerVersionException>(() => ArchiveIndex.Deserialize(new BlobWriter().U(2).ToArray(), 0, Reg)).Message);
 
