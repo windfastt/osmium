@@ -33,8 +33,12 @@ public sealed record Profile
     public bool CmAllModels { get; init; }
     /// <summary>Order the files of a group so that similar files are adjacent (SimHash of sampled 4-grams, greedy
     /// nearest neighbour) instead of only by extension, name and path. Off in every profile: on the benchmark folders
-    /// it made C headers 2.8 % larger (IMPROVISATION.md §5.4).</summary>
+    /// it made C headers 3 % larger (IMPROVISATION.md §5.4).</summary>
     public bool SimilarityOrder { get; init; }
+    /// <summary>When candidates are within 0.1 % of the best after the last rung, choose the one that decodes fastest;
+    /// the parameter search then starts from it. Off in every profile: no group of the benchmark folders has such a
+    /// near tie, so it changes no archive there (IMPROVISATION.md §5.4).</summary>
+    public bool PreferFasterDecoder { get; init; }
 
     public static readonly Profile Store = new()
     {

@@ -433,29 +433,32 @@ public sealed class Planner(PlanOptions o)
         }
 
         var alive = allowed.Take(p.MaxCandidates).ToList();
-        var scores = new Dictionary<PipelineSpec, double>();
+        // The candidates of the last rung that produced results, best first, with their objective on its sample.
+        var ranked = new List<(PipelineSpec Spec, double Score)>();
         byte[] sample = [];
         foreach (long rung in p.FullDataTrials ? [Math.Min(g.Size, BlockLimits.MaxRawSize)] : p.Rungs)
         {
-            sample = BuildSample(plan, g, rung);
-            var sizes = await trials.RunAsync(alive, sample, ct);
-            var ranked = alive.Select((s, i) => (s, size: sizes[i])).Where(t => t.size >= 0)
-                .OrderBy(t => Objective(t.s, t.size, sample.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
-            g.Explain.Add($"  rung {sample.Length:N0} B: " + string.Join(", ", ranked.Select(t => $"{t.s} = {t.size:N0}")));
-            if (ranked.Count == 0) break;
-            foreach (var (s, size) in ranked) scores[s] = Objective(s, size, sample.Length);
+            var next = BuildSample(plan, g, rung);
+            var sizes = await trials.RunAsync(alive, next, ct);
+            var results = alive.Select((s, i) => (s, size: sizes[i])).Where(t => t.size >= 0)
+                .OrderBy(t => Objective(t.s, t.size, next.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
+            g.Explain.Add($"  rung {next.Length:N0} B: " + string.Join(", ", results.Select(t => $"{t.s} = {t.size:N0}")));
+            if (results.Count == 0) break;
+            sample = next;
+            ranked = [.. results.Select(t => (t.s, Objective(t.s, t.size, next.Length)))];
             int keep = Math.Max(2, (int)Math.Ceiling(ranked.Count / (double)p.Eta));
-            alive = ranked.Take(keep).Select(t => t.s).ToList();
+            alive = ranked.Take(keep).Select(t => t.Spec).ToList();
             if (sample.Length >= g.Size) break;
         }
-        if (alive.Count == 0)
+        if (ranked.Count == 0)
         {
             g.Spec = allowed[0];
             g.Explain.Add($"  all trials failed; using {g.Spec}");
             return;
         }
+        var scores = ranked.ToDictionary(t => t.Spec, t => t.Score);
 
-        var best = alive[0];
+        var best = p.PreferFasterDecoder ? FasterOnANearTie(g, ranked) : ranked[0].Spec;
         // Incompressible data: anything but Store must win by at least 1 %.
         if (g.Class == CompatClass.Incompressible && best.Codec.Method.Id != MethodIds.Store)
         {
@@ -473,6 +476,25 @@ public sealed class Planner(PlanOptions o)
             if (second is not null) g.Alternates.Add(second);
         }
         g.Explain.Add($"  chose {g.Spec}{(g.Alternates.Count > 0 ? $" (race vs {g.Alternates[0]})" : "")}");
+    }
+
+    /// <summary>Candidates whose objective is within this fraction of the best are a near tie.</summary>
+    private const double TieMargin = 0.001;
+
+    /// <summary>
+    /// A near tie goes to the faster decoder: of the last rung's candidates whose objective is within
+    /// <see cref="TieMargin"/> of the best, the one with the lowest estimated decode time for the whole group (then the
+    /// lower objective, then the spec text). The size cost is at most 0.1 % of the group.
+    /// </summary>
+    private static PipelineSpec FasterOnANearTie(PlanGroup g, List<(PipelineSpec Spec, double Score)> ranked)
+    {
+        var (best, bestScore) = ranked[0];
+        var (pick, pickScore) = ranked.Where(t => t.Score <= bestScore * (1 + TieMargin))
+            .OrderBy(t => t.Spec.EstimateDecodeSeconds(g.Size)).ThenBy(t => t.Score).ThenBy(t => t.Spec.ToString(), StringComparer.Ordinal)
+            .First();
+        if (!pick.Equals(best))
+            g.Explain.Add($"  tie: chose {pick} (decodes faster) over {best} ({(bestScore > 0 ? 100 * (pickScore - bestScore) / bestScore : 0):0.00} % smaller)");
+        return pick;
     }
 
     /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same

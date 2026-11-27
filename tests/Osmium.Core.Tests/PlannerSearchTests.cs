@@ -7,7 +7,8 @@ namespace Osmium.Core.Tests;
 
 /// <summary>
 /// The planner's search, driven by a scripted trial runner: successive halving, the hill-climb and its budget, the
-/// Store preference for incompressible data, the top-2 race, and independence from the thread count.
+/// Store preference for incompressible data, the top-2 race, near ties going to the faster decoder, and independence
+/// from the thread count.
 /// </summary>
 public class PlannerSearchTests
 {
@@ -158,6 +159,88 @@ public class PlannerSearchTests
         Assert.True(trials.Calls.Count > 2, "no hill-climb"); // how the climb spends its evaluations is tested above
         Assert.Equal("lzma(dict=256M,fb=273,lc=8,lp=0,mf=1,pb=0)", g.Spec!.ToString());
         Assert.Equal(["lzma(dict=256M,fb=273,lc=3,lp=0,mf=1,pb=0)"], g.Alternates.Select(s => s.ToString()));
+    }
+
+    // ------------------------------------------------------------------ near ties go to the faster decoder
+
+    /// <summary>CM without filters scores 100 000 on text, the LZMA text candidate <paramref name="gap"/> more, the rest
+    /// twice as much. CM decodes at about 0.6 MB/s, LZMA at about 40.</summary>
+    private static Func<PipelineSpec, byte[], long> CmVersusLzma(double gap) => (s, sample) =>
+        s.Codec.Method.Name == "cm" && !s.Filters.Any() ? 100_000
+        : s.ToString() == Lzma3 ? (long)Math.Round(100_000 * (1 + gap))
+        : 200_000;
+
+    private static Profile Tie(bool on, int evals = 0) => Profile.Ultra with
+    {
+        Name = "tie", Rungs = [64 << 10], SearchEvals = evals, RaceTopTwo = true, PreferFasterDecoder = on,
+    };
+
+    [Theory]
+    [InlineData(0.0004, true, true)]   // 0.04 %: a tie, and LZMA decodes much faster than CM
+    [InlineData(0.0009, true, true)]
+    [InlineData(0.0011, true, false)]  // 0.11 %: not a tie
+    [InlineData(0.0004, false, false)] // the switch is off
+    public async Task NearTiesGoToTheFasterDecoder(double gap, bool on, bool lzmaWins)
+    {
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(CmVersusLzma(gap));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Tie(on), trials));
+        var g = Assert.Single(plan.Groups);
+        string cm = trials.Calls[0].Specs.Single(s => s.StartsWith("cm(", StringComparison.Ordinal));
+        Assert.Equal(lzmaWins ? Lzma3 : cm, g.Spec!.ToString());
+        // the top-two race gets the best remaining candidate: CM when LZMA won the tie
+        Assert.Equal([lzmaWins ? cm : Lzma3], g.Alternates.Select(s => s.ToString()));
+        var tie = g.Explain.Where(l => l.Contains("tie:")).ToList();
+        if (lzmaWins) Assert.Equal([$"  tie: chose {Lzma3} (decodes faster) over {cm} ({gap * 100:0.00} % smaller)"], tie);
+        else Assert.Empty(tie);
+    }
+
+    [Fact]
+    public async Task TheSearchStartsFromTheTieBreakWinner()
+    {
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(CmVersusLzma(0.0005));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Tie(true, evals: 24), trials));
+        Assert.True(trials.Calls.Count > 1, "no search");
+        Assert.All(trials.Calls.Skip(1).SelectMany(c => c.Specs), s => Assert.Contains("lzma(", s)); // neighbours of LZMA
+        Assert.Equal(Lzma3, Assert.Single(plan.Groups).Spec!.ToString()); // none of them is better
+    }
+
+    [Fact]
+    public async Task TheFastestOfSeveralNearTiesWins()
+    {
+        // Four candidates within 0.1 % of CM: LZMA alone decodes fastest, ahead of the text filter + LZMA and PPMd,
+        // although both of those are smaller.
+        const string Ppmd8 = "ppmd(mem=256M,order=8)";
+        using var t = new TempDir();
+        var trials = new ScriptedTrials((s, sample) => s.ToString() switch
+        {
+            var x when x.StartsWith("cm(", StringComparison.Ordinal) => 100_000,
+            Ppmd8 => 100_020,
+            var x when x == "text+" + Lzma3 => 100_050,
+            Lzma3 => 100_080,
+            _ => 200_000,
+        });
+        var plan = await PlanFile(t, "book.txt", Book, Options(Tie(true), trials));
+        var g = Assert.Single(plan.Groups);
+        Assert.Equal(Lzma3, g.Spec!.ToString());
+        double Decode(string spec) => PipelineSpec.Parse(spec, MethodRegistry.Default).EstimateDecodeSeconds(g.Size);
+        Assert.True(Decode(Lzma3) < Decode("text+" + Lzma3) && Decode("text+" + Lzma3) < Decode(Ppmd8));
+        string cm = trials.Calls[0].Specs.Single(s => s.StartsWith("cm(", StringComparison.Ordinal));
+        Assert.Contains($"  tie: chose {Lzma3} (decodes faster) over {cm} ({0.08:0.00} % smaller)", g.Explain);
+    }
+
+    [Fact]
+    public async Task WhenEveryTrialFailsTheFirstCandidateIsUsed()
+    {
+        // Every trial of the first rung fails: no search can start from a score, so the first candidate is taken.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials((s, sample) => -1);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Profile.Ultra with { Rungs = [64 << 10] }, trials));
+        var g = Assert.Single(plan.Groups);
+        Assert.Equal(trials.Calls[0].Specs[0], g.Spec!.ToString());
+        Assert.Contains(g.Explain, l => l.StartsWith("  all trials failed; using ", StringComparison.Ordinal));
+        Assert.Single(trials.Calls);
     }
 
     private static string MixedFolder(TempDir t)
