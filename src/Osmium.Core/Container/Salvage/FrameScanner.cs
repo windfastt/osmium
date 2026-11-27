@@ -52,7 +52,8 @@ internal readonly record struct FrameHeader(long Offset, uint Flags, ulong Numbe
 /// The key, archive id and header bytes that authenticate an encrypted archive's frames. The index frame binds the exact
 /// header bytes; when the header is damaged, <paramref name="OtherHeaderBytes"/> are rebuilt candidates to try for it.
 /// </summary>
-internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null);
+/// <param name="PadsIndex">The key derivation is Argon2id (kdf 2), whose index frame is padded (FORMAT §5).</param>
+internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null, bool PadsIndex = false);
 
 /// <summary>
 /// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1, §8) whatever happened to the
@@ -418,14 +419,23 @@ internal sealed class FrameScanner
             f.Reject(SalvageFrameState.Damaged, "authentication failed (damaged or tampered)");
             return;
         }
-        if (!TryParsePrefix(plain, plain.Length, out var p, out string why)) { f.Reject(SalvageFrameState.Damaged, why); return; }
-        if (XxHash3.HashToUInt64(plain.AsSpan(p.PayloadOffset)) != p.PayloadHash)
+        bool padded = PaddingAllowed(f);
+        if (!TryParsePrefix(plain, plain.Length, out var p, out string why, padded)) { f.Reject(SalvageFrameState.Damaged, why); return; }
+        if (plain.AsSpan(p.PayloadOffset + (int)p.PayloadLength).ContainsAnyExcept((byte)0))
+        {
+            f.Reject(SalvageFrameState.Damaged, "its padding is not zero");
+            return;
+        }
+        if (XxHash3.HashToUInt64(plain.AsSpan(p.PayloadOffset, (int)p.PayloadLength)) != p.PayloadHash)
         {
             f.Reject(SalvageFrameState.Damaged, "payload hash mismatch");
             return;
         }
         Accept(f, p);
     }
+
+    /// <summary>Zero padding after the payload, with the reader's rules: the index frame of an Argon2id archive.</summary>
+    internal bool PaddingAllowed(SalvageFrame f) => f.Encrypted && f.IsIndex && Key is { PadsIndex: true };
 
     /// <summary>Checks a plain frame's body without holding it in memory: prefix CRC, then the payload hash in chunks.</summary>
     private void VerifyPlain(SalvageFrame f)
@@ -487,7 +497,7 @@ internal sealed class FrameScanner
     private readonly record struct BodyPrefix(byte[] Descriptor, UInt128 RawHash, ulong PayloadHash, long PayloadLength, int PayloadOffset);
 
     /// <summary>Parses the block-body prefix (FORMAT §2.1) and checks its CRC and the payload length.</summary>
-    private static bool TryParsePrefix(ReadOnlySpan<byte> data, long bodyLength, out BodyPrefix prefix, out string why)
+    private static bool TryParsePrefix(ReadOnlySpan<byte> data, long bodyLength, out BodyPrefix prefix, out string why, bool paddingAllowed = false)
     {
         prefix = default;
         try
@@ -500,7 +510,8 @@ internal sealed class FrameScanner
             int prefixLen = r.Position;
             uint crc = BinaryPrimitives.ReadUInt32LittleEndian(r.Raw(4));
             if (Osa.Crc(data[..prefixLen]) != crc) { why = "block header CRC mismatch"; return false; }
-            if (payloadLen != (ulong)(bodyLength - r.Position)) { why = "payload length does not match the frame length"; return false; }
+            ulong room = (ulong)(bodyLength - r.Position);
+            if (paddingAllowed ? payloadLen > room : payloadLen != room) { why = "payload length does not match the frame length"; return false; }
             prefix = new BodyPrefix(desc, rawHash, payloadHash, (long)payloadLen, r.Position);
             why = "";
             return true;
@@ -565,7 +576,7 @@ internal sealed class FrameScanner
     {
         var body = _src.Read(f.Offset + Osa.FrameHeaderSize, (int)f.BodyLength);
         var plain = f.Encrypted ? Key!.Key.Open(Key.ArchiveId, f.Number, body, f.IsIndex ? Key.HeaderBytes : []) : body;
-        var parsed = BlockBody.Parse(plain, _registry, Location(f));
+        var parsed = BlockBody.Parse(plain, _registry, Location(f), PaddingAllowed(f));
         if (parsed.RawHash != f.RawHash) throw new CorruptDataException("the frame changed while it was being salvaged");
         var raw = PipelineExecutor.Decode(parsed.Descriptor, parsed.Payload, new CodecContext { Token = ct });
         if (BlockBody.Hash128(raw) != parsed.RawHash) throw new CorruptDataException("decoded content does not match its hash");
