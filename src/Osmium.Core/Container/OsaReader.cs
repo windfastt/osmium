@@ -121,11 +121,12 @@ public sealed class OsaReader : IDisposable
     /// <see cref="OsaOpenOptions.KdfMemoryLimit"/>, more work than the strongest preset); only then the password, which
     /// must be text a password can be; one derivation; the verifier (<see cref="WrongPasswordException"/>); the index.
     /// A refusal or a question therefore never costs a password prompt. The spare copies stand in for damage only,
-    /// never for any of these refusals.
+    /// never for any of these refusals. Null options are the defaults (no password), so that <c>Open(path, null)</c>
+    /// means what it meant before this overload existed.
     /// </summary>
-    public static OsaReader Open(string path, OsaOpenOptions options)
+    public static OsaReader Open(string path, OsaOpenOptions? options)
     {
-        ArgumentNullException.ThrowIfNull(options);
+        options ??= new OsaOpenOptions();
         var registry = options.Registry ?? MethodRegistry.Default;
         // FileShare.Delete: Explorer can still rename or delete an archive that is open; reads go on through the handle.
         var handle = new ArchiveFile(File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess),
