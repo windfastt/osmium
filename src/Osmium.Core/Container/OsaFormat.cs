@@ -315,6 +315,14 @@ public sealed class ArchiveKey : IDisposable
         CryptographicOperations.ZeroMemory(_kenc);
     }
 
+    /// <summary>An independent copy of this key (its own pinned array), for a holder that outlives this one.</summary>
+    internal ArchiveKey Copy()
+    {
+        var kenc = GC.AllocateArray<byte>(32, pinned: true);
+        Kenc.CopyTo(kenc, 0);
+        return new ArchiveKey(kenc, (byte[])Verifier.Clone());
+    }
+
     private byte[] Kenc
     {
         get
@@ -364,11 +372,15 @@ public sealed class ArchiveKey : IDisposable
         }
         catch (AuthenticationTagMismatchException)
         {
-            throw new CorruptDataException($"Encrypted frame {frame} failed authentication (corrupted or tampered).");
+            throw new AuthenticationFailedException(frame);
         }
         return output;
     }
 }
+
+/// <summary>An encrypted frame's GCM tag does not check out: damage, or a change, which AES-GCM cannot tell apart.</summary>
+internal sealed class AuthenticationFailedException(ulong frame)
+    : CorruptDataException($"Encrypted frame {frame} failed authentication (corrupted or tampered).");
 
 /// <summary>Plaintext block body (FORMAT §2.1).</summary>
 public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, ReadOnlyMemory<byte> Payload)
@@ -391,20 +403,38 @@ public sealed record BlockBody(BlockDescriptor Descriptor, UInt128 RawHash, Read
     }
 
     /// <param name="location">"block N" or "the index", for errors about a pipeline that needs a newer version.</param>
-    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry, string? location = null)
+    /// <param name="paddingAllowed">The body may end in zero bytes after the payload (FORMAT §5: the index frame of an
+    /// Argon2id archive, and block frames with header flag bit 3). Every one of them must be zero; without it, the
+    /// payload must end the body exactly.</param>
+    public static BlockBody Parse(ReadOnlyMemory<byte> body, MethodRegistry registry, string? location = null, bool paddingAllowed = false)
     {
         var span = body.Span;
         var r = new BlobReader(span);
         var desc = r.Bytes(1 << 16).ToArray();
         var hash = BinaryPrimitives.ReadUInt128LittleEndian(r.Raw(16));
         ulong payloadHash = r.U64();
-        long payloadLen = (long)r.U();
+        ulong payloadLen = r.U();
         int prefixLen = r.Position;
         uint crc = BinaryPrimitives.ReadUInt32LittleEndian(r.Raw(4));
         if (Osa.Crc(span[..prefixLen]) != crc) throw new CorruptDataException("Block header is corrupt (CRC mismatch).");
-        if (payloadLen != span.Length - r.Position) throw new CorruptDataException("Block payload length mismatch.");
-        var payload = body[r.Position..];
+        ulong room = (ulong)(span.Length - r.Position);
+        if (paddingAllowed ? payloadLen > room : payloadLen != room) throw new CorruptDataException("Block payload length mismatch.");
+        var payload = body.Slice(r.Position, (int)payloadLen);
+        if (span[(r.Position + (int)payloadLen)..].ContainsAnyExcept((byte)0)) throw new CorruptDataException("Block padding is not zero.");
         if (XxHash3.HashToUInt64(payload.Span) != payloadHash) throw new CorruptDataException("Block payload is corrupt (hash mismatch).");
         return new BlockBody(BlockDescriptor.Deserialize(desc, registry, location), hash, payload);
+    }
+
+    /// <summary>
+    /// Padmé (FORMAT §5): <paramref name="length"/> rounded up so that its low E − S bits are zero, with E = ⌊log2 L⌋ and
+    /// S = ⌊log2 E⌋ + 1. At most about 12 % more; the result leaks only O(log log L) bits of the length.
+    /// </summary>
+    public static long PaddedLength(long length)
+    {
+        if (length < 2) return length;
+        int e = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)length);
+        int s = 32 - System.Numerics.BitOperations.LeadingZeroCount((uint)e); // ⌊log2 e⌋ + 1, e ≥ 1
+        long mask = (1L << (e - s)) - 1;
+        return (length + mask) & ~mask;
     }
 }

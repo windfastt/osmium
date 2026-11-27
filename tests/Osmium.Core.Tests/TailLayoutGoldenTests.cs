@@ -52,7 +52,7 @@ public class TailLayoutGoldenTests
         var e = Assert.Throws<InvalidOperationException>(() => new OsaWriter(t.Sub("a.osa"), new OsaWriterOptions { Password = "pw", TestFixedSalt = Salt }));
         Assert.Contains("reuse their nonces", e.Message);
         Assert.Empty(Directory.GetFileSystemEntries(t.Path)); // refused before anything was written
-        using (new OsaWriter(t.Sub("b.osa"), new OsaWriterOptions { Password = "pw", TestFixedSalt = Salt, TestFixedSaltAcknowledged = true })) { }
+        using (new OsaWriter(t.Sub("b.osa"), new OsaWriterOptions { Password = "pw", KdfIterations = 1000, TestFixedSalt = Salt, TestFixedSaltAcknowledged = true })) { }
         using (new OsaWriter(t.Sub("c.osa"), new OsaWriterOptions { TestFixedSalt = Salt })) { } // no password: the salt is not used
     }
 }
