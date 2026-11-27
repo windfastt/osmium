@@ -4,9 +4,10 @@ namespace Osmium.Desktop.Jobs;
 
 /// <summary>
 /// The decisions of one Recycle Bin operation, shared by all its progress sinks, and what the system reported for each
-/// item. A delete goes ahead only when the system is about to recycle it and it is an item handed over, or part of one;
-/// an item handed over is also checked once more with the recheck it was given at that moment, the last one before it
-/// moves. Once anything is refused, fails or is destroyed, every later delete is refused, so the rest stays in place.
+/// item. A delete goes ahead only when the system is about to recycle it and it is an item handed over, or part of one.
+/// The first delete that touches an item, whether of the item itself or of anything inside it, first checks the item
+/// once more with the recheck it was given: the last check before any of it moves. Once anything is refused, fails or
+/// is destroyed, every later delete is refused, so the rest stays in place.
 /// The system's recycler names what it is about to delete by its path; nothing here depends on the shell, so these
 /// rules are tested anywhere.
 /// </summary>
@@ -94,15 +95,18 @@ public sealed class RecycleGate
             if (_stopped is { } stopped) return stopped;
             string? refusal =
                 !recycles ? CannotTake
-                : _ct.IsCancellationRequested ? "the job was canceled"
+                : _ct.IsCancellationRequested ? RecycleCandidates.Canceled
                 : key is null ? "the shell named no path for an item it was about to move"
                 : owner is null || (own is not null && !ReferenceEquals(owner, own)) ? $"the shell was about to move something else with it: {key}"
                 : null;
-            if (refusal is null && !owner!.Approved && string.Equals(key, owner.Key, StringComparison.OrdinalIgnoreCase))
+            if (refusal is null && !owner!.Approved)
             {
-                // The item itself, about to move: it must still be exactly what the archive holds.
+                // The first delete that touches the item, the item itself or anything inside it: before any of it moves,
+                // it must still be exactly what the archive holds.
                 try { refusal = _recheck(owner.Path) is { } changed ? "checked again just before it moved: " + changed : null; }
                 catch (Exception e) { refusal = $"it could not be checked again ({e.Message})"; }
+                // The check reads every file again, which takes a while: a cancel meanwhile keeps the item too.
+                if (_ct.IsCancellationRequested) refusal = RecycleCandidates.Canceled;
                 owner.Approved = refusal is null;
             }
             if (refusal is null) return null;
@@ -177,7 +181,7 @@ public sealed class RecycleGate
             if (item.Failed != 0) return new RecycleOutcome(item.Path, false, "the shell could not move it: " + Describe(item.Failed));
             if (!item.Reached)
                 return new RecycleOutcome(item.Path, false, _stopped is { } why ? $"the operation stopped before it ({why})"
-                    : _ct.IsCancellationRequested ? "the job was canceled"
+                    : _ct.IsCancellationRequested ? RecycleCandidates.Canceled
                     : performed < 0 ? "the operation stopped before it: " + Describe(performed)
                     : aborted ? "the operation stopped before it" : "the shell did not move it");
             return new RecycleOutcome(item.Path, false, inPlace ? "the shell did not move it" : "it is gone, but the shell did not report it in the Recycle Bin");

@@ -118,6 +118,56 @@ public sealed class RecycleGateTests : IDisposable
     }
 
     [Fact]
+    public void ACancelDuringTheLastCheckKeepsTheItem()
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        // The check finds nothing wrong, but the job is canceled while it reads the files.
+        var gate = new RecycleGate(_ =>
+        {
+            cts.Cancel();
+            return null;
+        }, cts.Token);
+        var item = gate.Expect(_folder)!;
+        Assert.Equal("the job was canceled", gate.PreDelete(recycles: true, item, _folder));
+        Assert.Equal("the job was canceled", gate.Outcome(item, 0, aborted: true).Reason);
+    }
+
+    [Fact]
+    public void TheFirstDeleteThatTouchesAnItemChecksItFirst()
+    {
+        // The shell may name something inside a folder before the folder itself.
+        var gate = Gate();
+        var item = gate.Expect(_folder)!;
+        Assert.Null(gate.PreDelete(recycles: true, item, _child));
+        Assert.Equal([_folder], _rechecked); // before any of it went
+        Assert.Null(gate.PreDelete(recycles: true, null, _child)); // the sink of the whole operation asks too
+        Assert.Null(gate.PreDelete(recycles: true, item, _folder));
+        Assert.Equal([_folder], _rechecked); // once
+    }
+
+    [Fact]
+    public void AnItemThatChangedKeepsEvenThePartTheSystemNamesFirst()
+    {
+        const string why = "checked again just before it moved: it holds a file that is not in the archive: late.txt";
+        var gate = Gate("it holds a file that is not in the archive: late.txt");
+        var item = gate.Expect(_folder)!;
+        Assert.Equal(why, gate.PreDelete(recycles: true, item, _child));
+        Assert.Equal([_folder], _rechecked);
+        Assert.NotNull(gate.PreDelete(recycles: true, item, _folder));
+        Assert.Equal(why, gate.Outcome(item, 0, aborted: true).Reason);
+    }
+
+    [Fact]
+    public void APartTheSystemWouldNotRecycleIsRefusedBeforeAnyCheck()
+    {
+        var gate = Gate();
+        var item = gate.Expect(_folder)!;
+        Assert.Equal(RecycleGate.CannotTake, gate.PreDelete(recycles: false, item, _child));
+        Assert.Empty(_rechecked);
+        Assert.Equal(RecycleGate.CannotTake, gate.Outcome(item, 0, aborted: true).Reason);
+    }
+
+    [Fact]
     public void AnItemDeletedRatherThanRecycledStopsTheOperation()
     {
         var gate = Gate();
