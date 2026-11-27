@@ -10,7 +10,7 @@ name: Compatibility
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, password-protection]
   workflow_dispatch:
 
 permissions:
