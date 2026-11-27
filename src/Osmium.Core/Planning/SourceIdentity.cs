@@ -33,7 +33,7 @@ internal static class SourceIdentity
             {
                 ZipSources.IsLink => "became a link after it was scanned (links are not followed)",
                 ZipSources.FolderIsLink => "is below a folder that became a link after it was scanned (links are not followed)",
-                _ => "is not a regular file now",
+                _ => "is not a regular file (it is a pipe or a device)",
             });
         try
         {
@@ -44,6 +44,20 @@ internal static class SourceIdentity
         {
             fs.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Checks, once everything is read, that <paramref name="src"/> is still the file the scan saw, by the rules
+    /// of <see cref="Open"/>; a file that is gone has changed too.</summary>
+    public static void Verify(SourceFile src)
+    {
+        try
+        {
+            using (Open(src)) { }
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new SourceChangedException(src.FullPath, "was removed while it was being archived");
         }
     }
 

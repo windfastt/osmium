@@ -47,23 +47,24 @@ public static class SimilarityOrder
     }
 
     /// <summary>Reads the sample of a file (see <see cref="SampleRanges"/>) and returns its SimHash.</summary>
-    /// <exception cref="IOException">The file cannot be read, or is shorter than <paramref name="size"/>.</exception>
-    public static ulong Signature(string path, long size)
+    /// <exception cref="SourceChangedException">The file is not the one the scan saw (<see cref="SourceIdentity.Open"/>).</exception>
+    /// <exception cref="IOException">The file cannot be read.</exception>
+    public static ulong Signature(SourceFile src)
     {
-        var ranges = SampleRanges(size);
+        var ranges = SampleRanges(src.Size);
         var hash = new SimHash();
         if (ranges.Length == 0) return hash.Value;
         var buffer = ArrayPool<byte>.Shared.Rent(ranges.Max(r => r.Length));
         try
         {
-            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var fs = SourceIdentity.Open(src);
             foreach (var (offset, length) in ranges)
             {
                 var span = buffer.AsSpan(0, length);
                 for (int done = 0; done < length;)
                 {
-                    int n = RandomAccess.Read(handle, span[done..], offset + done);
-                    if (n <= 0) throw new SourceChangedException(path, "file became shorter while it was being archived");
+                    int n = RandomAccess.Read(fs.SafeFileHandle, span[done..], offset + done);
+                    if (n <= 0) throw new SourceChangedException(src.FullPath, "file became shorter while it was being archived");
                     done += n;
                 }
                 hash.Add(span);

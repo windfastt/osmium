@@ -266,13 +266,8 @@ public static class ArchiveBuilder
         DrainWrites();
         if (nextToWrite != plan.Blocks.Count) throw new InvalidOperationException("Internal error: not all blocks were written.");
 
-        // Source change detection (size/mtime) — the archive must describe one consistent snapshot.
-        foreach (var f in plan.Files)
-        {
-            var fi = new FileInfo(f.Src.FullPath);
-            if (!fi.Exists || fi.Length != f.Src.Size || fi.LastWriteTimeUtc != f.Src.ModifiedUtc)
-                throw new SourceChangedException(f.Src.FullPath, "changed while it was being archived");
-        }
+        // The archive must describe one consistent snapshot: every file is still the one the scan saw.
+        foreach (var f in plan.Files) SourceIdentity.Verify(f.Src);
 
         // Index entries
         var placements = new Dictionary<int, List<(int Block, long BlockOffset, long UnitOffset, long Length)>>();

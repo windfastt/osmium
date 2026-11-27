@@ -60,9 +60,10 @@ public class SimilarityOrderTests
         var data = Synthetic.Text(size, seed: 3);
         File.WriteAllBytes(t.Sub("f.txt"), data);
         var parts = SimilarityOrder.SampleRanges(size).Select(r => data.AsSpan((int)r.Offset, r.Length).ToArray()).ToArray();
-        Assert.Equal(SimHashOf(parts), SimilarityOrder.Signature(t.Sub("f.txt"), size));
+        var scanned = Assert.Single(Scanner.Scan([t.Sub("f.txt")], ct: Ct).Files);
+        Assert.Equal(SimHashOf(parts), SimilarityOrder.Signature(scanned));
         // a file that is shorter than the scan said cannot be signed
-        Assert.ThrowsAny<IOException>(() => SimilarityOrder.Signature(t.Sub("f.txt"), 2L * size + 100_000));
+        Assert.Throws<SourceChangedException>(() => SimilarityOrder.Signature(scanned with { Size = 2L * size + 100_000 }));
     }
 
     [Fact]
@@ -249,14 +250,14 @@ public class SimilarityOrderTests
     [Fact]
     public async Task AGroupWithAFileThatCannotBeReadKeepsTheNameOrder()
     {
-        // a2.txt shrinks after the scan, so its signature cannot be computed: the group keeps the name order and says why.
-        // Balanced takes no samples, so nothing else in planning reads the missing bytes.
+        // a2.txt is removed after the scan, so its signature cannot be computed: the group keeps the name order and says
+        // why. Store analyses no file, so the signature is the first read of a2.txt. (A file that changed after the scan
+        // stops the plan instead.)
         using var t = new TempDir();
         var dir = Interleaved(t);
         var scan = Scanner.Scan([dir], ct: Ct);
-        var shrunk = Path.Combine(dir, "a2.txt");
-        File.WriteAllBytes(shrunk, File.ReadAllBytes(shrunk)[..1000]);
-        var plan = await new Planner(Options(Profile.Balanced with { SimilarityOrder = true }, null)).BuildAsync(scan, Ct);
+        File.Delete(Path.Combine(dir, "a2.txt"));
+        var plan = await new Planner(Options(Profile.Store with { SimilarityOrder = true }, null)).BuildAsync(scan, Ct);
         var g = Assert.Single(plan.Groups);
         Assert.Equal(Enumerable.Range(1, 6).Select(k => $"a{k}.txt"), FileOrder(plan, g));
         Assert.Contains(g.Explain, l => l.StartsWith("  order: by extension, name and path (", StringComparison.Ordinal)

@@ -149,9 +149,13 @@ public sealed class Planner(PlanOptions o)
         {
             try
             {
-                if (p.Level != ProfileLevel.Store && f.Src.Size > 0) f.Analysis = Sniffer.Analyze(f.Src.FullPath, p.SampleWindows);
+                if (p.Level != ProfileLevel.Store && f.Src.Size > 0)
+                {
+                    using var fs = SourceIdentity.Open(f.Src);
+                    f.Analysis = Sniffer.Analyze(fs.SafeFileHandle, f.Src.Size, p.SampleWindows);
+                }
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException)
             {
                 failed.Add(f);
                 lock (plan.Warnings) plan.Warnings.Add($"{f.Src.RelPath}: cannot read ({e.Message})");
@@ -334,14 +338,16 @@ public sealed class Planner(PlanOptions o)
         var signatures = new ulong[files.Length];
         var unreadable = new bool[files.Length];
         int hashed = 0;
+        SourceChangedException? changed = null;
         // Each signature depends only on its own file, so computing them in parallel does not change the order.
         Parallel.For(0, files.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(o.Threads, 1, 8), CancellationToken = ct }, k =>
         {
-            var src = plan.Files[files[k]].Src;
-            try { signatures[k] = SimilarityOrder.Signature(src.FullPath, src.Size); }
+            try { signatures[k] = SimilarityOrder.Signature(plan.Files[files[k]].Src); }
+            catch (SourceChangedException e) { Interlocked.CompareExchange(ref changed, e, null); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { unreadable[k] = true; }
             o.Progress?.Invoke("Ordering", (double)Interlocked.Increment(ref hashed) / files.Length);
         });
+        if (changed is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(changed);
         int start = 0;
         foreach (var g in eligible)
         {
