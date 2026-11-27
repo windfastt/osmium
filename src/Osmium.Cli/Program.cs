@@ -22,7 +22,7 @@ namespace Osmium.Cli
         {
             "overwrite", "skip", "rename", "no-verify", "explain", "experimental", "verbose", "v", "json", "force",
             "password-stdin", "dedup-chunks", "no-plan-log", "quiet", "q", "all", "allow-remote-encrypted", "no-discovery", "ship-symmetric",
-            "encrypt", "help", "h",
+            "encrypt", "help", "h", "hide-sizes", "allow-weak-protection", "allow-slow-kdf",
         };
         private readonly HashSet<string> _withoutValue = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<string> _stray = [];
@@ -149,6 +149,15 @@ namespace Osmium.Cli
             catch (PasswordRequiredException e) { return Fail(e.Message + " Use --password or --password-stdin."); }
             catch (WrongPasswordException e) { return Fail(e.Message); }
             catch (Osmium.Core.Archives.ExpansionLimitException e) { return Fail(e.Message + " Use --force to extract it anyway."); }
+            // The questions an archive's key derivation raises, before its password is asked for: each names the option
+            // that answers it (never for a refusal that no option lifts).
+            catch (Osmium.Core.Crypto.KdfMemoryLimitException e) { return Fail(MemoryLimitMessage(e)); }
+            catch (Osmium.Core.Crypto.KdfCostException e) { return Fail(e.Message + " Run again with --allow-slow-kdf to allow it."); }
+            catch (Osmium.Core.Crypto.WeakProtectionException e)
+            {
+                return Fail(cmd is "a" or "add" or "compress" ? e.Message : e.Message + " Run again with --allow-weak-protection to open it anyway.");
+            }
+            catch (Osmium.Core.Crypto.UnprotectedDataException e) { return Fail(e.Message + " Run again with --allow-weak-protection to open it anyway."); }
             catch (NotSupportedException e) { return Fail(e); }
             catch (AggregateException e) when (e.Flatten().InnerExceptions.All(i => i is IOException or InvalidDataException or ArgumentException or FormatException or InvalidOperationException or UnauthorizedAccessException))
             {
@@ -162,24 +171,37 @@ namespace Osmium.Cli
 
         private static int Fail(string msg) { Console.Error.WriteLine("error: " + msg); return 1; }
 
+        /// <summary>The memory refusal, with the --mem that lifts it when one can: not when the system lacks the free
+        /// memory, nor when the PC has less memory than it needs.</summary>
+        internal static string MemoryLimitMessage(Osmium.Core.Crypto.KdfMemoryLimitException e)
+        {
+            long total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            if (e.NotEnoughFreeMemory || (total > 0 && e.NeededBytes > total)) return e.Message;
+            string mem = e.NeededBytes >= 1L << 30 ? $"{(e.NeededBytes + (1L << 30) - 1) >> 30}G" : $"{(e.NeededBytes + (1L << 20) - 1) >> 20}M";
+            return $"{e.Message} Run again with --mem {mem} to allow it.";
+        }
+
         private static HashSet<string> Options(params string[] names) => new(names, StringComparer.OrdinalIgnoreCase);
 
         private static readonly string[] PasswordOptions = ["password", "password-stdin"];
         private static readonly string[] PlanOptionNames = ["rules", "dedup", "dedup-chunks", "threads", "mem", "block", "decode-speed", "experimental", "pipeline"];
+        /// <summary>What a command that opens an encrypted .osa archive takes about its key derivation: the memory limit
+        /// and the two answers to the questions an archive can raise before its password is asked for.</summary>
+        private static readonly string[] ReaderProtectionOptions = ["mem", "allow-weak-protection", "allow-slow-kdf"];
 
         /// <summary>The options each command reads; any other is refused, so a mistyped one ("--pasword", "-p") is
         /// never silently ignored.</summary>
         internal static readonly Dictionary<string, HashSet<string>> CommandOptions = Aliases(new()
         {
-            [["a", "add", "compress"]] = Options([.. PasswordOptions, .. PlanOptionNames, "profile", "exclude", "encrypt", "kdf-iterations",
-                "workers", "cluster-key", "allow-remote-encrypted", "ship-symmetric", "no-verify", "overwrite", "explain", "no-plan-log",
+            [["a", "add", "compress"]] = Options([.. PasswordOptions, .. PlanOptionNames, "profile", "exclude", "encrypt", "protection", "kdf-iterations",
+                "hide-sizes", "workers", "cluster-key", "allow-remote-encrypted", "ship-symmetric", "no-verify", "overwrite", "explain", "no-plan-log",
                 "quiet", "q", "spare-copies"]),
-            [["x", "extract"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
-            [["l", "list"]] = Options([.. PasswordOptions, "force", "v", "verbose"]),
-            [["t", "test"]] = Options([.. PasswordOptions, "include", "force", "quiet", "q"]),
-            [["salvage"]] = Options([.. PasswordOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
-            [["i", "info"]] = Options([.. PasswordOptions, "force"]),
-            [["explain"]] = Options(PasswordOptions),
+            [["x", "extract"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions, "overwrite", "skip", "rename", "include", "force", "quiet", "q"]),
+            [["l", "list"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions, "force", "v", "verbose"]),
+            [["t", "test"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions, "include", "force", "quiet", "q"]),
+            [["salvage"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions, "overwrite", "skip", "rename", "force", "quiet", "q"]),
+            [["i", "info"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions, "force"]),
+            [["explain"]] = Options([.. PasswordOptions, .. ReaderProtectionOptions]),
             [["analyze"]] = Options(),
             [["lab", "bench"]] = Options("profile", "sample", "candidates"),
             [["tune"]] = Options([.. PlanOptionNames, "profile", "export-rule"]),
@@ -217,7 +239,11 @@ namespace Osmium.Cli
                   --rules rules.json   per-file rules / patches      --exclude "*.tmp,build/**"
                   --dedup off|files|chunks   --block 256M   --threads N   --mem 8G
                   --decode-speed 0|1|2  (penalise slow-to-decode codecs)   --experimental
-                  --password-stdin | --password <pw>   --encrypt (ask for the password)   --kdf-iterations N
+                  --password-stdin | --password <pw>   --encrypt (ask for the password)
+                  --protection standard|strong|maximum|compatible   how much work every password guess costs (default
+                                 standard: Argon2id with 1 GiB of memory; compatible: PBKDF2, which Osmium 0.1 can open)
+                  --kdf-iterations N   PBKDF2 iterations, with --protection compatible only (default 600000)
+                  --hide-sizes   pad encrypted blocks so their exact sizes are hidden (Osmium 0.1 cannot open such archives)
                   --workers host:port,…  --cluster-key OSM1-…   (distribute work)
                   --no-verify   --overwrite   --explain   --no-plan-log
                   --spare-copies auto|always|never   a spare copy of the file list and header at the end (default auto:
@@ -241,6 +267,9 @@ namespace Osmium.Cli
             x, l, t and info read .osa archives, ZIP (also AES-encrypted ZIP), 7z, TAR (also .tar.gz, .tgz, .tar.bz2,
             .tar.xz and .tar.zst) and single .gz, .bz2, .xz and .zst files (extracted next to themselves), recognised
             by their content. Passwords: --password-stdin | --password <pw> (--password=<pw> when it starts with --).
+            Encrypted .osa archives (x, l, t, info, salvage, explain): --mem 4G sets the memory that checking the password
+            may use; --allow-weak-protection opens one protected more weakly than any Osmium preset, or holding data
+            outside its protected parts; --allow-slow-kdf one whose password check takes more work than any preset.
             Options a command does not know are refused; "--" ends the options, for a file whose name starts with '-'.
             --force extracts an archive that expands to more than 1,000 times its size; names that would leave the
             destination, links and devices are never extracted.
@@ -351,6 +380,28 @@ namespace Osmium.Cli
             };
         }
 
+        internal const string KdfIterationsNeedCompatible =
+            "--kdf-iterations sets PBKDF2 and applies only to --protection compatible. New archives use Argon2id.";
+
+        /// <summary>
+        /// The key derivation of a new encrypted archive: <c>--protection standard|strong|maximum|compatible</c> (default
+        /// standard); <c>--kdf-iterations</c> only with compatible (600,000 by default), within the range the settings
+        /// allow.
+        /// </summary>
+        internal static Osmium.Core.Crypto.KdfParameters ProtectionFrom(Args a)
+        {
+            string protection = a.Get("protection")?.ToLowerInvariant() ?? "standard";
+            if (protection != "compatible" && a.Has("kdf-iterations")) throw new ArgumentException(KdfIterationsNeedCompatible);
+            return protection switch
+            {
+                "standard" => Osmium.Core.Crypto.KdfPresets.Standard,
+                "strong" => Osmium.Core.Crypto.KdfPresets.Strong,
+                "maximum" => Osmium.Core.Crypto.KdfPresets.Maximum,
+                "compatible" => Osmium.Core.Crypto.KdfPresets.Compatible(a.Int("kdf-iterations", Osmium.Core.Crypto.KdfPresets.CompatibleIterations)),
+                _ => throw new ArgumentException($"--protection must be standard, strong, maximum or compatible (got {a.Get("protection")})."),
+            };
+        }
+
         private static async Task<int> Compress(Args a, CancellationToken ct)
         {
             if (a.Positional.Count < 2) return Fail("usage: osmium a <archive.osa> <inputs…>");
@@ -368,7 +419,11 @@ namespace Osmium.Cli
                 "never" => SpareCopyPolicy.Never,
                 var v => throw new ArgumentException($"--spare-copies must be auto, always or never (got {v})."),
             };
-            // The password first: a refused one must stop the run before anything is planned or written.
+            // The protection and the password first: a refused one must stop the run before anything is planned or written.
+            var kdf = ProtectionFrom(a);
+            bool padBlocks = a.Has("hide-sizes");
+            if (padBlocks && kdf.Algorithm != Osmium.Core.Crypto.KdfAlgorithm.Argon2id)
+                return Fail("--hide-sizes needs Argon2id protection: it cannot be used with --protection compatible.");
             string? password = Password(a);
             if (password is null && a.Has("encrypt"))
             {
@@ -376,6 +431,20 @@ namespace Osmium.Cli
                 password = PromptPassword("Password: ");
                 if (string.IsNullOrEmpty(password)) return Fail("An empty password cannot protect an archive.");
                 if (PromptPassword("Repeat the password: ") != password) return Fail("The passwords do not match; nothing was written.");
+            }
+            if (password is null && (padBlocks || a.Has("protection") || a.Has("kdf-iterations")))
+                return Fail($"{(padBlocks ? "--hide-sizes" : a.Has("protection") ? "--protection" : "--kdf-iterations")} applies to encrypted archives: "
+                    + "give a password with --password-stdin, or --encrypt to be asked.");
+            if (password is not null)
+            {
+                ArchiveBuilder.CheckProtection(new BuildOptions
+                {
+                    OutputPath = output, Password = password, Kdf = kdf, PadBlocks = padBlocks, MemoryBudget = a.Size("mem", MemoryBudgets.Default()),
+                });
+                if (password.Length < 12)
+                    Console.Error.WriteLine("warning: this password is short or easy to guess. A long, unique passphrase is what keeps the archive safe: use four or more random words.");
+                if (kdf.Algorithm == Osmium.Core.Crypto.KdfAlgorithm.Pbkdf2Sha512)
+                    Console.Error.WriteLine("note: compatible protection (PBKDF2) lets Osmium 0.1 open this archive, but guessing the password costs far less than with Argon2id.");
             }
             var profile = Profile.ByName(a.Get("profile", "balanced"));
             if (profile.Experimental && !a.Has("experimental"))
@@ -406,7 +475,8 @@ namespace Osmium.Cli
             {
                 OutputPath = output,
                 Password = password,
-                KdfIterations = a.Int("kdf-iterations", ArchiveKey.DefaultIterations),
+                Kdf = kdf,
+                PadBlocks = padBlocks,
                 VerifyBlocks = !a.Has("no-verify"),
                 Overwrite = a.Has("overwrite"),
                 Threads = po.Threads + (cluster?.ExtraSlots ?? 0),
@@ -431,9 +501,47 @@ namespace Osmium.Cli
 
         private static OsaReader Open(Args a, string path)
         {
-            var r = OsaReader.Open(path, () => Password(a) ?? PromptPassword());
+            var r = OsaReader.Open(path, ReadOptions(a));
             foreach (var w in r.Warnings) Console.Error.WriteLine("warning: " + w);
             return r;
+        }
+
+        /// <summary>
+        /// How a command opens an .osa archive: the password from the options or a prompt, asked only after every check
+        /// of the archive's key derivation that needs none (<c>--mem</c> is its memory limit; <c>--allow-weak-protection</c>
+        /// and <c>--allow-slow-kdf</c> answer the questions an archive can raise), and "Checking the password…" on the
+        /// error stream when the check takes longer than half a second.
+        /// </summary>
+        internal static OsaOpenOptions ReadOptions(Args a) => new()
+        {
+            Password = () => Password(a) ?? PromptPassword(),
+            KdfMemoryLimit = a.Size("mem", MemoryBudgets.Default()),
+            Protection = a.Has("allow-weak-protection") ? Osmium.Core.Crypto.ProtectionPolicy.AllowWeak : Osmium.Core.Crypto.ProtectionPolicy.Default,
+            AllowSlowKdf = a.Has("allow-slow-kdf"),
+            KdfProgress = new PasswordCheckNotice(a.Declared?.Contains("quiet") == true && (a.Has("quiet") || a.Has("q"))),
+        };
+
+        /// <summary>Says "Checking the password…" once, when the key derivation is still running half a second after
+        /// its first progress report.</summary>
+        private sealed class PasswordCheckNotice(bool quiet) : IProgress<double>
+        {
+            private readonly Stopwatch _since = new();
+            private bool _shown;
+
+            public void Report(double value)
+            {
+                if (quiet) return;
+                lock (_since)
+                {
+                    if (_shown) return;
+                    if (!_since.IsRunning) _since.Start();
+                    else if (_since.Elapsed.TotalSeconds >= 0.5 && value < 1)
+                    {
+                        _shown = true;
+                        Console.Error.WriteLine("Checking the password…");
+                    }
+                }
+            }
         }
 
         private static string? PromptPassword() => PromptPassword("Password: ");
@@ -488,7 +596,7 @@ namespace Osmium.Cli
             }
             var progress = new ProgressLine(a.Has("quiet"));
             var sw = Stopwatch.StartNew();
-            var res = Extractor.Extract(r, dest, sel, new ExtractOptions { Overwrite = mode },
+            var res = Extractor.Extract(r, dest, sel, new ExtractOptions { Overwrite = mode, MemoryBudget = a.Size("mem", MemoryBudgets.Default()) },
                 new Progress<ExtractProgress>(p => progress.Update($"Extracting {Fmt.Pct(p.BytesDone, p.BytesTotal)}  {p.FilesDone}/{p.FilesTotal} files")), ct);
             progress.Done();
             foreach (var e in res.Errors) Console.Error.WriteLine("error: " + e);
@@ -546,6 +654,11 @@ namespace Osmium.Cli
                 Overwrite = a.Has("overwrite") ? OverwriteMode.Overwrite : a.Has("skip") ? OverwriteMode.Skip : OverwriteMode.Rename,
                 MaxExpansion = a.Has("force") ? double.PositiveInfinity : 200,
                 CheckFreeSpace = !a.Has("force"),
+                // A password given on the command line says the archive is encrypted, even when nothing left in it does.
+                PasswordGiven = a.Has("password") || a.Has("password-stdin"),
+                MemoryBudget = a.Size("mem", MemoryBudgets.Default()),
+                Protection = a.Has("allow-weak-protection") ? Osmium.Core.Crypto.ProtectionPolicy.AllowWeak : Osmium.Core.Crypto.ProtectionPolicy.Default,
+                AllowSlowKdf = a.Has("allow-slow-kdf"),
                 Progress = p => progress.Update($"{p.Phase} {Fmt.Pct(p.Done, p.Total)}"),
             }, ct);
             progress.Done();
@@ -554,10 +667,18 @@ namespace Osmium.Cli
             return res.ExitCode; // 0 everything recovered, 2 something was lost
         }
 
+        /// <summary>"yes, password verified (AES-256-GCM; key from …)": what an open reader of an encrypted archive has
+        /// checked (the password against the verifier, and the file list by its authentication), or "no".</summary>
+        internal static string EncryptedText(OsaReader r) => r.Header.Encryption is not { } e ? "no"
+            : $"yes, password verified (AES-256-GCM; key from {e.Kdf.Describe()}"
+                + (e.Kdf.Algorithm == Osmium.Core.Crypto.KdfAlgorithm.Pbkdf2Sha512 ? "; Osmium 0.1 can open it" : "")
+                + (r.Header.PaddedBlocks ? "; exact sizes hidden" : "") + ")";
+
         private static int List(Args a)
         {
             if (a.Positional.Count < 1) return Fail("usage: osmium l <archive>");
             using var r = Open(a, a.Positional[0]);
+            if (r.Header.Encrypted) Console.WriteLine($"Encrypted:    {EncryptedText(r)}");
             bool v = a.Has("v") || a.Has("verbose");
             foreach (var e in r.Entries)
             {
@@ -572,11 +693,21 @@ namespace Osmium.Cli
         private static int Info(Args a)
         {
             if (a.Positional.Count < 1) return Fail("usage: osmium info <archive>");
+            // Without a password (none given, and no console to ask on), only what the header claims: that is not yet
+            // "encrypted", which only the password check and the file list's authentication can say.
+            if (!a.Has("password") && !a.Has("password-stdin") && Console.IsInputRedirected
+                && OsaReader.Peek(a.Positional[0]) is { ClaimsEncryption: true } peek)
+            {
+                Console.WriteLine($"Archive:      {Path.GetFullPath(a.Positional[0])}");
+                Console.WriteLine($"Encrypted:    {peek.ProtectionText["Encrypted: ".Length..]}");
+                Console.WriteLine("              Give the password (--password-stdin) to see what the archive holds.");
+                return 0;
+            }
             using var r = Open(a, a.Positional[0]);
             Console.WriteLine($"Archive:      {r.Path}");
-            Console.WriteLine($"Format:       .osa {Osa.Major}.{r.Header.Minor}   created by {r.Header.Creator}");
+            Console.WriteLine($"Format:       .osa {Osa.Major}.{r.Header.Minor}   created by {Osmium.Core.Text.DisplayText.Escape(r.Creator ?? "?")}");
             Console.WriteLine($"Spare copy:   {SpareCopyText(r.SpareCopyStatus)}");
-            Console.WriteLine($"Encrypted:    {(r.Header.Encrypted ? $"yes (AES-256-GCM, PBKDF2-SHA512 ×{r.Header.Encryption!.Iterations:N0})" : "no")}");
+            Console.WriteLine($"Encrypted:    {EncryptedText(r)}");
             Console.WriteLine($"Experimental: {(r.Header.Experimental ? "yes" : "no")}");
             Console.WriteLine($"Profile:      {r.Index.MetaString("profile") ?? "?"}");
             Console.WriteLine($"Content:      {r.Entries.Count(e => !e.IsDirectory):N0} files, {r.Entries.Count(e => e.IsDirectory):N0} dirs, {Fmt.Bytes(r.TotalUnpacked)}");

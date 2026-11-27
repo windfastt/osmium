@@ -150,23 +150,14 @@ jobs:
           set -euo pipefail
           NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/argon2id"
           fail() { echo "::error::$1"; exit 1; }
-          mkdir -p "$W/in/sub" "$W/make"
+          mkdir -p "$W/in/sub"
           seq 1 20000 > "$W/in/numbers.txt"
           head -c 300K /dev/urandom > "$W/in/sub/random.bin"
-          # Written through the archive builder the command line uses, with the default protection and nothing else set
-          # (with --hide-sizes: "Hide exact sizes" too).
-          { echo "#:project $GITHUB_WORKSPACE/src/Osmium.Core/Osmium.Core.csproj"; cat <<'CS'; } > "$W/make/make-encrypted.cs"
-          #:property PublishAot=false
-          using Osmium.Core.Planning;
-          string password = Console.In.ReadLine() ?? throw new InvalidOperationException("no password on standard input");
-          var plan = await new Planner(new PlanOptions { Profile = Profile.ByName("fast"), ForcedPipeline = "zstd(level=3)" })
-              .BuildAsync(Scanner.Scan([args[1]]), CancellationToken.None);
-          await ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = args[0], Password = password, PadBlocks = args.Contains("--hide-sizes") },
-              CancellationToken.None);
-          CS
-          printf '%s\n' "$COMPAT_PASSWORD" | dotnet run "$W/make/make-encrypted.cs" -- "$W/default.osa" "$W/in" \
+          # Written by this version's command line with the default protection and nothing else set about it (with
+          # --hide-sizes: "Hide exact sizes" too).
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$W/default.osa" "$W/in" --profile fast --pipeline "zstd(level=3)" --password-stdin --quiet \
             || fail "default.osa: this version could not write it"
-          printf '%s\n' "$COMPAT_PASSWORD" | dotnet run "$W/make/make-encrypted.cs" -- "$W/hidden.osa" "$W/in" --hide-sizes \
+          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" a "$W/hidden.osa" "$W/in" --profile fast --pipeline "zstd(level=3)" --password-stdin --hide-sizes --quiet \
             || fail "hidden.osa: this version could not write it"
           # Both headers ask for Argon2id (kdf 2), Standard (2 passes, 1 GiB, 4 lanes). The default has flags 0x0001, no
           # flag of its own; with exact sizes hidden, flag bit 3 is set too (0x0009).
