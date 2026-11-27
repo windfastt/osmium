@@ -307,8 +307,15 @@ index's offsets:
    footer keeps the first 8 bytes of the id). Block frames are authenticated with `archiveId ‖ frameNumber` alone, so
    when the header is damaged elsewhere its key fields, read from their fixed places, still yield the blocks once they
    authenticate a frame. The index frame also binds the exact header bytes: salvage rebuilds the header from those fields as a writer
-   makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x), and a rebuild that
-   authenticates the index restores the file names. Without the key fields, encrypted frames cannot be decrypted.
+   makes it (with the minor version stored in it, 1, or 0 for archives of Osmium 0.1.x; without a Creator record, as
+   encrypted headers are written since 0.2.0, then with the creator text found in the damaged header; with every flag
+   set a writer of this version uses), and a rebuild that authenticates the index restores the file names. Without
+   the key fields, encrypted frames cannot be decrypted.
+   No frame that is not encrypted is ever written from an encrypted archive; the report says why the archive counts as
+   encrypted. An intact header decides. Without one, the archive counts as encrypted when an intact header copy, the
+   index frame the footer at the end points to, the damaged header, or a password given before salvage started says
+   so; otherwise that index frame or the damaged header saying it is not encrypted settles it; with none of them left,
+   any encrypted frame found makes it encrypted.
 7. Nothing is written when what would be written exceeds the destination's free space, or expands more than the limit
    (`--force` lifts both in the CLI).
 8. Spare copies (§4.1): the header copy H is recognised by its trailer and the header it holds, which must be this

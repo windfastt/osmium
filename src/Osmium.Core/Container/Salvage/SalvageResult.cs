@@ -19,6 +19,13 @@ public sealed record SalvageOptions
     /// <summary>Allow a key derivation that takes more work than the strongest preset (the user agreed).</summary>
     public bool AllowSlowKdf { get; init; }
     /// <summary>
+    /// The user gave a password before salvage started (the command line's password option, a password typed in the
+    /// app): when the header and its copies are gone, the archive counts as encrypted even if nothing left in it says
+    /// so, and no frame that is not encrypted is written from it. A password callback alone does not say this, as it
+    /// may only ask when it is called.
+    /// </summary>
+    public bool PasswordGiven { get; init; }
+    /// <summary>
     /// When the recovered index describes more than this many times the data its blocks hold (heavy deduplication or
     /// a decompression bomb), or without an index the block files would be this many times the archive's size, nothing
     /// is written and <see cref="SalvageResult.Refused"/> says why.

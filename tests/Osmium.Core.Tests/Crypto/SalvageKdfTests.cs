@@ -235,6 +235,96 @@ public class SalvageKdfTests
         Assert.Empty(FieldsOf(t, damaged));
         Assert.Empty(FieldsOf(t, header[..60], pad: false)); // the file ends inside the record
     }
+
+    // ------------------------------------------------------------------ rebuilt headers and plaintext frames
+
+    [Theory]
+    [InlineData("argon2id")]
+    [InlineData("pbkdf2")]
+    public void RebuiltHeadersTryNoCreatorFirstAndEveryFlagCombinationThisVersionWrites(string kdf)
+    {
+        using var t = new TempDir();
+        var info = new EncryptionInfo(kdf == "argon2id" ? KdfPresets.Standard : KdfParameters.Pbkdf2(600_000), Salt, Verifier);
+        var id = new byte[16];
+        foreach (string? creator in new[] { null, "Osmium 0.1.1" })
+        {
+            var header = HeaderWith(info, creator);
+            var f = Assert.Single(FieldsOf(t, header, b => b[0] ^= 0xFF)); // the marker damaged: the CRC fails
+            var rebuilt = f.Rebuilds(id, header.Length).Select(Parse).ToList();
+            Assert.Equal((Osa.FlagEncrypted, (string?)null), (rebuilt[0].Flags, rebuilt[0].Creator)); // what this version writes
+            Assert.All(rebuilt, h => Assert.Equal(info.RecordBytes, h.Encryption!.RecordBytes)); // the record as it lay
+            Assert.Equal(creator is null ? [null] : new[] { null, creator }, rebuilt.Select(h => h.Creator).Distinct());
+            // "Hide exact sizes" (flag bit 3) exists only with Argon2id; each flag set with and without experimental features
+            uint[] flags = kdf == "argon2id"
+                ? [Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental, Osa.FlagEncrypted | Osa.FlagPaddedBlocks, Osa.FlagEncrypted | Osa.FlagPaddedBlocks | Osa.FlagExperimental]
+                : [Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental];
+            Assert.Equal(flags, rebuilt.Select(h => h.Flags).Distinct());
+            int minors = rebuilt.Select(h => h.Minor).Distinct().Count();
+            Assert.Equal(flags.Length * (creator is null ? 1 : 2) * minors, rebuilt.Count);
+            Assert.True(rebuilt.Count <= 2 * 2 * 2 * minors);
+        }
+
+        // The flags as they are; the other fields read with bit 3 cleared, whatever this reader knows of it.
+        static (uint Flags, string? Creator, ushort Minor, EncryptionInfo? Encryption) Parse(byte[] b)
+        {
+            uint flags = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(12));
+            var c = (byte[])b.Clone();
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(12), flags & ~Osa.FlagPaddedBlocks);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(c.Length - 4), Osa.Crc(c.AsSpan(0, c.Length - 4)));
+            var h = ArchiveHeader.Read(new MemoryStream(c));
+            return (flags, h.Creator, h.Minor, h.Encryption);
+        }
+    }
+
+    /// <summary>The frames (header included) of <paramref name="path"/>'s blocks, in file order.</summary>
+    private static IEnumerable<byte[]> BlockFrames(string path, string? password)
+    {
+        var b = File.ReadAllBytes(path);
+        using var r = OsaReader.Open(path, () => password);
+        return [.. r.Blocks.Select(x => b.AsSpan((int)x.Offset, (int)x.FrameLength).ToArray())];
+    }
+
+    private static string PlaintextFrames(TempDir t, int count) =>
+        EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions(), [.. Enumerable.Repeat(3000, count)]);
+
+    [Fact]
+    public void WithHeaderAndCopiesGoneOneEncryptedFrameKeepsTenPlaintextFramesFromBeingWritten()
+    {
+        // No header, no header copy, no footer: one frame of an encrypted archive, then ten that are not encrypted.
+        using var t = new TempDir();
+        var encrypted = BlockFrames(EncryptedArchives.Write(t.Sub("enc.osa"), "pbkdf2", blocks: 1), EncryptedArchives.Password);
+        var plain = BlockFrames(PlaintextFrames(t, 10), null);
+        string path = t.Sub("mixed.osa");
+        File.WriteAllBytes(path, [.. new byte[200], .. encrypted.SelectMany(f => f), .. plain.SelectMany(f => f)]);
+        int asked = 0;
+        var r = Salvage(path, t.Sub("out"), () => { asked++; return EncryptedArchives.Password; });
+        Assert.True(r.Encrypted);
+        Assert.Equal(0, asked); // no header to derive a key from
+        Assert.Empty(r.Written);
+        var skipped = r.Frames.Where(f => !f.Encrypted).ToList();
+        Assert.Equal(10, skipped.Count);
+        Assert.All(skipped, f => Assert.Equal((SalvageFrameState.Ignored, FrameScanner.PlaintextInEncrypted), (f.State, f.Problem)));
+        Assert.Contains(r.Notes, n => n.StartsWith("The archive counts as encrypted (an encrypted frame was found at offset 200)", StringComparison.Ordinal));
+        Assert.Contains("an encrypted frame was found at offset 200", File.ReadAllText(r.ReportPath!));
+    }
+
+    [Fact]
+    public void WithHeaderAndCopiesGoneAPasswordGivenKeepsPlaintextFramesFromBeingWritten()
+    {
+        using var t = new TempDir();
+        var plain = BlockFrames(PlaintextFrames(t, 10), null);
+        string path = t.Sub("plain-only.osa");
+        File.WriteAllBytes(path, [.. new byte[200], .. plain.SelectMany(f => f)]);
+        var r = Salvage(path, t.Sub("out"), () => EncryptedArchives.Password, new SalvageOptions { MemoryBudget = 1L << 30, PasswordGiven = true });
+        Assert.True(r.Encrypted);
+        Assert.Empty(r.Written);
+        Assert.All(r.Frames, f => Assert.Equal(SalvageFrameState.Ignored, f.State));
+        Assert.Contains(r.Notes, n => n.StartsWith("The archive counts as encrypted (a password was given)", StringComparison.Ordinal));
+        // Without the password, the same frames are an unencrypted archive's, and are written.
+        var plainRun = Salvage(path, t.Sub("out2"), () => null);
+        Assert.False(plainRun.Encrypted);
+        Assert.Equal(10, plainRun.Written.Count(w => w.StartsWith("block-", StringComparison.Ordinal)));
+    }
 }
 
 /// <summary>Salvage under the policy Osmium itself applies, with protection at the minimum (256 MiB): in the heavy collection.</summary>

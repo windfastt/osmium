@@ -29,6 +29,8 @@ public static class Osa
 
     public const uint FlagEncrypted = 1u << 0;
     public const uint FlagExperimental = 1u << 16;
+    /// <summary>Critical header flag bit 3: every block frame is padded ("Hide exact sizes"); Argon2id archives only.</summary>
+    public const uint FlagPaddedBlocks = 1u << 3;
     public const uint KnownCriticalFlags = FlagEncrypted;
 
     public const uint FrameFlagEncrypted = 1u << 0;

@@ -100,9 +100,13 @@ internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, in
     }
 
     /// <summary>
-    /// The header as a writer makes it from these fields, with the creator text found where it lies when the header
-    /// ends at <paramref name="headerEnd"/> (where the first frame starts): candidates for the bytes the index binds.
-    /// The minor version is the one stored in the damaged header, this version's, or 0 (archives of Osmium 0.1.x).
+    /// The header as a writer makes it from these fields: candidates for the bytes the index binds, each costing one
+    /// authentication of the index and no key derivation. The record is the one read from the damaged header, byte for
+    /// byte. The minor version is the one stored in the damaged header, this version's, or 0 (archives of Osmium 0.1.x);
+    /// no Creator record first (as this version writes encrypted headers), then the creator text found where it lies
+    /// when the header ends at <paramref name="headerEnd"/> (where the first frame starts), as earlier versions wrote
+    /// it; and every flag set this version writes: encrypted, with "Hide exact sizes" (bit 3, Argon2id only), each
+    /// with and without experimental features. At most 2 × 2 × 2 candidates per minor version.
     /// </summary>
     public IEnumerable<byte[]> Rebuilds(byte[] archiveId, long headerEnd)
     {
@@ -110,10 +114,14 @@ internal sealed record KeyFields(byte[] ArchiveId, EncryptionInfo Encryption, in
         string? creator = creatorLength >= 0 && creatorLength < 128 && headerEnd <= Head.Length
             ? System.Text.Encoding.UTF8.GetString(Head, (int)creatorAt, (int)creatorLength) : null;
         var minors = new[] { BinaryPrimitives.ReadUInt16LittleEndian(Head.AsSpan(10)), Osa.Minor, (ushort)0 }.Distinct();
+        uint[] flagSets = Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id
+            ? [Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagPaddedBlocks]
+            : [Osa.FlagEncrypted];
         foreach (ushort minor in minors)
-            foreach (string? c in creator is null ? new string?[] { null } : [creator, null])
-                foreach (uint flags in new[] { Osa.FlagEncrypted, Osa.FlagEncrypted | Osa.FlagExperimental })
-                    yield return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
+            foreach (string? c in creator is null ? new string?[] { null } : [null, creator])
+                foreach (uint flagSet in flagSets)
+                    foreach (uint flags in new[] { flagSet, flagSet | Osa.FlagExperimental })
+                        yield return new ArchiveHeader { Minor = minor, Flags = flags, ArchiveId = archiveId, Encryption = Encryption, Creator = c }.Serialize();
     }
 }
 
@@ -231,6 +239,10 @@ internal sealed record HeaderProbe(ArchiveHeader? Header, long Offset, ArchiveHe
 /// </summary>
 internal sealed class FrameScanner
 {
+    /// <summary>Why a frame that is not encrypted is not written from an encrypted archive (the notes say why the
+    /// archive counts as encrypted).</summary>
+    internal const string PlaintextInEncrypted = "not encrypted: not protected as Osmium protects encrypted archives; not written";
+
     private const int ChunkSize = 1 << 20;
     /// <summary>Longest possible block-body prefix: descriptor (≤ 64 KiB, 3-byte length) + hashes + varint + CRC.</summary>
     private const int MaxPrefix = 3 + (1 << 16) + 16 + 8 + 10 + 4;
@@ -405,9 +417,7 @@ internal sealed class FrameScanner
         }
         if (f.Encrypted != ArchiveEncrypted)
         {
-            f.Reject(SalvageFrameState.Ignored, ArchiveEncrypted
-                ? "not encrypted, so it cannot be authenticated as part of this encrypted archive"
-                : "encrypted, but this archive is not");
+            f.Reject(SalvageFrameState.Ignored, ArchiveEncrypted ? PlaintextInEncrypted : "encrypted, but this archive is not");
             return;
         }
         if (!f.Encrypted)
