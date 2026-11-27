@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.IO.Hashing;
 using System.Security;
 using Osmium.Core.Container;
 using Osmium.Core.Planning;
@@ -15,11 +17,17 @@ public sealed record RecycleFacts
     public required bool VerifiedBlocks { get; init; }
     /// <summary>The archive builder's result, or null when no archive was completed.</summary>
     public BuildResult? Build { get; init; }
-    /// <summary>The scan's records (path, size, last-write time) of the files the archive holds.</summary>
-    public IReadOnlyList<SourceFile> ArchivedFiles { get; init; } = [];
+    /// <summary>The files the archive holds, each with the scan's record of it and the hash its index entry stores.</summary>
+    public IReadOnlyList<ArchivedFile> ArchivedFiles { get; init; } = [];
     /// <summary>The scan's records of the folders the archive holds.</summary>
     public IReadOnlyList<SourceDir> ArchivedDirs { get; init; } = [];
 }
+
+/// <summary>
+/// A file the archive holds: the scan's record of it (path, size, last-write time) and the XxHash128 of its contents
+/// that the archive's index stores, which extraction checks the file it writes against.
+/// </summary>
+public sealed record ArchivedFile(SourceFile Scanned, UInt128 Hash);
 
 /// <summary>One input and whether it may move: <see cref="Reason"/> says why it stays, and is null when it may move.</summary>
 public sealed record InputVerdict(string Path, string? Reason)
@@ -58,11 +66,21 @@ public sealed record RecycleDecision(IReadOnlyList<InputVerdict> Inputs)
 /// <item>It is on a fixed local drive. Removable and network drives have no Recycle Bin, so their files would be
 /// deleted for good; the drive type comes from the caller, so these rules run anywhere.</item>
 /// </list>
+/// Just before an input moves (<see cref="Recheck"/>), the same rules run once more, every file it holds is read
+/// again and must hash to what the archive's index stores for it, and then the listing is taken a last time. Sizes
+/// and times alone would miss an edit that keeps both, and the bytes of a file stored once for several identical files
+/// are read only once while the archive is built.
 /// </summary>
 public static class RecycleCandidates
 {
     /// <summary>Offline, recall-on-open and recall-on-data-access: a cloud file whose contents are not on this PC.</summary>
     private const FileAttributes CloudPlaceholder = FileAttributes.Offline | (FileAttributes)0x40000 | (FileAttributes)0x400000;
+
+    /// <summary>Why an input stays when its job is canceled while it is checked.</summary>
+    internal const string Canceled = "the job was canceled";
+
+    /// <summary>The bytes read at a time when a file is hashed again; one buffer at a time, from the shared pool.</summary>
+    private const int HashBuffer = 1 << 20;
 
     /// <summary>File names on Windows and macOS ignore case: two inputs that differ only in case are the same item.</summary>
     private static bool IgnoresCase => OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
@@ -108,7 +126,7 @@ public static class RecycleCandidates
                 continue;
             }
             string? reason;
-            try { reason = overlaps.Of(full) ?? Judge(full, archive, archived, driveType); }
+            try { reason = overlaps.Of(full) ?? Judge(full, archive, archived, driveType, contents: null); }
             catch (Exception e) { reason = $"it could not be checked ({e.Message})"; } // whatever went wrong, the input stays
             verdicts.Add(new InputVerdict(full, reason));
         }
@@ -117,9 +135,13 @@ public static class RecycleCandidates
 
     /// <summary>
     /// Judges one input again with the same facts, for the moment just before it moves: null when it may still move,
-    /// else the reason it now stays (the archive changed, or the input no longer matches what the archive holds).
+    /// else the reason it now stays (the archive changed, or the input no longer matches what the archive holds). On
+    /// top of the rules of <see cref="Decide"/>, it reads every file the input holds and compares its hash with the one
+    /// the archive's index stores for it, then lists the input once more, so that nothing that appeared, went or changed
+    /// while it was read moves with it. Files are read one at a time through one 1 MiB buffer.
     /// </summary>
-    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType)
+    /// <param name="ct">Stops the reading: the input then stays, because the job was canceled.</param>
+    public static Func<string, string?> Recheck(RecycleFacts facts, Func<string, DriveType> driveType, CancellationToken ct = default)
     {
         if (JobBlocker(facts) is { } blocker) return _ => blocker;
         var archived = new Archived(facts.ArchivedFiles, facts.ArchivedDirs);
@@ -128,25 +150,35 @@ public static class RecycleCandidates
         {
             try
             {
+                if (ct.IsCancellationRequested) return Canceled;
                 if (JobBlocker(facts) is { } now) return now;
                 var (full, problem) = Normalize(input);
-                return full is null ? problem : Judge(full, archive, archived, driveType);
+                if (full is null) return problem;
+                var contents = new List<Content>();
+                if (Judge(full, archive, archived, driveType, contents) is { } reason) return reason;
+                if (CompareContents(contents, ct) is { } differs) return differs;
+                // The last look, after the reading: nothing may have appeared, gone or changed meanwhile.
+                return Judge(full, archive, archived, driveType, contents: null);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return Canceled; }
             catch (Exception e) { return $"it could not be checked again ({e.Message})"; }
         };
     }
 
     /// <summary>
     /// The planned files and folders that the archive's own index lists: files with the same archive path, size and
-    /// last-write time, folders with the same archive path. Only these count as being in the archive.
+    /// last-write time, each with the hash its entry stores; folders with the same archive path. Only these count as
+    /// being in the archive.
     /// </summary>
-    public static (List<SourceFile> Files, List<SourceDir> Dirs) InArchive(IEnumerable<SourceFile> files, IEnumerable<SourceDir> dirs, IEnumerable<ArchiveEntry> index)
+    public static (List<ArchivedFile> Files, List<SourceDir> Dirs) InArchive(IEnumerable<SourceFile> files, IEnumerable<SourceDir> dirs, IEnumerable<ArchiveEntry> index)
     {
         var entries = new Dictionary<string, ArchiveEntry>(StringComparer.Ordinal);
         foreach (var e in index) entries.TryAdd(e.Path, e);
-        return (
-            [.. files.Where(f => entries.TryGetValue(f.RelPath, out var e) && !e.IsDirectory && e.Size == f.Size && e.ModifiedUtc == f.ModifiedUtc)],
-            [.. dirs.Where(d => entries.TryGetValue(d.RelPath, out var e) && e.IsDirectory)]);
+        var held = new List<ArchivedFile>();
+        foreach (var f in files)
+            if (entries.TryGetValue(f.RelPath, out var e) && !e.IsDirectory && e.Size == f.Size && e.ModifiedUtc == f.ModifiedUtc)
+                held.Add(new ArchivedFile(f, e.Hash));
+        return (held, [.. dirs.Where(d => entries.TryGetValue(d.RelPath, out var e) && e.IsDirectory)]);
     }
 
     /// <summary>The full path of an input as the scan sees it, or the input as given when it is not a usable path.</summary>
@@ -167,7 +199,11 @@ public static class RecycleCandidates
         return (full, null);
     }
 
-    private static string? Judge(string full, string archive, Archived archived, Func<string, DriveType> driveType)
+    /// <summary>
+    /// Applies the rules to one input. When it passes and <paramref name="contents"/> is given, that list gets every file
+    /// the input holds, each with the hash the archive's index stores for it.
+    /// </summary>
+    private static string? Judge(string full, string archive, Archived archived, Func<string, DriveType> driveType, List<Content>? contents)
     {
         FileSystemInfo item = File.Exists(full) ? new FileInfo(full) : new DirectoryInfo(full);
         if (!item.Exists) return "it is no longer there";
@@ -175,19 +211,20 @@ public static class RecycleCandidates
         if (drive != DriveType.Fixed) return $"it is on {DriveName(drive)}, which has no Recycle Bin";
         if ((item.Attributes & FileAttributes.ReparsePoint) != 0) return "it is a link (a junction, symbolic link or cloud file)";
         if ((item.Attributes & CloudPlaceholder) != 0) return "it is a cloud placeholder whose contents are not on this PC";
-        return item is FileInfo file ? JudgeFile(full, file, archive, archived) : JudgeFolder(full, (DirectoryInfo)item, archive, archived);
+        return item is FileInfo file ? JudgeFile(full, file, archive, archived, contents) : JudgeFolder(full, (DirectoryInfo)item, archive, archived, contents);
     }
 
-    private static string? JudgeFile(string full, FileInfo file, string archive, Archived archived)
+    private static string? JudgeFile(string full, FileInfo file, string archive, Archived archived, List<Content>? contents)
     {
         if (string.Equals(full, archive, PathComparison)) return "it is the archive";
-        if (!archived.Files.TryGetValue(full, out var scanned)) return "it is not in the archive" + Describe(file.Attributes);
-        if (scanned is null || file.Length != scanned.Size || file.LastWriteTimeUtc != scanned.ModifiedUtc) return "it changed after it was read";
-        if (PathSafety.Validate(scanned.RelPath) is { } unsafeName) return $"Osmium cannot extract it under its name ({unsafeName})";
+        if (!archived.Files.TryGetValue(full, out var held)) return "it is not in the archive" + Describe(file.Attributes);
+        if (held is null || file.Length != held.Scanned.Size || file.LastWriteTimeUtc != held.Scanned.ModifiedUtc) return "it changed after it was read";
+        if (PathSafety.Validate(held.Scanned.RelPath) is { } unsafeName) return $"Osmium cannot extract it under its name ({unsafeName})";
+        contents?.Add(new Content(full, null, held.Hash));
         return null;
     }
 
-    private static string? JudgeFolder(string full, DirectoryInfo dir, string archive, Archived archived)
+    private static string? JudgeFolder(string full, DirectoryInfo dir, string archive, Archived archived, List<Content>? contents)
     {
         if (!archived.Dirs.TryGetValue(full, out var root)) return "it is not in the archive";
         if (PathSafety.Validate(root.RelPath) is { } unsafeRoot) return $"Osmium cannot extract it under its name ({unsafeRoot})";
@@ -197,13 +234,15 @@ public static class RecycleCandidates
         if (Walk(dir, found, folders) is { } problem) return problem;
         string prefix = full + Path.DirectorySeparatorChar;
         var listed = new HashSet<string>(StringComparer.Ordinal);
+        var held = new List<Content>(found.Count);
         foreach (var (rel, info) in found.OrderBy(f => f.Rel, StringComparer.Ordinal))
         {
             string path = prefix + rel;
             listed.Add(path);
-            if (!archived.Files.TryGetValue(path, out var scanned)) return $"it holds a file that is not in the archive: {rel}{Describe(info.Attributes)}";
-            if (scanned is null || info.Length != scanned.Size || info.LastWriteTimeUtc != scanned.ModifiedUtc) return $"{rel} changed after it was read";
-            if (PathSafety.Validate(scanned.RelPath) is { } unsafeName) return $"Osmium cannot extract {rel} under its name ({unsafeName})";
+            if (!archived.Files.TryGetValue(path, out var file)) return $"it holds a file that is not in the archive: {rel}{Describe(info.Attributes)}";
+            if (file is null || info.Length != file.Scanned.Size || info.LastWriteTimeUtc != file.Scanned.ModifiedUtc) return $"{rel} changed after it was read";
+            if (PathSafety.Validate(file.Scanned.RelPath) is { } unsafeName) return $"Osmium cannot extract {rel} under its name ({unsafeName})";
+            held.Add(new Content(path, rel, file.Hash));
         }
         foreach (var path in archived.Under(prefix))
             if (!listed.Contains(path)) return $"{path[prefix.Length..]} is no longer there";
@@ -211,7 +250,53 @@ public static class RecycleCandidates
         foreach (var rel in folders.Order(StringComparer.Ordinal))
             if (PathSafety.Validate(root.RelPath + "/" + rel.Replace(Path.DirectorySeparatorChar, '/')) is { } unsafeFolder)
                 return $"Osmium cannot extract the folder {rel} under its name ({unsafeFolder})";
+        contents?.AddRange(held);
         return null;
+    }
+
+    /// <summary>
+    /// Reads each file of <paramref name="contents"/> as it is now and compares its XxHash128 with the hash the
+    /// archive's index stores for it, which is what extraction checks the file it writes against. Every file is read on
+    /// its own, also one the archive stores once for several identical files. Returns why the input stays when a file
+    /// differs or cannot be read, null when every file matches.
+    /// </summary>
+    private static string? CompareContents(List<Content> contents, CancellationToken ct)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(HashBuffer);
+        try
+        {
+            foreach (var c in contents)
+            {
+                ct.ThrowIfCancellationRequested();
+                UInt128 now;
+                try { now = HashOf(c.Path, buffer, ct); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException)
+                {
+                    return c.Rel is null ? $"it could not be read to compare it with the archive ({e.Message})"
+                        : $"{c.Rel} could not be read to compare it with the archive ({e.Message})";
+                }
+                if (now != c.Hash)
+                    return c.Rel is null ? "its contents no longer match the archive" : $"the contents of {c.Rel} no longer match the archive";
+            }
+            return null;
+        }
+        finally { ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    /// <summary>The XxHash128 of a file's whole contents, read from start to end.</summary>
+    private static UInt128 HashOf(string path, byte[] buffer, CancellationToken ct)
+    {
+        // Shared with readers only: on Windows a file that another program has open for writing cannot be opened so.
+        // It may be changing, so it stays.
+        using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan);
+        var hash = new XxHash128();
+        int n;
+        for (long at = 0; (n = RandomAccess.Read(handle, buffer, at)) > 0; at += n)
+        {
+            ct.ThrowIfCancellationRequested();
+            hash.Append(buffer.AsSpan(0, n));
+        }
+        return hash.GetCurrentHashAsUInt128();
     }
 
     /// <summary>
@@ -262,20 +347,28 @@ public static class RecycleCandidates
         _ => "a drive of unknown type",
     };
 
+    /// <summary>A file an input holds, by its full path, and the hash the archive's index stores for it.</summary>
+    /// <param name="Rel">Its path below the input; null when it is the input itself.</param>
+    private readonly record struct Content(string Path, string? Rel, UInt128 Hash);
+
     /// <summary>The scan's records of what the archive holds, by full path.</summary>
     private sealed class Archived
     {
-        /// <summary>Files by full path; null when the scan recorded one file twice with different sizes or times.</summary>
-        public Dictionary<string, SourceFile?> Files { get; } = new(StringComparer.Ordinal);
+        /// <summary>Files by full path; null when the archive holds one file twice with different sizes, times or hashes.</summary>
+        public Dictionary<string, ArchivedFile?> Files { get; } = new(StringComparer.Ordinal);
         /// <summary>Folders by full path (the first record when the scan recorded one twice).</summary>
         public Dictionary<string, SourceDir> Dirs { get; } = new(StringComparer.Ordinal);
         private readonly string[] _sorted;
 
-        public Archived(IEnumerable<SourceFile> files, IEnumerable<SourceDir> dirs)
+        public Archived(IEnumerable<ArchivedFile> files, IEnumerable<SourceDir> dirs)
         {
             foreach (var f in files)
-                if (!Files.TryAdd(f.FullPath, f) && Files[f.FullPath] is { } first && (first.Size != f.Size || first.ModifiedUtc != f.ModifiedUtc))
-                    Files[f.FullPath] = null;
+            {
+                string path = f.Scanned.FullPath;
+                if (!Files.TryAdd(path, f) && Files[path] is { } first
+                    && (first.Scanned.Size != f.Scanned.Size || first.Scanned.ModifiedUtc != f.Scanned.ModifiedUtc || first.Hash != f.Hash))
+                    Files[path] = null;
+            }
             foreach (var d in dirs) Dirs.TryAdd(d.FullPath, d);
             _sorted = [.. Files.Keys.Order(StringComparer.Ordinal)];
         }

@@ -1,3 +1,4 @@
+using System.IO.Hashing;
 using Osmium.Core.Container;
 using Osmium.Core.Planning;
 using Osmium.Desktop.Jobs;
@@ -12,6 +13,7 @@ public sealed class RecycleCandidatesTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "osm-recycle-" + Guid.NewGuid().ToString("N")[..8]);
     private static readonly Func<string, DriveType> Fixed = _ => DriveType.Fixed;
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     public RecycleCandidatesTests() => Directory.CreateDirectory(_root);
 
@@ -34,7 +36,8 @@ public sealed class RecycleCandidatesTests : IDisposable
 
     /// <summary>
     /// The facts of a completed, verified job that archived exactly what the scan found (the planner adds the scan's
-    /// skipped items to the builder's warnings). The archive is written after the scan, as a job does.
+    /// skipped items to the builder's warnings), each file with the hash of its contents at the scan. The archive is
+    /// written after the scan, as a job does.
     /// </summary>
     private RecycleFacts Facts(IReadOnlyList<string> inputs, ScanOptions? options = null, string? archive = null)
     {
@@ -45,8 +48,21 @@ public sealed class RecycleCandidatesTests : IDisposable
         {
             Inputs = inputs, Outcome = JobState.Completed, VerifiedBlocks = true,
             Build = new BuildResult(archive, scan.Files.Sum(f => f.Size), 1234, scan.Files.Count, 1, TimeSpan.Zero, scan.Skipped, [], 0, 0),
-            ArchivedFiles = scan.Files, ArchivedDirs = scan.Dirs,
+            ArchivedFiles = [.. scan.Files.Select(f => new ArchivedFile(f, HashOf(f.FullPath)))], ArchivedDirs = scan.Dirs,
         };
+    }
+
+    private static UInt128 HashOf(string path) => XxHash128.HashToUInt128(File.ReadAllBytes(path));
+
+    /// <summary>Changes the first byte of a file and gives it back its last-write time: its size and time stay the same.</summary>
+    private static void EditKeepingSizeAndTime(string path)
+    {
+        var time = File.GetLastWriteTimeUtc(path);
+        var bytes = File.ReadAllBytes(path);
+        bytes[0] ^= 0x20;
+        File.WriteAllBytes(path, bytes);
+        File.SetLastWriteTimeUtc(path, time);
+        Assert.Equal(time, File.GetLastWriteTimeUtc(path));
     }
 
     private static string Reason(RecycleDecision d, string path) => d.Inputs.Single(i => i.Path == path).Reason ?? "";
@@ -294,11 +310,12 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("in/a.txt");
         Write("in/b.txt");
         var facts = Facts([folder]);
+        var scanned = facts.ArchivedFiles.Select(f => f.Scanned).ToList();
         var index = facts.ArchivedDirs.Select(d => new ArchiveEntry { Path = d.RelPath, Kind = EntryKind.Directory })
-            .Concat(facts.ArchivedFiles.Select(f => new ArchiveEntry { Path = f.RelPath, Size = f.Size, ModifiedUtc = f.ModifiedUtc }))
+            .Concat(facts.ArchivedFiles.Select(f => new ArchiveEntry { Path = f.Scanned.RelPath, Size = f.Scanned.Size, ModifiedUtc = f.Scanned.ModifiedUtc, Hash = f.Hash }))
             .ToList();
-        var (files, dirs) = RecycleCandidates.InArchive(facts.ArchivedFiles, facts.ArchivedDirs, index);
-        Assert.Equal(facts.ArchivedFiles, files);
+        var (files, dirs) = RecycleCandidates.InArchive(scanned, facts.ArchivedDirs, index);
+        Assert.Equal(facts.ArchivedFiles, files); // each with the hash its entry stores
         Assert.Equal(facts.ArchivedDirs, dirs);
         Assert.Equal([folder], RecycleCandidates.Decide(facts with { ArchivedFiles = files, ArchivedDirs = dirs }, Fixed).Move);
 
@@ -311,7 +328,7 @@ public sealed class RecycleCandidatesTests : IDisposable
             index.Select(e => e.Path == "in/a.txt" ? new ArchiveEntry { Path = e.Path, Size = e.Size } : e).ToList(),
         })
         {
-            var (f2, d2) = RecycleCandidates.InArchive(facts.ArchivedFiles, facts.ArchivedDirs, damaged);
+            var (f2, d2) = RecycleCandidates.InArchive(scanned, facts.ArchivedDirs, damaged);
             Assert.Single(f2);
             Assert.Contains("is not in the archive", Assert.Single(RecycleCandidates.Decide(facts with { ArchivedFiles = f2, ArchivedDirs = d2 }, Fixed).Keep).Reason);
         }
@@ -425,9 +442,12 @@ public sealed class RecycleCandidatesTests : IDisposable
     {
         string file = Write("a.txt");
         var facts = Facts([file]);
-        var twice = facts with { ArchivedFiles = [.. facts.ArchivedFiles, facts.ArchivedFiles[0] with { Size = facts.ArchivedFiles[0].Size + 1 }] };
+        var first = facts.ArchivedFiles[0];
+        var twice = facts with { ArchivedFiles = [first, first with { Scanned = first.Scanned with { Size = first.Scanned.Size + 1 } }] };
         Assert.Equal([file], RecycleCandidates.Decide(facts, Fixed).Move);
         Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(twice, Fixed).Keep).Reason);
+        var otherContents = facts with { ArchivedFiles = [first, first with { Hash = first.Hash + 1 }] };
+        Assert.Equal("it changed after it was read", Assert.Single(RecycleCandidates.Decide(otherContents, Fixed).Keep).Reason);
     }
 
     [Fact]
@@ -472,18 +492,102 @@ public sealed class RecycleCandidatesTests : IDisposable
         Write("in/a.txt");
         string file = Write("b.txt");
         var facts = Facts([folder, file]);
-        var recheck = RecycleCandidates.Recheck(facts, Fixed);
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
         Assert.Null(recheck(folder));
         Assert.Null(recheck(file));
         File.AppendAllText(file, " changed");
         Write("in/new.txt");
         Assert.Equal("it changed after it was read", recheck(file));
         Assert.Equal("it holds a file that is not in the archive: new.txt", recheck(folder));
-        Assert.Equal("it is on a removable drive, which has no Recycle Bin", RecycleCandidates.Recheck(facts, _ => DriveType.Removable)(folder));
+        Assert.Equal("it is on a removable drive, which has no Recycle Bin", RecycleCandidates.Recheck(facts, _ => DriveType.Removable, Ct)(folder));
         File.Delete(facts.Build!.Path);
         Assert.Equal("the archive is missing", recheck(folder));
         Assert.Equal("block verification was off for this job (Settings → Compression → Verify every block)",
-            RecycleCandidates.Recheck(facts with { VerifiedBlocks = false }, Fixed)(file));
+            RecycleCandidates.Recheck(facts with { VerifiedBlocks = false }, Fixed, Ct)(file));
+    }
+
+    [Fact]
+    public void AnEditThatKeepsSizeAndTimeStaysAtTheLastCheck()
+    {
+        string file = Write("a.txt", "the archived text");
+        string folder = Folder("in");
+        Write("in/empty.txt", "");
+        string inner = Write("in/sub/b.txt", "more archived text");
+        string other = Folder("other");
+        Write("other/c.txt", "unchanged");
+        Write("other/empty.txt", "");
+        var facts = Facts([file, folder, other]);
+        EditKeepingSizeAndTime(file);
+        EditKeepingSizeAndTime(inner);
+        Assert.Equal([file, folder, other], RecycleCandidates.Decide(facts, Fixed).Move); // sizes and times cannot tell
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
+        Assert.Equal("its contents no longer match the archive", recheck(file));
+        Assert.Equal($"the contents of {Path.Combine("sub", "b.txt")} no longer match the archive", recheck(folder));
+        Assert.Null(recheck(other));
+    }
+
+    [Fact]
+    public void WhatChangesWhileTheFilesAreReadKeepsTheFolder()
+    {
+        string folder = Folder("in");
+        Write("in/a.txt");
+        string b = Write("in/b.txt", "more text");
+        var facts = Facts([folder]);
+        // The drive is asked before each look at the folder: before its files are read, and for the last look after.
+        int asked = 0;
+        Func<string, DriveType> appears = _ =>
+        {
+            if (++asked == 2) Write("in/late.txt", "written while the files were read");
+            return DriveType.Fixed;
+        };
+        Assert.Equal("it holds a file that is not in the archive: late.txt", RecycleCandidates.Recheck(facts, appears, Ct)(folder));
+        Assert.Equal(2, asked);
+        File.Delete(Path.Combine(folder, "late.txt"));
+        asked = 0;
+        Func<string, DriveType> grows = _ =>
+        {
+            if (++asked == 2) File.AppendAllText(b, " and more");
+            return DriveType.Fixed;
+        };
+        Assert.Equal("b.txt changed after it was read", RecycleCandidates.Recheck(facts, grows, Ct)(folder));
+    }
+
+    [Fact]
+    public void AFileThatCannotBeReadStays()
+    {
+        string file = Write("a.txt");
+        string folder = Folder("in");
+        string inner = Write("in/b.txt", "more text");
+        var facts = Facts([file, folder]);
+        var recheck = RecycleCandidates.Recheck(facts, Fixed, Ct);
+        // Held open by another program that lets nobody else read them.
+        using (File.Open(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        using (File.Open(inner, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.StartsWith("it could not be read to compare it with the archive (", recheck(file));
+            Assert.StartsWith("b.txt could not be read to compare it with the archive (", recheck(folder));
+        }
+        Assert.Null(recheck(file));
+        Assert.Null(recheck(folder));
+    }
+
+    [Fact]
+    public void ACancelDuringTheLastCheckKeepsTheInput()
+    {
+        string folder = Folder("in");
+        Write("in/a.txt");
+        string file = Write("b.txt");
+        var facts = Facts([folder, file]);
+        using var cts = new CancellationTokenSource();
+        // Canceled once the check has begun (the drive is asked first), before the files are read.
+        Func<string, DriveType> cancels = _ =>
+        {
+            cts.Cancel();
+            return DriveType.Fixed;
+        };
+        Assert.Equal("the job was canceled", RecycleCandidates.Recheck(facts, cancels, cts.Token)(folder));
+        Assert.Equal("the job was canceled", RecycleCandidates.Recheck(facts, Fixed, cts.Token)(file));
+        Assert.Null(RecycleCandidates.Recheck(facts, Fixed, Ct)(folder));
     }
 
     [Fact]
