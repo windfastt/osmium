@@ -3,6 +3,10 @@
 Osmium 0.1.1 against eight other compressors, each at the strongest setting people commonly use. Every archive was
 unpacked again and compared with the original.
 
+Since 0.2.0, Balanced cuts large groups into 32 MiB blocks instead of 64 MiB. On the Windows application folder below
+its archive is 0.58 % larger (35,392,814 against 35,188,250 bytes, measured on 0.2.0 code), in return for more blocks
+compressed in parallel; the mixed folder has no group over 32 MiB and is unchanged. The tables are still 0.1.1's.
+
 ## Method
 
 - **Inputs.** Two folders, described with each table below; the mixed folder includes four files generated for the

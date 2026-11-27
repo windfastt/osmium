@@ -127,8 +127,9 @@ Filters are chosen by analysis/trials, never blindly: a filter that does not shr
 - **Whole-file dedup**: files with identical size + XxHash128 are confirmed by SHA-256 and stored once.
 - **Content-defined chunking** (Insane, or on request): Gear rolling hash (FastCDC normalised chunking),
   min 16 KiB / avg 64 KiB / max 256 KiB; chunks identified by SHA-256; duplicate chunks become shared segments.
-- **Solid blocks**: one per (class, group) split at `BlockCap`; ordering by extension, then name. (Similarity
-  ordering via MinHash is backlog.)
+- **Solid blocks**: one per (class, group) split at `BlockCap`; ordering by extension, then name, then path. A single
+  audio or image file gets a block of up to 64 MiB (or `BlockCap`, if larger) so that its filter sees the whole file;
+  a larger one is treated as records. A similarity order is available behind a profile switch, off by default (§8.3).
 - **Verification** (always on; advanced opt-out): every block is decoded through the full pipeline and its XXH128
   compared before it is written — remote results are additionally re-checked by the coordinator; after writing, the
   archive is re-opened and every frame is structurally verified (CRCs, payload hashes, index) before the atomic rename.
@@ -186,7 +187,7 @@ Jet/ACE databases, SQLite page size as a record hint, and text subtypes (XML/JSO
 |---|---|---|---|---|---|
 | Store | none | none | – | 64 MiB | packaging only |
 | Fast | sniff + H0 | none (table: zstd 3 / Store) | – | 16 MiB | quick |
-| Balanced (default) | 16 windows | none; table + filters (zstd 19 long / LZMA / PPMd) | – | 64 MiB | everyday |
+| Balanced (default) | 16 windows | none; table + filters (zstd 19 long / LZMA / PPMd) | – | 32 MiB | everyday |
 | Max | 32 windows | 1 rung (1 MiB), ≤ 4 candidates, no CM | – | 256 MiB | strong, still fast to decode |
 | Ultra | 64 windows | rungs 1 MiB → 4 MiB, η = 3, ≤ 10 candidates, CM allowed | hill-climb ≤ 24 evals/group | 512 MiB | archival |
 | Insane | 128 windows | rungs 256 KiB → 16 MiB, ≤ 40 candidates, **top-2 raced on full blocks**, chunk dedup | hill-climb ≤ 48 evals/group | 1 GiB | "any hassle" |
@@ -197,16 +198,21 @@ Jet/ACE databases, SQLite page size as a record hint, and text subtypes (XML/JSO
 Times come from a **deterministic cost model** (per-codec reference throughput), not wall-clock measurements, so
 plans are reproducible and identical whether trials ran locally or on workers. λd defaults to 0; the
 "decode speed weight" setting (None / Light / Strong) penalises symmetric codecs such as CM.
-Ties are broken by the ordinal spec string, so plans are deterministic. *Planned:* prefer the faster decoder
-when two candidates are within 0.1 %.
+Ties are broken by the ordinal spec string, so plans are deterministic. A profile switch (`PreferFasterDecoder`)
+gives candidates within 0.1 % of the best after the last rung to the one that decodes fastest; it is off in every
+profile, because no group of the benchmark folders has such a near tie.
 
 ### 8.3 Group formation
 1. Apply rule pre-pass (Exclude / Store / analysis depth).
 2. Dedup (whole-file always; CDC chunks when enabled).
 3. Partition by `(forced spec ?? compatibility class, named solid group)`; `solid: own` ⇒ singleton block.
-4. Order within a class: by extension, then file name, then path. *Planned:* similarity ordering (SimHash over sampled
-   4-grams, greedy nearest-neighbour for ≤ 20k items) with a same-base-name bonus.
-5. Split into blocks ≤ `BlockCap` = min(profile cap, memory-derived cap).
+4. Order within a class: by extension, then file name, then path; a file's units (several with chunk dedup) stay
+   together and in order. A profile switch (`SimilarityOrder`) instead chains the files of text, code, binary and
+   structured groups of 3 to 20 000 files by a SimHash of sampled 4-grams, greedy nearest neighbour from the first
+   file in name order. It is off in every profile: it made 4 296 C headers 3 % larger, because their names already
+   group them better.
+5. Split into blocks ≤ `BlockCap` = min(profile cap, memory-derived cap); a single audio or image file gets up to
+   max(profile cap, 64 MiB), within the same memory-derived cap.
 6. *Planned:* for Ultra and above, merge adjacent small groups when the merged sample compresses smaller.
 
 ### 8.4 Core loop
@@ -218,7 +224,10 @@ plan(files):
      else:
         cands = seeds(g.class, g.stats, profile) ⊕ overrides, filtered by rules + memory, capped
         spec  = successiveHalving(g, cands)          # rungs of growing sample size, keep top 1/η
-        if profile ≥ Ultra: spec = hillClimb(g, spec) # ±1 step per parameter dimension, toggle filters
+        if profile ≥ Ultra: spec = hillClimb(g, spec) # ±1 step per parameter dimension, toggle filters; a step
+                                                      # tries its neighbours on an earlier rung's sample (at most
+                                                      # half the last) and the best few on the last, when that
+                                                      # cuts its work
         if profile = Insane: spec = race top-2 on the full group, keep the smaller
      emit(g, spec, explain)                            # the final compression starts immediately
 ```
