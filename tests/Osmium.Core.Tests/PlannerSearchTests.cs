@@ -7,8 +7,8 @@ namespace Osmium.Core.Tests;
 
 /// <summary>
 /// The planner's search, driven by a scripted trial runner: successive halving, the hill-climb and its budget, the
-/// Store preference for incompressible data, the top-2 race, near ties going to the faster decoder, and independence
-/// from the thread count.
+/// Store preference for incompressible data, the top-2 race, near ties going to the faster decoder, search steps
+/// screened on the smaller sample, and independence from the thread count.
 /// </summary>
 public class PlannerSearchTests
 {
@@ -243,6 +243,184 @@ public class PlannerSearchTests
         Assert.Single(trials.Calls);
     }
 
+    // ------------------------------------------------------------------ search steps screened on the smaller sample
+
+    private const int Small = 16 << 10, Full = 64 << 10;
+
+    private static Profile Screened(int evals = 100, bool on = true) => Profile.Ultra with
+    {
+        Name = "screen", Rungs = [Small, Full], SearchEvals = evals, RaceTopTwo = false, ScreenSearch = on, PreferFasterDecoder = false,
+    };
+
+    /// <summary>
+    /// Checks every call of a screened climb against the rule: each step tries all its neighbours on the smaller
+    /// sample, promotes the best max(2, ⌈n/η⌉) of those within +0.5 % of the incumbent there, and moves only to a
+    /// promoted neighbour that is more than 0.01 % better on the full sample. Returns the climb's steps.
+    /// </summary>
+    private static List<(ScriptedTrials.Call Screen, ScriptedTrials.Call? Promoted)> AssertScreenedClimb(ScriptedTrials trials, string start, int eta = 3)
+    {
+        var calls = trials.Calls;
+        Assert.Equal([Small, Full], calls.Take(2).Select(c => c.SampleLength));
+        long Size(ScriptedTrials.Call c, string spec) => c.Sizes[Array.IndexOf(c.Specs, spec)];
+        string incumbent = start;
+        long small = Size(calls[0], start), full = Size(calls[1], start);
+        var steps = new List<(ScriptedTrials.Call, ScriptedTrials.Call?)>();
+        for (int i = 2; i < calls.Count; i++)
+        {
+            var screen = calls[i];
+            Assert.Equal(Small, screen.SampleLength);
+            Assert.DoesNotContain(incumbent, screen.Specs);
+            int keep = Math.Max(2, (int)Math.Ceiling(screen.Specs.Length / (double)eta));
+            var expected = screen.Specs.Zip(screen.Sizes).OrderBy(x => x.Second).ThenBy(x => x.First, StringComparer.Ordinal)
+                .Take(keep).Where(x => x.Second >= 0 && x.Second <= small * 1.005).Select(x => x.First).ToArray();
+            if (expected.Length == 0)
+            {
+                Assert.Equal(calls.Count - 1, i); // nothing promising: the climb ends
+                steps.Add((screen, null));
+                break;
+            }
+            var promoted = calls[++i];
+            Assert.Equal(Full, promoted.SampleLength);
+            Assert.Equal(expected, promoted.Specs);
+            steps.Add((screen, promoted));
+            var top = promoted.Specs.Zip(promoted.Sizes).Where(x => x.Second >= 0)
+                .OrderBy(x => x.Second).ThenBy(x => x.First, StringComparer.Ordinal).FirstOrDefault();
+            if (top.First is null || top.Second >= full * (1 - 1e-4))
+            {
+                Assert.Equal(calls.Count - 1, i); // no better neighbour: the climb ends
+                break;
+            }
+            (incumbent, small, full) = (top.First, Size(screen, top.First), top.Second);
+        }
+        return steps;
+    }
+
+    [Fact]
+    public async Task ScreeningTriesTheNeighboursOnTheSmallerSampleFirst()
+    {
+        // The LZMA landscape is the same on both samples: only the move to lc=4, then to lc=8, is within 0.5 %.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(LzmaLandscape);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var g = Assert.Single(plan.Groups);
+        var steps = AssertScreenedClimb(trials, Lzma3);
+        Assert.Equal([7, 6, 5], steps.Select(s => s.Screen.Specs.Length)); // the same neighbours as without screening
+        Assert.Equal([1, 1], steps.Where(s => s.Promoted is not null).Select(s => s.Promoted!.Specs.Length));
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+        Assert.Equal(2, g.Explain.Count(l => l.Contains("search:")));
+        Assert.Contains($"  screening: 18 neighbour(s) on {Small:N0} B, 2 promoted to {Full:N0} B", g.Explain);
+    }
+
+    [Fact]
+    public async Task ScreeningPromotesTheBestMaxOfTwoAndCeilNOverEta()
+    {
+        // On the smaller sample every LZMA variant is within 0.3 % of every other, so the cap decides how many are
+        // promoted; on the full sample the LZMA landscape decides which move is taken.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials((s, sample) => sample.Length == Small
+            ? s.Codec.Method.Name == "lzma" ? 100_000 + (long)(ScriptedTrials.StableHash(s.ToString()) % 300) : 200_000
+            : LzmaLandscape(s, sample));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var steps = AssertScreenedClimb(trials, Lzma3);
+        Assert.Contains(steps, s => s.Promoted is { Specs.Length: > 1 });
+        Assert.All(steps.Where(s => s.Promoted is not null), s =>
+            Assert.Equal(Math.Max(2, (int)Math.Ceiling(s.Screen.Specs.Length / 3.0)), s.Promoted!.Specs.Length));
+        Assert.Equal(steps.Sum(s => s.Promoted?.Specs.Length ?? 0), trials.Calls.Skip(2).Where(c => c.SampleLength == Full).Sum(c => c.Specs.Length));
+        Assert.Equal("lzma", Assert.Single(plan.Groups).Spec!.Codec.Method.Name);
+    }
+
+    [Fact]
+    public async Task ScreeningComparesWithTheIncumbentOfEachStep()
+    {
+        // After the move to lc=4 (4 800 on both samples), lc=8 scores 4 850 on the smaller sample: within 0.5 % of the
+        // starting point (4 900) but 1 % worse than the new incumbent, so it is not promoted although the full sample
+        // would have taken it.
+        using var t = new TempDir();
+        string lc8 = Lzma3.Replace("lc=3", "lc=8");
+        var trials = new ScriptedTrials((s, sample) => s.ToString() == lc8 && sample.Length == Small ? 4850 : LzmaLandscape(s, sample));
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var steps = AssertScreenedClimb(trials, Lzma3);
+        Assert.Equal([1], steps.Where(s => s.Promoted is not null).Select(s => s.Promoted!.Specs.Length));
+        Assert.Contains(lc8, steps[1].Screen.Specs);
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=4"), Assert.Single(plan.Groups).Spec!.ToString());
+    }
+
+    [Theory]
+    [InlineData(5_000_000)] // worse on the full sample
+    [InlineData(4_899_800)] // better by 0.004 % only
+    public async Task ScreeningNeverAcceptsAMoveThatIsNotBetterOnTheFullSample(long lc4OnTheFullSample)
+    {
+        // lc=4 looks 18 % better on the smaller sample and is promoted, but the full sample decides.
+        using var t = new TempDir();
+        string lc4 = Lzma3.Replace("lc=3", "lc=4");
+        var trials = new ScriptedTrials((s, sample) => s.ToString() != lc4 ? LzmaLandscape(s, sample) * 1000
+            : sample.Length == Small ? 4_000_000 : lc4OnTheFullSample);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(), trials));
+        var g = Assert.Single(plan.Groups);
+        var steps = AssertScreenedClimb(trials, Lzma3);
+        Assert.Equal([lc4], Assert.Single(steps).Promoted!.Specs);
+        Assert.Equal(Lzma3, g.Spec!.ToString());
+        Assert.DoesNotContain(g.Explain, l => l.Contains("search:"));
+    }
+
+    [Theory]
+    [InlineData(100, new[] { 7, 6, 5 })]
+    [InlineData(13, new[] { 7, 6 })]
+    [InlineData(9, new[] { 7, 2 })]
+    [InlineData(3, new[] { 3 })]
+    public async Task ScreeningStaysWithinTheBudget(int evals, int[] rounds)
+    {
+        // The budget counts neighbours generated, as without screening: the same rounds are screened, and only the
+        // promoted neighbours are compressed on the full sample as well.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(LzmaLandscape);
+        await PlanFile(t, "book.txt", Book, Options(Screened(evals), trials));
+        var steps = AssertScreenedClimb(trials, Lzma3);
+        Assert.Equal(rounds, steps.Select(s => s.Screen.Specs.Length));
+        Assert.True(steps.Sum(s => s.Screen.Specs.Length) <= evals);
+        Assert.All(steps.Where(s => s.Promoted is not null), s => Assert.Subset(s.Screen.Specs.ToHashSet(), s.Promoted!.Specs.ToHashSet()));
+        var screened = steps.SelectMany(s => s.Screen.Specs).ToList();
+        Assert.Equal(screened.Count, screened.Distinct().Count()); // no neighbour is tried twice
+    }
+
+    [Theory]
+    [InlineData(false, new[] { Small, Full })]          // the switch is off
+    [InlineData(true, new[] { 512 << 10, 1 << 20 })]    // the first rung already covers the 400 KiB group
+    [InlineData(true, new[] { 256 << 10, 384 << 10 })]  // the earlier sample is more than half the last one
+    public async Task WithoutASmallEnoughSampleTheClimbIsNotScreened(bool on, int[] rungs)
+    {
+        // Screening the neighbours on a sample more than half the size of the last one, and the promoted ones on the
+        // last as well, would cost about as much as trying them all on the last sample.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(LzmaLandscape);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened(on: on) with { Rungs = [.. rungs.Select(r => (long)r)] }, trials));
+        var g = Assert.Single(plan.Groups);
+        int halving = trials.Calls.TakeWhile(c => c.Specs.Length == 10 || c.Specs.Length == 4).Count();
+        Assert.Equal(rungs[0] >= Book.Length ? 1 : 2, halving);
+        int full = trials.Calls[halving - 1].SampleLength;
+        var climb = trials.Calls.Skip(halving).ToList();
+        Assert.Equal([7, 6, 5], climb.Select(c => c.Specs.Length));
+        Assert.All(climb, c => Assert.Equal(full, c.SampleLength));
+        Assert.DoesNotContain(g.Explain, l => l.Contains("screening:"));
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+    }
+
+    [Fact]
+    public async Task ScreeningUsesTheLargestEarlierSampleAtMostHalfTheLast()
+    {
+        // Rungs of 16, 48 and 64 KiB: 48 KiB is more than half of 64, so the steps are screened on the 16 KiB sample.
+        using var t = new TempDir();
+        var trials = new ScriptedTrials(LzmaLandscape);
+        var plan = await PlanFile(t, "book.txt", Book, Options(Screened() with { Rungs = [Small, 48 << 10, Full] }, trials));
+        var g = Assert.Single(plan.Groups);
+        Assert.Equal([Small, 48 << 10, Full], trials.Calls.Take(3).Select(c => c.SampleLength));
+        var climb = trials.Calls.Skip(3).ToList();
+        Assert.Equal([Small, Full, Small, Full, Small], climb.Select(c => c.SampleLength));
+        Assert.Equal([7, 1, 6, 1, 5], climb.Select(c => c.Specs.Length));
+        Assert.Contains($"  screening: 18 neighbour(s) on {Small:N0} B, 2 promoted to {Full:N0} B", g.Explain);
+        Assert.Equal(Lzma3.Replace("lc=3", "lc=8"), g.Spec!.ToString());
+    }
+
     private static string MixedFolder(TempDir t)
     {
         var dir = t.Sub("in");
@@ -263,18 +441,29 @@ public class PlannerSearchTests
         return dir;
     }
 
-    [Fact]
-    public async Task PlanDoesNotDependOnTheThreadCount()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PlanDoesNotDependOnTheThreadCount(bool search)
     {
-        // Real trials (local runner, max profile): one trial at a time versus eight at once.
+        // Real trials (local runner): one trial at a time versus eight at once, with max, and with a short screened
+        // search over two small rungs (no CM, so it stays quick).
         using var t = new TempDir();
         var dir = MixedFolder(t);
+        var profile = search
+            ? Profile.Ultra with
+            {
+                Name = "screened", Rungs = [16 << 10, 64 << 10], MaxCandidates = 4, SearchEvals = 6, AllowCm = false,
+                SimilarityOrder = true, PreferFasterDecoder = true, ScreenSearch = true,
+            }
+            : Profile.Max with { SimilarityOrder = true };
         async Task<string> Plan(int threads) =>
-            Fingerprint(await new Planner(Options(Profile.Max with { SimilarityOrder = true }, null, threads: threads)).BuildAsync(Scanner.Scan([dir]), Ct));
+            Fingerprint(await new Planner(Options(profile, null, threads: threads)).BuildAsync(Scanner.Scan([dir]), Ct));
         string one = await Plan(1);
         Assert.Equal(one, await Plan(8));
         Assert.True(one.Split('\n').Count(l => l.StartsWith('G')) >= 5, one);
         Assert.Contains("order: similarity (SimHash)", one);
+        if (search) Assert.Contains("screening:", one);
     }
 
     [Fact]
@@ -285,7 +474,10 @@ public class PlannerSearchTests
         // a step, re-ranks the other candidates on every rung.
         using var t = new TempDir();
         var dir = MixedFolder(t);
-        var profile = Profile.Ultra with { Name = "jitter", Rungs = [16 << 10, 64 << 10], SimilarityOrder = true };
+        var profile = Profile.Ultra with
+        {
+            Name = "jitter", Rungs = [16 << 10, 64 << 10], SimilarityOrder = true, PreferFasterDecoder = true, ScreenSearch = true,
+        };
         static long Landscape(PipelineSpec s, byte[] sample) =>
             LzmaLandscape(s, sample) * 1000 + (long)(ScriptedTrials.StableHash($"{s}@{sample.Length}") % 1000);
         async Task<string> Plan(int threads, int salt) => Fingerprint(await new Planner(Options(profile, new ScriptedTrials(Landscape)
@@ -296,6 +488,7 @@ public class PlannerSearchTests
         Assert.Equal(first, await Plan(8, 1));
         Assert.Equal(first, await Plan(3, 2));
         Assert.Contains("search:", first);
+        Assert.Contains("screening:", first);
         Assert.Contains("order: similarity (SimHash)", first);
     }
 }

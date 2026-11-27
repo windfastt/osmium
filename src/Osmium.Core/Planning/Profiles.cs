@@ -39,6 +39,10 @@ public sealed record Profile
     /// the parameter search then starts from it. Off in every profile: no group of the benchmark folders has such a
     /// near tie, so it changes no archive there (IMPROVISATION.md §5.4).</summary>
     public bool PreferFasterDecoder { get; init; }
+    /// <summary>Each parameter-search step tries its neighbours on an earlier rung's sample first (the largest that is at
+    /// most half the last one) and compresses only the most promising on the last rung's sample. Groups without such a
+    /// rung search as before.</summary>
+    public bool ScreenSearch { get; init; }
 
     public static readonly Profile Store = new()
     {
@@ -68,7 +72,7 @@ public sealed record Profile
     {
         Name = "ultra", Level = ProfileLevel.Ultra, Description = "Context mixing allowed, two sample rungs and parameter search.",
         SampleWindows = 64, Rungs = [1L << 20, 4L << 20], MaxCandidates = 10, SearchEvals = 24,
-        BlockCap = 512L << 20, AllowCm = true, CmMem = 22, LzmaDict = 128L << 20,
+        BlockCap = 512L << 20, AllowCm = true, CmMem = 22, LzmaDict = 128L << 20, ScreenSearch = true,
     };
 
     public static readonly Profile Insane = new()
@@ -76,7 +80,7 @@ public sealed record Profile
         Name = "insane", Level = ProfileLevel.Insane, Description = "Everything: up to 40 candidates, 4 rungs, deep search, top-2 race on full blocks, chunk dedup. Very slow; CM archives also decompress slowly.",
         SampleWindows = 128, Rungs = [256L << 10, 1L << 20, 4L << 20, 16L << 20], MaxCandidates = 40, SearchEvals = 48,
         RaceTopTwo = true, BlockCap = 1L << 30, AllowCm = true, CmMem = 24, LzmaDict = 256L << 20, ZstdLevel = 22,
-        Dedup = DedupMode.Chunks,
+        Dedup = DedupMode.Chunks, ScreenSearch = true,
     };
 
     public static readonly Profile Exhaustive = new()

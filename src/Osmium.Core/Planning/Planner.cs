@@ -433,9 +433,11 @@ public sealed class Planner(PlanOptions o)
         }
 
         var alive = allowed.Take(p.MaxCandidates).ToList();
-        // The candidates of the last rung that produced results, best first, with their objective on its sample.
+        // The candidates of the last rung that produced results, best first, with their objective on its sample; and
+        // the earlier rungs, whose smaller samples the parameter search can screen its steps on.
         var ranked = new List<(PipelineSpec Spec, double Score)>();
         byte[] sample = [];
+        var earlier = new List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)>();
         foreach (long rung in p.FullDataTrials ? [Math.Min(g.Size, BlockLimits.MaxRawSize)] : p.Rungs)
         {
             var next = BuildSample(plan, g, rung);
@@ -444,6 +446,7 @@ public sealed class Planner(PlanOptions o)
                 .OrderBy(t => Objective(t.s, t.size, next.Length)).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).ToList();
             g.Explain.Add($"  rung {next.Length:N0} B: " + string.Join(", ", results.Select(t => $"{t.s} = {t.size:N0}")));
             if (results.Count == 0) break;
+            if (ranked.Count > 0) earlier.Add((sample, ranked.ToDictionary(t => t.Spec, t => t.Score)));
             sample = next;
             ranked = [.. results.Select(t => (t.s, Objective(t.s, t.size, next.Length)))];
             int keep = Math.Max(2, (int)Math.Ceiling(ranked.Count / (double)p.Eta));
@@ -467,7 +470,10 @@ public sealed class Planner(PlanOptions o)
         }
 
         if (p.SearchEvals > 0 && !best.IsStore)
-            best = await HillClimbAsync(g, best, scores[best], sample, biggestBlock, trials, ct);
+        {
+            Screen? screen = p.ScreenSearch ? ScreeningSample(earlier, sample.Length, best) : null;
+            best = await HillClimbAsync(g, best, scores[best], sample, screen, biggestBlock, trials, ct);
+        }
 
         g.Spec = best;
         if (p.RaceTopTwo)
@@ -497,29 +503,73 @@ public sealed class Planner(PlanOptions o)
         return pick;
     }
 
+    /// <summary>A screened neighbour reaches the full sample only if it is within this fraction of the incumbent's score
+    /// on the smaller sample.</summary>
+    private const double ScreenMargin = 0.005;
+
+    /// <summary>The smaller sample a search step is screened on, and the incumbent's objective on it.</summary>
+    private readonly record struct Screen(byte[] Sample, double Score);
+
+    /// <summary>
+    /// The largest earlier rung's sample that is at most half the last one, so that compressing the promoted neighbours
+    /// on both samples costs less than compressing every neighbour on the last: the previous rung when the group fills
+    /// the profile's rungs (1 of 4 MiB for Ultra, 4 of 16 MiB for Insane), an earlier one or none for a group that ends
+    /// between rungs. Every candidate of the last rung took part in every earlier rung, so its score there is known.
+    /// </summary>
+    private static Screen? ScreeningSample(List<(byte[] Sample, Dictionary<PipelineSpec, double> Scores)> earlier, int last, PipelineSpec best)
+    {
+        for (int k = earlier.Count - 1; k >= 0; k--)
+            if (2L * earlier[k].Sample.Length <= last && earlier[k].Scores.TryGetValue(best, out double score))
+                return new Screen(earlier[k].Sample, score);
+        return null;
+    }
+
+    /// <param name="screen">When set, each step compresses its neighbours on this smaller sample first and only the best
+    /// max(2, ⌈n / η⌉) of them, and of those only the ones within <see cref="ScreenMargin"/> of the incumbent, also on
+    /// <paramref name="sample"/>. A move needs the same gain on <paramref name="sample"/> as without screening, and the
+    /// budget still counts every neighbour generated.</param>
     /// <param name="biggestBlock">The largest block of the group: neighbours must fit the memory budget for it, the same
     /// check the candidates passed (the sample is usually much smaller than the blocks it stands for).</param>
-    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, long biggestBlock,
-        ITrialRunner trials, CancellationToken ct)
+    private async Task<PipelineSpec> HillClimbAsync(PlanGroup g, PipelineSpec best, double bestScore, byte[] sample, Screen? screen,
+        long biggestBlock, ITrialRunner trials, CancellationToken ct)
     {
         int budget = o.Profile.SearchEvals;
         var tried = new HashSet<PipelineSpec> { best };
+        int screened = 0, promoted = 0;
         while (budget > 0)
         {
             var neighbours = Neighbours(g, best).Where(n => tried.Add(n) && Allowed(g, n, biggestBlock)).Take(budget).ToList();
             if (neighbours.Count == 0) break;
             budget -= neighbours.Count;
-            var sizes = await trials.RunAsync(neighbours, sample, ct);
-            var top = neighbours.Select((s, i) => (s, score: sizes[i] < 0 ? double.MaxValue : Objective(s, sizes[i], sample.Length)))
+            var candidates = neighbours;
+            var smallScores = new Dictionary<PipelineSpec, double>();
+            if (screen is { } sc)
+            {
+                var small = await trials.RunAsync(neighbours, sc.Sample, ct);
+                int keep = Math.Max(2, (int)Math.Ceiling(neighbours.Count / (double)o.Profile.Eta));
+                var promising = neighbours.Select((s, i) => (s, score: small[i] < 0 ? double.MaxValue : Objective(s, small[i], sc.Sample.Length)))
+                    .OrderBy(t => t.score).ThenBy(t => t.s.ToString(), StringComparer.Ordinal)
+                    .Take(keep).Where(t => t.score <= sc.Score * (1 + ScreenMargin)).ToList();
+                screened += neighbours.Count;
+                promoted += promising.Count;
+                if (promising.Count == 0) break; // nothing promising: as if no neighbour were better
+                foreach (var (s, score) in promising) smallScores[s] = score;
+                candidates = [.. promising.Select(t => t.s)];
+            }
+            var sizes = await trials.RunAsync(candidates, sample, ct);
+            var top = candidates.Select((s, i) => (s, score: sizes[i] < 0 ? double.MaxValue : Objective(s, sizes[i], sample.Length)))
                 .OrderBy(t => t.score).ThenBy(t => t.s.ToString(), StringComparer.Ordinal).First();
             if (top.score < bestScore * (1 - 1e-4))
             {
                 g.Explain.Add($"  search: {top.s} improves {bestScore:N0} → {top.score:N0}");
                 best = top.s;
                 bestScore = top.score;
+                if (screen is { } moved) screen = moved with { Score = smallScores[best] };
             }
             else break;
         }
+        if (screen is { } used && screened > 0)
+            g.Explain.Add($"  screening: {screened} neighbour(s) on {used.Sample.Length:N0} B, {promoted} promoted to {sample.Length:N0} B");
         return best;
     }
 
