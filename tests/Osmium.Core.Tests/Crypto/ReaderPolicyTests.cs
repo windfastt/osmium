@@ -456,6 +456,14 @@ public class ReaderPolicyTests
             w.Commit(overwrite: true);
         }
         using (var r = OsaReader.Open(other)) Assert.Equal(creator, r.Creator);
+        // A creator of any length in a file list is shown as its first 256 bytes.
+        string longer = t.Sub("longer.osa");
+        using (var w = new OsaWriter(longer, new OsaWriterOptions { Creator = new string('c', 64 << 10) }))
+        {
+            w.Finish([]);
+            w.Commit(overwrite: true);
+        }
+        using (var r = OsaReader.Open(longer)) Assert.Equal(new string('c', OsaReader.MaxCreatorBytes), r.Creator);
     }
 
     [Fact]

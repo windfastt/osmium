@@ -60,9 +60,15 @@ public sealed class OsaReader : IDisposable
     /// <summary>
     /// What made the archive, e.g. "Osmium 0.2.0": from the file list (since 0.2.0 every archive has it there, and an
     /// encrypted one only there, so that its release is not readable without the password), else from the header's
-    /// Creator record (earlier archives). Null when neither has one.
+    /// Creator record (earlier archives). Null when neither has one. At most the first <see cref="MaxCreatorBytes"/>
+    /// bytes of it: it is shown as one line, and a file list may hold a value of any length.
     /// </summary>
-    public string? Creator => Index.MetaString(ArchiveIndex.CreatorKey) ?? Header.Creator;
+    public string? Creator =>
+        Index.Metadata.TryGetValue(ArchiveIndex.CreatorKey, out var v) ? System.Text.Encoding.UTF8.GetString(v.AsSpan(0, Math.Min(v.Length, MaxCreatorBytes)))
+        : Header.Creator is { Length: > MaxCreatorBytes } c ? c[..MaxCreatorBytes] : Header.Creator;
+
+    /// <summary>The most of a creator text <see cref="Creator"/> returns.</summary>
+    public const int MaxCreatorBytes = 256;
     public long FileLength { get; }
     public IReadOnlyList<ArchiveEntry> Entries => Index.Entries;
     public IReadOnlyList<BlockInfo> Blocks => Index.Blocks;
