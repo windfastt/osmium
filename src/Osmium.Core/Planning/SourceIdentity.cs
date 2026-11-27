@@ -25,17 +25,34 @@ internal static class SourceIdentity
     /// the scan recorded one (by its creation time where the system gives no id). Throws
     /// <see cref="SourceChangedException"/> when it is not, and as <see cref="FileStream"/> does when it cannot be opened.
     /// </summary>
-    /// <remarks>Where the scan recorded a file id (Linux), an open whose file has that id has reached the very file the
-    /// scan saw, whatever the folders on the way are now, so they are checked only when the id differs or cannot be
-    /// read; everywhere else every folder on the way is checked, before and after the open.</remarks>
+    /// <remarks>Where the scan recorded a file id (Linux), the name is first opened as a path only, which opens nothing
+    /// for reading; when that is the regular file with the scanned id, it has reached the very file the scan saw,
+    /// whatever the folders on the way are now, so only that file is opened for reading and the folders are not
+    /// checked. A link, pipe or device found there is refused without ever being opened for reading. Another file, or
+    /// no path-only open here, gets the full check, as everywhere else: every folder on the way, before and after the
+    /// open.</remarks>
     public static FileStream Open(SourceFile src)
     {
         if (src.FileId is { } id && OperatingSystem.IsLinux())
         {
-            var fs = ZipSources.OpenFile(src.FullPath, out string? refusal) ?? throw Refused(src, refusal);
-            if (FileStat.TryStat(fs.SafeFileHandle, out var st) && st.Id == id && FileStat.Kind(st.Mode) is null) return Checked(fs, src, sameId: true);
-            // Another file, or one whose id cannot be read: say why as the full check does.
-            fs.Dispose();
+            switch (FileStat.OpenIfSame(src.FullPath, id, out var handle, out var seen))
+            {
+                case FileStat.Reopen.Opened:
+                    FileStream fs;
+                    try
+                    {
+                        fs = new FileStream(handle!, FileAccess.Read, 1 << 16);
+                    }
+                    catch
+                    {
+                        handle!.Dispose();
+                        throw;
+                    }
+                    return Checked(fs, src, sameId: true);
+                case FileStat.Reopen.NotRegular:
+                    throw Refused(src, ZipSources.FolderOnTheWayIsLink(src.FullPath, src.RelPath) ? ZipSources.FolderIsLink
+                        : FileStat.IsLink(seen.Mode) ? ZipSources.IsLink : ZipSources.NotRegular);
+            }
         }
         return Checked(ZipSources.Open(src.FullPath, src.RelPath, out string? why) ?? throw Refused(src, why), src);
     }

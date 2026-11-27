@@ -276,4 +276,101 @@ public class ScannedSourceTests
         var e = Assert.Throws<SourceChangedException>(() => SourceIdentity.Verify(seen));
         Assert.Contains("was removed while it was being archived", e.Message);
     }
+
+    [Theory]
+    [InlineData("pipe")]
+    [InlineData("device")]
+    public async Task APipeOrADeviceBehindALinkInAFoldersPlaceIsNeverOpenedForReading(string kind)
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The open by file id and inotify are Linux's; elsewhere the folder check refuses the link before any open.");
+        using var t = new TempDir();
+        string elsewhere = t.Sub("elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        var (scan, file, _) = ScanThenLinkTheFolder(t, _ => elsewhere);
+        // Behind the link, a.bin is a pipe that a read would wait on for ever, or a device like /dev/zero (1, 5).
+        string special = Path.Combine(elsewhere, "a.bin");
+        string[] make = kind == "pipe" ? ["mkfifo", special] : ["mknod", special, "c", "1", "5"];
+        using (var mk = Process.Start(new ProcessStartInfo(make[0], make[1..]) { UseShellExecute = false, RedirectStandardError = true })!)
+        {
+            mk.WaitForExit();
+            if (mk.ExitCode != 0) Assert.Skip("Making a device node needs administrator rights; the pipe case shows the same.");
+        }
+        using var watch = new OpenWatch(elsewhere);
+        // Kernels that report a path-only open as an open cannot show the difference; the pipe's timeout still does.
+        bool pathOnlyOpensShow = watch.PathOnlyOpenShows(special);
+        var seen = scan.Files.Single(f => f.FullPath == file);
+
+        var open = Task.Run(() => SourceIdentity.Open(seen), Ct);
+        bool finished = await Task.WhenAny(open, Task.Delay(TimeSpan.FromSeconds(30), Ct)) == open;
+        if (!finished) OpenWatch.GiveAWaitingReaderAWriter(special);
+        Assert.True(finished, $"{kind} was opened for reading and waited on");
+
+        if (!pathOnlyOpensShow) Assert.DoesNotContain("a.bin", watch.Opened());
+        var e = await Assert.ThrowsAsync<SourceChangedException>(() => open);
+        Assert.Equal(file, e.SourcePath);
+        Assert.Contains("is below a folder that became a link after it was scanned", e.Message);
+    }
+
+    /// <summary>The names of the files in a folder that were opened (for reading or writing, not as a path only), as
+    /// inotify reports them (Linux).</summary>
+    private sealed class OpenWatch : IDisposable
+    {
+        private const int NonBlocking = 0x800, PathOnly = 0x200000, CloseOnExec = 0x80000, WriteOnly = 0x1;
+        private const uint InOpen = 0x20;
+        private readonly int fd;
+
+        public OpenWatch(string folder)
+        {
+            fd = inotify_init1(NonBlocking);
+            Assert.True(fd >= 0, "inotify is not available");
+            Assert.True(inotify_add_watch(fd, folder, InOpen) >= 0, "the folder cannot be watched");
+        }
+
+        /// <summary>Whether opening <paramref name="path"/> as a path only shows up as an open.</summary>
+        public bool PathOnlyOpenShows(string path)
+        {
+            int p = open(path, PathOnly | Osmium.Core.IO.FileStat.LinuxNoFollow() | CloseOnExec);
+            Assert.True(p >= 0, "a path-only open failed");
+            close(p);
+            return Opened().Count > 0;
+        }
+
+        public List<string> Opened()
+        {
+            var names = new List<string>();
+            var buf = new byte[4096];
+            for (nint n; (n = read(fd, buf, buf.Length)) > 0;)
+                for (int i = 0; i + 16 <= n;)
+                {
+                    int len = BitConverter.ToInt32(buf, i + 12);
+                    names.Add(System.Text.Encoding.UTF8.GetString(buf, i + 16, len).TrimEnd('\0'));
+                    i += 16 + len;
+                }
+            return names;
+        }
+
+        /// <summary>Ends an open of the pipe at <paramref name="path"/> for reading that waits for a writer.</summary>
+        public static void GiveAWaitingReaderAWriter(string path)
+        {
+            int w = open(path, WriteOnly | NonBlocking | CloseOnExec);
+            if (w >= 0) close(w);
+        }
+
+        public void Dispose() => close(fd);
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern int inotify_init1(int flags);
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern int inotify_add_watch(int fd, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint mask);
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern nint read(int fd, byte[] buf, nint count);
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern int open([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern int close(int fd);
+    }
 }

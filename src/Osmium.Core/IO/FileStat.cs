@@ -62,6 +62,68 @@ internal static class FileStat
         _ => "a special file",
     };
 
+    /// <summary>Whether <paramref name="mode"/> is a symbolic link's.</summary>
+    public static bool IsLink(uint mode) => (mode & TypeMask) == 0xA000;
+
+    /// <summary>What <see cref="OpenIfSame"/> found at the name.</summary>
+    public enum Reopen
+    {
+        /// <summary>The regular file with the id asked for, now open for reading.</summary>
+        Opened,
+        /// <summary>A link, pipe, device, socket or folder, which was not opened for reading.</summary>
+        NotRegular,
+        /// <summary>A regular file with another id.</summary>
+        Different,
+        /// <summary>No path-only open or no /proc here, or the name could not be opened at all.</summary>
+        Unavailable,
+    }
+
+    /// <summary>
+    /// Opens the file at <paramref name="path"/> for reading only if it is the regular file with id <paramref name="id"/>,
+    /// and never opens anything else for reading (Linux). The name is first opened as a path only (O_PATH: nothing is
+    /// read, no pipe is waited on, no device is started), its type and id are checked on that, and only then is that very
+    /// file opened for reading through /proc/self/fd and its id checked again, so nothing can change between the two.
+    /// <paramref name="seen"/> is what the path-only open found.
+    /// </summary>
+    /// <remarks>The open through /proc/self/fd cannot take O_NOFOLLOW: the name there is the kernel's own link to the
+    /// open file, which leads to that file and never to another path.</remarks>
+    public static Reopen OpenIfSame(string path, UInt128 id, out SafeFileHandle? handle, out Stat seen)
+    {
+        handle = null;
+        seen = default;
+        if (!OperatingSystem.IsLinux() || LinuxNoFollow() == 0) return Reopen.Unavailable;
+        int pathFd = Linux.Open(path, Linux.PathOnly | LinuxNoFollow() | Linux.CloseOnExec);
+        if (pathFd < 0) return Reopen.Unavailable;
+        try
+        {
+            if (!Linux.TryStat(pathFd, out seen)) return Reopen.Unavailable;
+            if (Kind(seen.Mode) is not null) return Reopen.NotRegular;
+            if (seen.Id != id) return Reopen.Different;
+            int fd = Linux.Open("/proc/self/fd/" + pathFd.ToString(System.Globalization.CultureInfo.InvariantCulture), Linux.CloseOnExec);
+            if (fd < 0) return Reopen.Unavailable;
+            var opened = new SafeFileHandle(fd, ownsHandle: true);
+            if (!Linux.TryStat(fd, out var now) || now.Id != id || Kind(now.Mode) is not null)
+            {
+                opened.Dispose();
+                return Reopen.Different;
+            }
+            handle = opened;
+            return Reopen.Opened;
+        }
+        finally
+        {
+            Linux.Close(pathFd);
+        }
+    }
+
+    /// <summary>O_NOFOLLOW on this Linux architecture; 0 where its value is not known.</summary>
+    public static int LinuxNoFollow() => RuntimeInformation.ProcessArchitecture switch
+    {
+        Architecture.Arm or Architecture.Armv6 or Architecture.Arm64 or Architecture.Ppc64le => 0x8000,
+        Architecture.X86 or Architecture.X64 or Architecture.S390x or Architecture.LoongArch64 or Architecture.RiscV64 => 0x20000,
+        _ => 0,
+    };
+
     private const uint FileTypeDisk = 0x0001;
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -71,7 +133,29 @@ internal static class FileStat
     {
         private const int AtFdCwd = -100, AtSymlinkNoFollow = 0x100, AtEmptyPath = 0x1000;
         private const uint StatxType = 0x1, StatxIno = 0x100;
+        /// <summary>O_PATH and O_CLOEXEC, the same on every architecture above (O_RDONLY is 0).</summary>
+        public const int PathOnly = 0x200000, CloseOnExec = 0x80000;
         private static bool missing;
+
+        public static int Open(string path, int flags)
+        {
+            try
+            {
+                return open(path, flags);
+            }
+            catch (Exception e) when (e is EntryPointNotFoundException or DllNotFoundException)
+            {
+                return -1;
+            }
+        }
+
+        public static void Close(int fd) => close(fd);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int close(int fd);
 
         [StructLayout(LayoutKind.Explicit, Size = 256)]
         private struct Statx
