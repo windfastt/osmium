@@ -3,7 +3,8 @@ name: Compatibility
 # Osmium 0.1.1, built from its own tag, must open, test and extract bit for bit every archive this version writes with
 # the methods 0.1.1 knows, spare copies of the file list included, and encrypted archives with Compatible protection;
 # it must refuse, and say why, an archive with blocks made with a method that is new since, and an encrypted archive
-# with the default protection (Argon2id), writing nothing. This version must extract the encrypted archives of 0.1.1.
+# with the default protection (Argon2id), with or without its exact sizes hidden, writing nothing. This version must
+# extract the encrypted archives of 0.1.1.
 # ZIP files this version writes must pass unzip and 7-Zip.
 
 on:
@@ -144,7 +145,7 @@ jobs:
           "$NEW" x "$W/new-methods.osa" "$W/new-out" || fail "new-methods.osa: this version did not extract it"
           diff -r "$W/in/program" "$W/new-out/program" || fail "new-methods.osa: what this version extracted differs from the source"
 
-      - name: Encrypted archives with the default protection (Argon2id) are refused by 0.1.1, with its reason
+      - name: Encrypted archives with the default protection (Argon2id), and with exact sizes hidden, are refused by 0.1.1, with its reason
         run: |
           set -euo pipefail
           NEW="$RUNNER_TEMP/new/osmium" OLD="$RUNNER_TEMP/old/osmium" W="$RUNNER_TEMP/argon2id"
@@ -152,42 +153,57 @@ jobs:
           mkdir -p "$W/in/sub" "$W/make"
           seq 1 20000 > "$W/in/numbers.txt"
           head -c 300K /dev/urandom > "$W/in/sub/random.bin"
-          # Written through the archive builder the command line uses, with the default protection and nothing else set.
+          # Written through the archive builder the command line uses, with the default protection and nothing else set
+          # (with --hide-sizes: "Hide exact sizes" too).
           { echo "#:project $GITHUB_WORKSPACE/src/Osmium.Core/Osmium.Core.csproj"; cat <<'CS'; } > "$W/make/make-encrypted.cs"
           #:property PublishAot=false
           using Osmium.Core.Planning;
           string password = Console.In.ReadLine() ?? throw new InvalidOperationException("no password on standard input");
           var plan = await new Planner(new PlanOptions { Profile = Profile.ByName("fast"), ForcedPipeline = "zstd(level=3)" })
               .BuildAsync(Scanner.Scan([args[1]]), CancellationToken.None);
-          await ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = args[0], Password = password }, CancellationToken.None);
+          await ArchiveBuilder.BuildAsync(plan, new BuildOptions { OutputPath = args[0], Password = password, PadBlocks = args.Contains("--hide-sizes") },
+              CancellationToken.None);
           CS
           printf '%s\n' "$COMPAT_PASSWORD" | dotnet run "$W/make/make-encrypted.cs" -- "$W/default.osa" "$W/in" \
             || fail "default.osa: this version could not write it"
-          # The header asks for Argon2id (kdf 2), Standard (2 passes, 1 GiB, 4 lanes), with flags 0x0001: no flag of its own.
-          python3 -I - "$W/default.osa" <<'PY' || fail "default.osa: its header is not Argon2id Standard with flags 0x0001"
+          printf '%s\n' "$COMPAT_PASSWORD" | dotnet run "$W/make/make-encrypted.cs" -- "$W/hidden.osa" "$W/in" --hide-sizes \
+            || fail "hidden.osa: this version could not write it"
+          # Both headers ask for Argon2id (kdf 2), Standard (2 passes, 1 GiB, 4 lanes). The default has flags 0x0001, no
+          # flag of its own; with exact sizes hidden, flag bit 3 is set too (0x0009).
+          for case in default:1 hidden:9; do
+            name="${case%%:*}" flags="${case##*:}"
+            python3 -I - "$W/$name.osa" "$flags" <<'PY' || fail "$name.osa: its header is not Argon2id Standard with flags 0x000$flags"
           import struct, sys
           b = open(sys.argv[1], "rb").read()
           flags = struct.unpack_from("<I", b, 12)[0]
           print(f"flags 0x{flags:04x}, record 1: {b[36:44].hex(' ')}")
-          sys.exit(0 if flags == 1 and b[36:44] == bytes([1, 0x37, 2, 2, 0x80, 0x80, 0x40, 4]) else 1)
+          sys.exit(0 if flags == int(sys.argv[2]) and b[36:44] == bytes([1, 0x37, 2, 2, 0x80, 0x80, 0x40, 4]) else 1)
           PY
-
-          for cmd in x t l info; do
-            out="$W/old-out-$cmd" code=0
-            if [ "$cmd" = x ]; then
-              printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" x "$W/default.osa" "$out" --password-stdin > "$W/old-$cmd.txt" 2> "$W/old-$cmd.err" || code=$?
-            else
-              printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" "$cmd" "$W/default.osa" --password-stdin > "$W/old-$cmd.txt" 2> "$W/old-$cmd.err" || code=$?
-            fi
-            cat "$W/old-$cmd.err"
-            [ "$code" -eq 1 ] || fail "default.osa: osmium $cmd of 0.1.1 exited with $code, not 1"
-            [ "$(cat "$W/old-$cmd.err")" = "error: Unsupported key-derivation function." ] \
-              || fail "default.osa: osmium $cmd of 0.1.1 did not say \"error: Unsupported key-derivation function.\""
-            if [ -e "$out" ]; then fail "default.osa: osmium $cmd of 0.1.1 wrote something"; fi
           done
 
-          printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" x "$W/default.osa" "$W/new-out" --password-stdin || fail "default.osa: this version did not extract it"
-          diff -r "$W/in" "$W/new-out/in" || fail "default.osa: what this version extracted differs from the source"
+          check_refused() {
+            local name="$1" message="$2"
+            for cmd in x t l info; do
+              out="$W/old-out-$name-$cmd" code=0
+              if [ "$cmd" = x ]; then
+                printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" x "$W/$name.osa" "$out" --password-stdin > "$W/old-$name-$cmd.txt" 2> "$W/old-$name-$cmd.err" || code=$?
+              else
+                printf '%s\n' "$COMPAT_PASSWORD" | "$OLD" "$cmd" "$W/$name.osa" --password-stdin > "$W/old-$name-$cmd.txt" 2> "$W/old-$name-$cmd.err" || code=$?
+              fi
+              cat "$W/old-$name-$cmd.err"
+              [ "$code" -eq 1 ] || fail "$name.osa: osmium $cmd of 0.1.1 exited with $code, not 1"
+              [ "$(cat "$W/old-$name-$cmd.err")" = "error: $message" ] \
+                || fail "$name.osa: osmium $cmd of 0.1.1 did not say \"error: $message\""
+              if [ -e "$out" ]; then fail "$name.osa: osmium $cmd of 0.1.1 wrote something"; fi
+            done
+          }
+          check_refused default "Unsupported key-derivation function."
+          check_refused hidden "Archive uses features this version does not understand."
+
+          for name in default hidden; do
+            printf '%s\n' "$COMPAT_PASSWORD" | "$NEW" x "$W/$name.osa" "$W/new-out-$name" --password-stdin || fail "$name.osa: this version did not extract it"
+            diff -r "$W/in" "$W/new-out-$name/in" || fail "$name.osa: what this version extracted differs from the source"
+          done
 
       - name: Encrypted archives of 0.1.1 are extracted by this version, bit for bit
         run: |

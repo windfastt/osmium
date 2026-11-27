@@ -55,9 +55,9 @@ Documented behavior, not a vulnerability:
 - The checksums of unencrypted archives (CRC-32, XXH3, XXH128) detect damage, not deliberate changes. Anyone who can
   write an unencrypted archive can change it.
 - Without the password, an encrypted archive shows: that it is an Osmium archive, its container version, its archive
-  id and flags, the key-derivation settings and salt, the number of blocks and the size of each block, the length of
-  the file list (padded, so only roughly), and the archive's total size. File names, file sizes, times, methods, the
-  creator and the contents are encrypted.
+  id and flags, the key-derivation settings and salt, the number of blocks and the size of each block (unless Hide
+  exact sizes was on), the length of the file list (padded, so only roughly), and the archive's total size. File
+  names, file sizes, times, methods, the creator and the contents are encrypted.
 - Workers see the content of the samples and blocks they compress, and anyone who has the cluster key is trusted.
   PC names, core counts and memory sizes are sent unencrypted during the handshake. A helper sends its own to any PC
   on the network that presents the cluster's identifier (visible in discovery broadcasts), before that PC has proven
@@ -69,6 +69,15 @@ Documented behavior, not a vulnerability:
 - The builds are not code-signed yet, so Windows SmartScreen may warn.
 - Problems in third-party components belong with their maintainers (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)); please tell us if Osmium is affected.
+
+**Sizes say something about the content.** Osmium compresses before it encrypts, so the size of each
+compressed block is visible. Someone who has a candidate file can use the sizes to check whether an archive
+probably contains it (known-file confirmation). When files that someone else chose are compressed in the same
+block as secret files, the compressed sizes can reveal parts of the secret (a compression oracle). "Hide exact
+sizes" (Settings → Security; Osmium 0.1 cannot open such archives) rounds every block up, at a cost of up to
+12 % in size: it makes these checks less precise, but it does not remove them. When sizes matter, do not put
+files that others can choose into the same encrypted archive as secrets. The file list is always padded in
+archives made with Argon2id protection.
 
 **Memory.** While Osmium checks a password, the key and the memory the key derivation works in can be written
 to the Windows pagefile or hibernation file. Osmium wipes them as soon as it is done, but it cannot wipe

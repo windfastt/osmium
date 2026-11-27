@@ -114,4 +114,29 @@ public class ProtectionSettingsTests
         foreach (var word in new[] { "unbreakable", "uncrackable", "military" })
             Assert.DoesNotContain(word, protection.Description, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void HideExactSizesIsOffByDefaultAndOnlyForArgon2idProtection()
+    {
+        var s = new OsmiumSettings();
+        var d = Setting(s, "Security.HideExactSizes");
+        int order = typeof(SecuritySettings).GetProperty(nameof(SecuritySettings.HideExactSizes))!
+            .GetCustomAttributes(typeof(SettingAttribute), false).Cast<SettingAttribute>().Single().Order;
+        Assert.Equal(("Hide exact sizes", 4, false), (d.Label, order, s.Security.HideExactSizes));
+        Assert.Contains("Osmium 0.1 cannot open such archives", d.Description);
+        foreach (var protection in Enum.GetValues<PasswordProtection>())
+        {
+            s.Security.Protection = protection;
+            s.Security.HideExactSizes = true;
+            var all = SettingReflector.Describe(s);
+            var hide = all.Single(x => x.Key == "Security.HideExactSizes");
+            bool argon2id = protection != PasswordProtection.Compatible;
+            Assert.Equal(argon2id, SettingReflector.Evaluate(hide.VisibleWhen, all, hide.Category));
+            Assert.Equal(argon2id, s.Security.PadBlocks()); // a hand-edited file with Compatible never asks for it
+            Assert.Equal(argon2id ? KdfAlgorithm.Argon2id : KdfAlgorithm.Pbkdf2Sha512, s.Security.Kdf().Algorithm);
+        }
+        s.Security.HideExactSizes = false;
+        s.Security.Protection = PasswordProtection.Standard;
+        Assert.False(s.Security.PadBlocks());
+    }
 }

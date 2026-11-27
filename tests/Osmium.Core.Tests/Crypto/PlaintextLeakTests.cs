@@ -53,14 +53,18 @@ public class PlaintextLeakTests
         await ArchiveBuilder.BuildAsync(plan, new BuildOptions
         {
             OutputPath = output, Password = kdf == "none" ? null : Password, MemoryBudget = 1L << 30, Threads = 2,
-            Kdf = kdf == "argon2id" ? EncryptedArchives.Small : KdfParameters.Pbkdf2(100_000),
+            Kdf = kdf.StartsWith("argon2id", StringComparison.Ordinal) ? EncryptedArchives.Small : KdfParameters.Pbkdf2(100_000),
+            PadBlocks = kdf == "argon2id-padded", // "Hide exact sizes"
             // the writer's own rule: spare copies from a threshold of block bytes on
             SpareCopies = SpareCopyPolicy.Auto, SpareThreshold = spares ? 0 : long.MaxValue,
         }, Ct);
         return output;
     }
 
-    public static TheoryData<string, bool> Cases => new() { { "argon2id", false }, { "argon2id", true }, { "pbkdf2", false }, { "pbkdf2", true } };
+    public static TheoryData<string, bool> Cases => new()
+    {
+        { "argon2id", false }, { "argon2id", true }, { "argon2id-padded", false }, { "argon2id-padded", true }, { "pbkdf2", false }, { "pbkdf2", true },
+    };
 
     [Theory]
     [MemberData(nameof(Cases))]

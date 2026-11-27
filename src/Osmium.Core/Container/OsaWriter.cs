@@ -24,6 +24,12 @@ public sealed record OsaWriterOptions
     /// <summary>Progress of the key derivation, 0 to 1 ("Preparing encryption").</summary>
     public IProgress<double>? KdfProgress { get; init; }
     public bool Experimental { get; init; }
+    /// <summary>
+    /// "Hide exact sizes": every block frame is padded with zeros to its Padmé length (FORMAT §5 item 6), at a cost of
+    /// up to 12 % in size, and the header gets flag bit 3, which Osmium 0.1 does not know. Encrypted archives with
+    /// Argon2id protection only (<see cref="ArgumentException"/> otherwise).
+    /// </summary>
+    public bool PadBlocks { get; init; }
     public string Creator { get; init; } = "Osmium " + (typeof(OsaWriter).Assembly.GetName().Version?.ToString(3) ?? "0");
     /// <summary>Pipeline used for the index frame.</summary>
     public string IndexPipeline { get; init; } = "zstd(level=19)";
@@ -62,7 +68,7 @@ public sealed record OsaWriterOptions
     /// <summary>Never prints the password.</summary>
     private bool PrintMembers(StringBuilder b)
     {
-        b.Append($"Encrypted = {Password is not null}, Kdf = {ResolvedKdf?.Describe() ?? "none"}, Experimental = {Experimental}, ");
+        b.Append($"Encrypted = {Password is not null}, Kdf = {ResolvedKdf?.Describe() ?? "none"}, PadBlocks = {PadBlocks}, Experimental = {Experimental}, ");
         b.Append($"Creator = {Creator}, IndexPipeline = {IndexPipeline}, SpareCopies = {SpareCopies}");
         return true;
     }
@@ -81,6 +87,7 @@ public sealed record OsaWriterOptions
 public sealed class OsaWriter : IDisposable
 {
     internal const string FailedEarlier = "This archive writer failed earlier and cannot continue.";
+    internal const string PadBlocksNeedsArgon2id = "Hiding exact sizes needs an encrypted archive with Argon2id protection (not Compatible protection).";
 
     private readonly object _lock = new();
     private readonly FileStream _fs;
@@ -126,7 +133,8 @@ public sealed class OsaWriter : IDisposable
         _header = new ArchiveHeader
         {
             Minor = _options.HeaderMinor,
-            Flags = (enc is not null ? Osa.FlagEncrypted : 0) | (_options.Experimental ? Osa.FlagExperimental : 0),
+            Flags = (enc is not null ? Osa.FlagEncrypted : 0) | (_options.PadBlocks ? Osa.FlagPaddedBlocks : 0)
+                | (_options.Experimental ? Osa.FlagExperimental : 0),
             ArchiveId = _options.TestFixedArchiveId?.ToArray() ?? RandomNumberGenerator.GetBytes(16),
             Encryption = enc,
             // An encrypted archive does not say in the clear which release made it: the creator is in its file list only.
@@ -154,6 +162,7 @@ public sealed class OsaWriter : IDisposable
     public static KdfParameters? CheckProtection(OsaWriterOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.PadBlocks && options.ResolvedKdf?.Algorithm != KdfAlgorithm.Argon2id) throw new ArgumentException(PadBlocksNeedsArgon2id);
         if (options.Password is not { } password) return null;
         PasswordKdf.CheckPasswordText(password, creating: true);
         var kdf = options.ResolvedKdf!;
@@ -212,7 +221,9 @@ public sealed class OsaWriter : IDisposable
 
     private long WriteFrame(ulong frameNumber, uint extraFlags, byte[] prefix, byte[] payload)
     {
-        var (fh, sealedBody, bodyLen) = BuildFrame(frameNumber, extraFlags, prefix, payload, prefix.Length + payload.Length);
+        long exact = prefix.Length + payload.Length;
+        // "Hide exact sizes": the block's plaintext body padded to its Padmé length before it is sealed.
+        var (fh, sealedBody, bodyLen) = BuildFrame(frameNumber, extraFlags, prefix, payload, _options.PadBlocks ? BlockBody.PaddedLength(exact) : exact);
         Write(fh);
         if (sealedBody is not null) Write(sealedBody);
         else { Write(prefix); Write(payload); }

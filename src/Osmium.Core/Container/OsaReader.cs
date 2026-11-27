@@ -731,9 +731,10 @@ public sealed class OsaReader : IDisposable
 
     private static string PipelineDiffers(ulong frame) => $"Block {frame} does not match the file list (its pipeline differs).";
 
-    /// <summary>Zero padding after the payload (FORMAT §5): in the index frame of an Argon2id archive only.</summary>
+    /// <summary>Zero padding after the payload (FORMAT §5): in the index frame of an Argon2id archive, and in its block
+    /// frames when its header has flag bit 3 ("Hide exact sizes", which the header allows only in Argon2id archives).</summary>
     internal static bool PaddingAllowed(ArchiveHeader header, bool isIndex) =>
-        isIndex && header.Encrypted && header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id;
+        header.Encrypted && header.Encryption?.Kdf.Algorithm == KdfAlgorithm.Argon2id && (isIndex || header.PaddedBlocks);
 
     private static readonly AsyncLocal<Action<ulong>?> s_frameRead = new();
 

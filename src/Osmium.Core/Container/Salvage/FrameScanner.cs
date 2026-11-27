@@ -53,7 +53,10 @@ internal readonly record struct FrameHeader(long Offset, uint Flags, ulong Numbe
 /// header bytes; when the header is damaged, <paramref name="OtherHeaderBytes"/> are rebuilt candidates to try for it.
 /// </summary>
 /// <param name="PadsIndex">The key derivation is Argon2id (kdf 2), whose index frame is padded (FORMAT §5).</param>
-internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null, bool PadsIndex = false);
+/// <param name="PadsBlocks">Block frames may be padded: the header or its copy has flag bit 3 ("Hide exact sizes"), or,
+/// with neither known, the key derivation is Argon2id (a frame that authenticates was written by the key's holder).</param>
+internal sealed record KeyMaterial(ArchiveKey Key, byte[] ArchiveId, byte[] HeaderBytes, IReadOnlyList<byte[]>? OtherHeaderBytes = null,
+    bool PadsIndex = false, bool PadsBlocks = false);
 
 /// <summary>
 /// The key fields of a damaged encrypted header, read from their fixed places (FORMAT §1, §8) whatever happened to the
@@ -452,8 +455,9 @@ internal sealed class FrameScanner
         Accept(f, p);
     }
 
-    /// <summary>Zero padding after the payload, with the reader's rules: the index frame of an Argon2id archive.</summary>
-    internal bool PaddingAllowed(SalvageFrame f) => f.Encrypted && f.IsIndex && Key is { PadsIndex: true };
+    /// <summary>Zero padding after the payload, with the reader's rules: the index frame of an Argon2id archive, and its
+    /// block frames when they may be padded (<see cref="KeyMaterial.PadsBlocks"/>).</summary>
+    internal bool PaddingAllowed(SalvageFrame f) => f.Encrypted && (f.IsIndex ? Key is { PadsIndex: true } : Key is { PadsBlocks: true });
 
     /// <summary>Checks a plain frame's body without holding it in memory: prefix CRC, then the payload hash in chunks.</summary>
     private void VerifyPlain(SalvageFrame f)

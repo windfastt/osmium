@@ -37,6 +37,8 @@ public sealed record BuildOptions
     public KdfParameters? Kdf { get; init; }
     /// <summary>PBKDF2 iterations, for callers that still choose them (see <see cref="Kdf"/>).</summary>
     public int? KdfIterations { get; init; }
+    /// <summary>"Hide exact sizes" (<see cref="OsaWriterOptions.PadBlocks"/>): Argon2id protection only.</summary>
+    public bool PadBlocks { get; init; }
     /// <summary>Receives the archive's key, so the caller can open the archive again without deriving it again.</summary>
     public ArchiveKeyCache? KeyCache { get; init; }
     /// <summary>Decode every block and compare before writing it (strongly recommended).</summary>
@@ -67,7 +69,7 @@ public sealed record BuildOptions
     /// <summary>Never prints the password.</summary>
     private bool PrintMembers(StringBuilder b)
     {
-        b.Append($"OutputPath = {OutputPath}, Encrypted = {Password is not null}, Kdf = {Kdf?.Describe() ?? (KdfIterations is { } n ? $"PBKDF2 x{n}" : "default")}, ");
+        b.Append($"OutputPath = {OutputPath}, Encrypted = {Password is not null}, Kdf = {Kdf?.Describe() ?? (KdfIterations is { } n ? $"PBKDF2 x{n}" : "default")}, PadBlocks = {PadBlocks}, ");
         b.Append($"VerifyBlocks = {VerifyBlocks}, Overwrite = {Overwrite}, Threads = {Threads}, MemoryBudget = {MemoryBudget}, SpareCopies = {SpareCopies}");
         return true;
     }
@@ -97,6 +99,7 @@ public static class ArchiveBuilder
         Password = o.Password,
         Kdf = o.Kdf,
         KdfIterations = o.KdfIterations,
+        PadBlocks = o.PadBlocks,
         KdfMemoryLimit = o.MemoryBudget,
         Cancellation = ct,
         KdfProgress = kdfProgress,

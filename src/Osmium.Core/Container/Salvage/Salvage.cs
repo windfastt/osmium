@@ -290,7 +290,7 @@ internal sealed class SalvageRun : IDisposable
                 key.Dispose();
                 throw new WrongPasswordException();
             }
-            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: enc.Kdf.Algorithm == KdfAlgorithm.Argon2id);
+            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: enc.Kdf.Algorithm == KdfAlgorithm.Argon2id, PadsBlocks: h.PaddedBlocks);
         }
         // Container 1.1 keeps an intact copy of the header beside the copies of the index (FORMAT §4.1).
         string? copyProblem = null;
@@ -354,7 +354,9 @@ internal sealed class SalvageRun : IDisposable
                 var rebuilt = new List<byte[]>();
                 if (probe.Repaired is { } repaired) rebuilt.Add(repaired.Raw);
                 if (c.Fields is { } f) rebuilt.AddRange(f.Rebuilds(id, firstFrame));
-                return new KeyMaterial(key, id, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList(), c.Info.Kdf.Algorithm == KdfAlgorithm.Argon2id);
+                // The header's flags are not known: in an Argon2id archive, blocks that authenticate may be padded.
+                bool argon2id = c.Info.Kdf.Algorithm == KdfAlgorithm.Argon2id;
+                return new KeyMaterial(key, id, rebuilt.FirstOrDefault() ?? [], rebuilt.Skip(1).ToList(), argon2id, PadsBlocks: argon2id);
             }
             key.Dispose();
             if (verifierMatches) break; // the password and these settings belong together: another reading cannot be them
@@ -399,7 +401,7 @@ internal sealed class SalvageRun : IDisposable
                 continue;
             }
             _notes.Add("The archive header is damaged; its spare copy beside the file list is intact and was used.");
-            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: h.Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id);
+            return new KeyMaterial(key, h.ArchiveId, h.Raw, PadsIndex: h.Encryption.Kdf.Algorithm == KdfAlgorithm.Argon2id, PadsBlocks: h.PaddedBlocks);
         }
         if (refused) throw new WrongPasswordException();
         problem = "the archive header is damaged, and the spare copy of it that was found does not accept the password, "

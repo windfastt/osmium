@@ -135,6 +135,11 @@ public sealed class SecuritySettings
     public int KdfIterations { get; set; } = KdfPresets.CompatibleIterations;
     [Setting("Remember passwords until Osmium exits", Order = 3)]
     public bool RememberForSession { get; set; }
+    [Setting("Hide exact sizes", Description = "Pads encrypted blocks so their exact sizes are hidden, at a cost of up to 12 % in size. Osmium 0.1 cannot open such archives. The file list of an encrypted archive is always padded, except with Compatible protection.", Order = 4, VisibleWhen = "!Protection=Compatible")]
+    public bool HideExactSizes { get; set; }
+
+    /// <summary>Whether new encrypted archives hide exact sizes: only with Argon2id protection, so never with Compatible.</summary>
+    public bool PadBlocks() => HideExactSizes && Protection != PasswordProtection.Compatible;
 
     /// <summary>
     /// The key-derivation settings new encrypted archives get. A settings file edited by hand may hold anything: an

@@ -31,7 +31,7 @@ public static class Osa
     public const uint FlagExperimental = 1u << 16;
     /// <summary>Critical header flag bit 3: every block frame is padded ("Hide exact sizes"); Argon2id archives only.</summary>
     public const uint FlagPaddedBlocks = 1u << 3;
-    public const uint KnownCriticalFlags = FlagEncrypted;
+    public const uint KnownCriticalFlags = FlagEncrypted | FlagPaddedBlocks;
 
     public const uint FrameFlagEncrypted = 1u << 0;
     public const uint FrameFlagIndex = 1u << 1;
@@ -151,6 +151,9 @@ internal static class EncryptionRecord
 /// <summary>Archive header (FORMAT §1).</summary>
 public sealed class ArchiveHeader
 {
+    internal const string PaddedBlocksNeedArgon2id = "The archive header says its blocks are padded, which only archives encrypted with Argon2id can be.";
+    /// <summary>Block frames are padded ("Hide exact sizes", header flag bit 3).</summary>
+    public bool PaddedBlocks => (Flags & Osa.FlagPaddedBlocks) != 0;
     /// <summary><see cref="KdfLimits.MaxPbkdf2Iterations"/>.</summary>
     public const int MaxKdfIterations = KdfLimits.MaxPbkdf2Iterations;
     /// <summary>The exact serialized header bytes (bound into the index's AEAD data).</summary>
@@ -240,6 +243,8 @@ public sealed class ArchiveHeader
         // The CRC checks out, so a header that claims encryption without its settings was made that way: never damage.
         if ((flags & Osa.FlagEncrypted) != 0 && enc is null) throw new ModifiedArchiveException();
         if ((flags & Osa.FlagEncrypted) == 0 && enc is not null) throw new CorruptDataException("Encryption flag and header disagree.");
+        // Padded blocks ("Hide exact sizes") exist only in archives encrypted with Argon2id.
+        if ((flags & Osa.FlagPaddedBlocks) != 0 && enc?.Kdf.Algorithm != KdfAlgorithm.Argon2id) throw new CorruptDataException(PaddedBlocksNeedArgon2id);
         var raw = new byte[36 + extLen + 4];
         all.CopyTo(raw, 0);
         rest.AsSpan((int)extLen).CopyTo(raw.AsSpan(36 + (int)extLen));

@@ -70,6 +70,27 @@ internal static class EncryptedArchives
         File.WriteAllBytes(path, bytes);
     }
 
+    /// <summary>
+    /// Changes the header of an archive without spare copies (its CRC fixed, its length the same) and seals the index
+    /// frame again under the new header bytes, as a writer with that header would have: the file list authenticates.
+    /// </summary>
+    public static void RebindHeader(string path, Action<byte[]> change, string password = Password)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var header = ArchiveHeader.Read(new MemoryStream(bytes));
+        var changed = header.Raw.ToArray();
+        change(changed);
+        BinaryPrimitives.WriteUInt32LittleEndian(changed.AsSpan(changed.Length - 4), Osa.Crc(changed.AsSpan(0, changed.Length - 4)));
+        long offset = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(bytes.Length - 32));
+        long length = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(bytes.Length - 24));
+        using var key = ArchiveKey.Derive(password, header.Encryption!);
+        var body = bytes.AsSpan((int)offset + Osa.FrameHeaderSize, (int)length - Osa.FrameHeaderSize);
+        var plain = key.Open(header.ArchiveId, Osa.IndexFrameNumber, body, header.Raw);
+        key.Seal(header.ArchiveId, Osa.IndexFrameNumber, plain, changed).CopyTo(body);
+        changed.CopyTo(bytes, 0);
+        File.WriteAllBytes(path, bytes);
+    }
+
     /// <summary>The bytes of a plaintext block body before its CRC: descriptor, raw hash, payload hash, payload length.</summary>
     private static int PrefixLength(byte[] plain)
     {

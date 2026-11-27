@@ -20,7 +20,7 @@ frame and the header (second line, §4.1); readers never depend on them being th
 | 0 | 8 | magic `4F 53 4D 41 1A 0D 0A 00` (`"OSMA" ^Z CR LF NUL`; catches text-mode mangling) |
 | 8 | 2 | major = 1 (readers refuse other majors) |
 | 10 | 2 | minor = 1 (0 in archives of Osmium 0.1.x). Minor versions only add what older readers can ignore: readers accept every minor of major 1 |
-| 12 | 4 | flags. Bits 0–15 are **critical** (refuse if an unknown one is set), bits 16–31 informational. bit0 = encrypted · bit16 = experimental features used |
+| 12 | 4 | flags. Bits 0–15 are **critical** (refuse if an unknown one is set), bits 16–31 informational. bit0 = encrypted · bit3 = block frames are padded ("Hide exact sizes", §5 item 6; only in archives encrypted with Argon2id, kdf 2, and damage anywhere else) · bit16 = experimental features used |
 | 16 | 16 | archive id (random) |
 | 32 | 4 | `extLen` |
 | 36 | extLen | extension records: `varint type, bytes value`. **Odd type = critical** (refuse if unknown), even = ignorable |
@@ -266,8 +266,9 @@ this format known, except the password.
    of sealing again. The spare copy of the index (§4.1) is a byte copy of sealed bytes, not a second encryption; any
    future re-encrypted copy gets its own frame number.
 6. **Padding.** In kdf 2 archives the plaintext of the index frame ends in zero bytes up to the Padmé length (`L`
-   rounded up so that its low `E − S` bits are zero, `E = ⌊log2 L⌋`, `S = ⌊log2 E⌋ + 1`). `payloadLen` stays exact; a
-   reader checks that the padding is zero. kdf 1 archives are never padded.
+   rounded up so that its low `E − S` bits are zero, `E = ⌊log2 L⌋`, `S = ⌊log2 E⌋ + 1`); with header flag bit 3,
+   every block frame is padded the same way ("Hide exact sizes"). `payloadLen` stays exact; a reader checks that the
+   padding is zero, and allows it in block frames only with bit 3. kdf 1 archives are never padded.
 7. **Limits** a reader checks before it derives: Argon2id `1 ≤ t ≤ 16`, `1 ≤ p ≤ 64`, `8·p ≤ m ≤ 8 388 608` (8 GiB),
    `t·m ≤ 33 554 432`; PBKDF2 `1 ≤ iterations ≤ 20 000 000`. Outside them the archive is refused as damaged. Within
    them a reader asks before it uses more memory than its configured memory limit, as for `decodeMemKiB`, and before
@@ -293,12 +294,13 @@ this format known, except the password.
    records, unreferenced frames and newer header-copy trailers are never added to encrypted archives; the reserved
    ignorable types and frame magics of §9 are for unencrypted archives.
 11. **What stays visible**: that this is an Osmium archive, the container version, the archive id, the flags, the
-   key-derivation settings and salt, the frame headers (the number of blocks and their sizes), the length of the index
-   frame (padded in kdf 2 archives), and the footer. File names, sizes, times, methods, the creator and contents are
-   encrypted. Compressed sizes say something about the content: they let someone who has a candidate file check
-   whether the archive probably holds it, and when files an attacker chooses share a solid block with secret files,
-   the compressed size can reveal parts of the secret (compression oracle). Keep files that others choose out of
-   encrypted archives that hold secrets when sizes matter.
+   key-derivation settings and salt, the frame headers (the number of blocks and their sizes, rounded when sizes are
+   hidden), the length of the index frame (padded in kdf 2 archives), and the footer. File names, sizes, times,
+   methods, the creator and contents are encrypted. Compressed sizes say something about the content: they let
+   someone who has a candidate file check whether the archive probably holds it, and when files an attacker chooses
+   share a solid block with secret files, the compressed size can reveal parts of the secret (compression oracle).
+   "Hide exact sizes" rounds the sizes; it does not remove the effect. Keep files that others choose out of encrypted
+   archives that hold secrets when sizes matter.
 12. **What a reader cannot check**: whether a writer leaked the password through fields that must look random (salt,
    archive id). Use genuine builds; their provenance can be checked (`gh attestation verify <file> --repo
    windfastt/osmium`) and, once releases are signed, their code signature.
@@ -409,6 +411,7 @@ So that later versions can add them without clashing, these are reserved; this v
 | 1.1 whose blocks use only methods 0.1.x knows, with or without spare copies | opens, tests, extracts: the spare copies and the minor version never stop it | opens, tests, extracts; uses the spare copies when the index frame or header is damaged |
 | 1.1 with a block made with a method new in 0.2.0 (such as `cm2` or `x86v2`, §2.2) | refuses the whole archive while reading the index, saying it was made by a newer version; nothing is extracted | opens it; only blocks that a reader does not know fail, and the other files extract |
 | Encrypted with Argon2id (kdf 2, the default protection since 0.2.0) | refuses it before asking for the password: "Unsupported key-derivation function."; nothing is extracted | opens, tests, extracts with the password |
+| Encrypted with Argon2id and "Hide exact sizes" (header flags `0x0009`) | refuses it before asking for the password: "Archive uses features this version does not understand."; nothing is extracted | opens, tests, extracts with the password |
 | Encrypted with PBKDF2 (kdf 1: archives of 0.1.x, and the Compatible protection since 0.2.0) | opens, tests, extracts with the password (a 0.2.0 archive has no Creator record; 0.1.x shows no creator) | opens, tests, extracts with the password; one below 100 000 iterations only after the user agrees (§5 item 8) |
 
 The index carries a copy of every block's pipeline, so 0.1.x meets a method it does not know while reading the index;

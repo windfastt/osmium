@@ -194,7 +194,11 @@ public sealed class OsaArchiveSource : IArchiveSource
         new("Encrypted", r.Header.Encrypted ? "yes" : "no"),
         // An open source has checked the password and authenticated the file list.
         .. r.Header.Encryption is { } e
-            ? new ArchiveDetail[] { new("Encryption", "AES-256-GCM, key from " + e.Kdf.KeyText()), new("Password", "verified") }
+            ? new ArchiveDetail[]
+            {
+                new("Encryption", "AES-256-GCM, key from " + e.Kdf.KeyText()), new("Password", "verified"),
+                new("Exact sizes hidden", r.Header.PaddedBlocks ? "yes" : "no"),
+            }
             : [],
         new("Experimental features", r.Header.Experimental ? "yes" : "no"),
     ];
