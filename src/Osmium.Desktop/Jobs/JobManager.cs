@@ -298,6 +298,10 @@ public sealed class JobManager : IDisposable
         // Read once: the whole job uses the settings in effect when it started, and the originals move only if the
         // blocks were verified with exactly this value.
         bool verify = s.Compression.VerifyBlocks, recycle = s.Compression.RecycleOriginals;
+        // The password protection of an encrypted archive, read before anything is scanned: a hand-edited setting that
+        // is out of range stops the job here.
+        var kdf = string.IsNullOrEmpty(r.Password) ? null : s.Security.Kdf();
+        bool padBlocks = kdf is not null && s.Security.PadBlocks();
         j.Phase = "Scanning";
         var scan = Scanner.Scan(r.Inputs, new ScanOptions { Excludes = s.Compression.Excludes, IncludeHidden = s.Compression.IncludeHidden }, ct);
         var po = BuildPlanOptions(s, r, _globalRules(), m => { lock (j.Log) j.Log.Add(m); }) with
@@ -334,7 +338,8 @@ public sealed class JobManager : IDisposable
             {
                 OutputPath = r.Output,
                 Password = r.Password,
-                KdfIterations = s.Security.KdfIterations,
+                Kdf = kdf,
+                PadBlocks = padBlocks,
                 VerifyBlocks = verify,
                 Overwrite = r.Overwrite,
                 Threads = po.Threads + (cluster?.RemoteSlots ?? 0),

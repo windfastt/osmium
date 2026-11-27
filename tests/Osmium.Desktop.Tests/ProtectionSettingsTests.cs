@@ -33,6 +33,7 @@ public class ProtectionSettingsTests
     [InlineData(PasswordProtection.Maximum, 3, 4 << 20)]
     public void EveryArgon2idChoiceIsAPreset(PasswordProtection protection, int t, int m)
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         var p = new SecuritySettings { Protection = protection }.Kdf();
         Assert.Equal(KdfParameters.Argon2id(t, m, 4), p);
         Assert.Equal(KdfVerdictKind.Ok, p.Check().Kind);
@@ -41,6 +42,7 @@ public class ProtectionSettingsTests
     [Fact]
     public void CompatibleUsesTheIterationsSetting()
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         Assert.Equal(KdfParameters.Pbkdf2(600_000), new SecuritySettings { Protection = PasswordProtection.Compatible }.Kdf());
         var p = new SecuritySettings { Protection = PasswordProtection.Compatible, KdfIterations = 100_000 }.Kdf();
         Assert.Equal(KdfParameters.Pbkdf2(100_000), p);
@@ -63,6 +65,7 @@ public class ProtectionSettingsTests
     [Fact]
     public void AHandEditedProtectionThatDoesNotExistIsStandard()
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         var s = Load("""{ "security": { "protection": 7 } }""");
         Assert.Equal((PasswordProtection)7, s.Security.Protection);
         Assert.Equal(KdfPresets.Standard, s.Security.Kdf());
@@ -71,6 +74,7 @@ public class ProtectionSettingsTests
     [Fact]
     public void HandEditedIterationsOutsideTheRangeAreRefused()
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         var s = Load("""{ "security": { "protection": "Compatible", "kdfIterations": 50000 } }""");
         var e = Assert.Throws<ArgumentException>(() => s.Security.Kdf());
         Assert.Equal("The PBKDF2 iterations in the settings must be between 100,000 and 20,000,000.", e.Message);
@@ -81,6 +85,7 @@ public class ProtectionSettingsTests
     [Fact]
     public void ASettingsFileOfOsmium01GetsStandardAndKeepsItsIterations()
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         var s = Load("""{ "schemaVersion": 1, "security": { "encryptByDefault": true, "kdfIterations": 1000000, "rememberForSession": true } }""");
         Assert.Equal(PasswordProtection.Standard, s.Security.Protection);
         Assert.Equal(1_000_000, s.Security.KdfIterations);
@@ -118,6 +123,7 @@ public class ProtectionSettingsTests
     [Fact]
     public void HideExactSizesIsOffByDefaultAndOnlyForArgon2idProtection()
     {
+        using var asOsmium = TestProtection.AsOsmiumDoes();
         var s = new OsmiumSettings();
         var d = Setting(s, "Security.HideExactSizes");
         int order = typeof(SecuritySettings).GetProperty(nameof(SecuritySettings.HideExactSizes))!

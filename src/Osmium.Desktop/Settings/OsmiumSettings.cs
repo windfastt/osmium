@@ -139,7 +139,21 @@ public sealed class SecuritySettings
     public bool HideExactSizes { get; set; }
 
     /// <summary>Whether new encrypted archives hide exact sizes: only with Argon2id protection, so never with Compatible.</summary>
-    public bool PadBlocks() => HideExactSizes && Protection != PasswordProtection.Compatible;
+    public bool PadBlocks() => HideExactSizes && Protection != PasswordProtection.Compatible && !UseIterations;
+
+    /// <summary>
+    /// Tests only, never set by Osmium (a test checks that): every protection is PBKDF2 with <see cref="KdfIterations"/>,
+    /// so that the Desktop tests that make encrypted archives keep the cost they had. The Desktop test assembly sets it
+    /// for itself; <see cref="UseIterationsHere"/> turns it off for one test.
+    /// </summary>
+    internal static bool UseIterationsForTests;
+
+    private static readonly AsyncLocal<bool?> s_useIterationsHere = new();
+
+    /// <summary>Tests: overrides <see cref="UseIterationsForTests"/> for the current flow of execution (null: no override).</summary>
+    internal static bool? UseIterationsHere { get => s_useIterationsHere.Value; set => s_useIterationsHere.Value = value; }
+
+    private static bool UseIterations => UseIterationsHere ?? UseIterationsForTests;
 
     /// <summary>
     /// The key-derivation settings new encrypted archives get. A settings file edited by hand may hold anything: an
@@ -148,7 +162,7 @@ public sealed class SecuritySettings
     /// </summary>
     public KdfParameters Kdf()
     {
-        switch (Protection)
+        switch (UseIterations ? PasswordProtection.Compatible : Protection)
         {
             case PasswordProtection.Strong: return KdfPresets.Strong;
             case PasswordProtection.Maximum: return KdfPresets.Maximum;
