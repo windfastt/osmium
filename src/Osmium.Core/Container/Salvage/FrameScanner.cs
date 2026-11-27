@@ -421,6 +421,7 @@ internal sealed class FrameScanner
         var plain = TryOpen(f);
         if (plain is null)
         {
+            f.FailedAuthentication = true;
             f.Reject(SalvageFrameState.Damaged, "authentication failed (damaged or tampered)");
             return;
         }

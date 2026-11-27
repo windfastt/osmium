@@ -602,6 +602,7 @@ internal sealed class SalvageRun : IDisposable
         var byNumber = frames.Where(f => !f.IsIndex && f.Number < (ulong)n).ToLookup(f => (int)f.Number);
         var chosen = new SalvageFrame?[n];
         for (int k = 0; k < n; k++) chosen[k] = Match(index.Blocks[k], byNumber[k], baseOffset);
+        if (_scanner.ArchiveEncrypted) RefuseUnprotectedBlocks(index, frames, chosen, baseOffset);
         foreach (var f in frames.Where(f => !f.IsIndex && f.Number >= (ulong)n && f.State is SalvageFrameState.Verified or SalvageFrameState.NeedsNewerVersion))
             f.Reject(SalvageFrameState.Ignored, "the index lists no block with this number");
 
@@ -761,6 +762,22 @@ internal sealed class SalvageRun : IDisposable
                 _lost.Enqueue(new(j.Entry.Path, ex.Message));
             }
         }
+    }
+
+    /// <summary>
+    /// As the reader does when it opens an encrypted archive (FORMAT §5): where the authenticated index places a block,
+    /// a frame header that checks out, with the block's number and length, but without the encrypted flag (or with the
+    /// index flag), was made that way; and when no block authenticates while some failed authentication, the archive
+    /// only claims to be encrypted. Either ends salvage before anything is written.
+    /// </summary>
+    private static void RefuseUnprotectedBlocks(ArchiveIndex index, List<SalvageFrame> frames, SalvageFrame?[] chosen, long baseOffset)
+    {
+        var at = frames.Where(f => f.EnclosingOffset is null).ToLookup(f => f.Offset);
+        foreach (var b in index.Blocks)
+            if (at[baseOffset + b.Offset].Any(f => f.Number == (ulong)b.Frame && f.FrameLength == b.FrameLength && (!f.Encrypted || f.IsIndex)))
+                throw new ModifiedArchiveException();
+        if (index.Blocks.Count > 0 && chosen.All(c => c is null) && frames.Any(f => !f.IsIndex && f.FailedAuthentication))
+            throw new ModifiedArchiveException();
     }
 
     /// <summary>

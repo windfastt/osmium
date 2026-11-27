@@ -171,6 +171,231 @@ public class ReaderPolicyTests
         Assert.True(indexLength * 100 < Osa.MaxIndexFrameBytes);
     }
 
+    // ------------------------------------------------------------------ item 1: fake-encrypted archives are refused
+
+    private const string Pw = EncryptedArchives.Password;
+    private static readonly string M1 = ModifiedArchiveException.DefaultMessage;
+
+    private static OsaWriterOptions Options(string kdf, SpareCopyPolicy spares = SpareCopyPolicy.Never) => EncryptedArchives.Options(kdf, spares);
+
+    /// <summary>Nothing but a salvage report (which describes, and holds nothing of the archive) is in <paramref name="dest"/>.</summary>
+    private static void AssertNothingWritten(string dest)
+    {
+        if (!Directory.Exists(dest)) return;
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(dest), p => Path.GetFileName(p) != Container.Salvage.ReportFileName);
+    }
+
+    /// <summary>Refused with M1 by the reader and the archive source, and salvage writes nothing from it (it refuses it,
+    /// or a wrong password).</summary>
+    private static void AssertRefusedEverywhere(TempDir t, string path, string password = Pw, bool salvage = true)
+    {
+        Assert.Equal(M1, Assert.ThrowsAny<ModifiedArchiveException>(() => OsaReader.Open(path, () => password)).Message);
+        Assert.ThrowsAny<ModifiedArchiveException>(() => ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => password }, Ct));
+        if (!salvage) return;
+        string dest = t.Sub("salvaged-" + Guid.NewGuid().ToString("N")[..6]);
+        try
+        {
+            var r = SalvageKdfTests.Salvage(path, dest, () => password);
+            Assert.Empty(r.Written);
+        }
+        catch (Exception e) when (e is ModifiedArchiveException or WrongPasswordException) { }
+        AssertNothingWritten(dest);
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void AHeaderThatClaimsEncryptionOverPlaintextFramesIsRefused(string kdf)
+    {
+        // (a): a valid EncryptionInfo record for the user's password, but frames and index written in plaintext
+        using var t = new TempDir();
+        var plain = File.ReadAllBytes(EncryptedArchives.WriteWithFolder(t.Sub("plain.osa"), new OsaWriterOptions(), 3000, 3000));
+        var donor = File.ReadAllBytes(EncryptedArchives.WriteWithFolder(t.Sub("donor.osa"), Options(kdf), 10));
+        var donorHeader = ArchiveHeader.Read(new MemoryStream(donor));
+        string path = t.Sub("a.osa");
+        File.WriteAllBytes(path, EncryptedArchives.Graft(donorHeader.Raw, plain));
+        int asked = 0;
+        Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(path, () => { asked++; return Pw; }));
+        Assert.Equal(0, asked); // the index frame says so before the password is needed
+        AssertRefusedEverywhere(t, path);
+        AssertRefusedEverywhere(t, path, "another password"); // (d): whatever the password
+        using (TestDefaults.AsOsmiumDoes())
+            Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(path, new OsaOpenOptions { Password = () => Pw, Protection = ProtectionPolicy.AllowWeak }));
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void FramesFlaggedEncryptedThatHoldRandomBytesAreRefusedWithNothingWritten(string kdf)
+    {
+        // (b): the file list is genuine and authenticates, so listing works; no block does
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        foreach (var (offset, length) in EncryptedArchives.Frames(path))
+            Random.Shared.NextBytes(b.AsSpan((int)offset + Osa.FrameHeaderSize, (int)length - Osa.FrameHeaderSize));
+        File.WriteAllBytes(path, b);
+        using var r = OsaReader.Open(path, () => Pw);
+        Assert.Equal(4, r.Entries.Count);
+        Assert.Equal(M1, Assert.Throws<ModifiedArchiveException>(() => Extractor.Extract(r, t.Sub("out"), null, null, null, Ct)).Message);
+        AssertNothingWritten(t.Sub("out"));
+        Assert.Throws<ModifiedArchiveException>(() => Extractor.Test(r, null, Ct));
+        using var s = ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw }, Ct);
+        Assert.Throws<ModifiedArchiveException>(() => s.Extract(t.Sub("out2"), new ArchiveExtractRequest(), null, Ct));
+        AssertNothingWritten(t.Sub("out2"));
+        Assert.Throws<ModifiedArchiveException>(() => SalvageKdfTests.Salvage(path, t.Sub("salvaged"), () => Pw));
+        AssertNothingWritten(t.Sub("salvaged"));
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void OneBlockOfRandomBytesCostsOnlyItsOwnFilesAsDamage(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        var (offset, length) = EncryptedArchives.Frames(path)[1];
+        Random.Shared.NextBytes(b.AsSpan((int)offset + Osa.FrameHeaderSize, (int)length - Osa.FrameHeaderSize));
+        File.WriteAllBytes(path, b);
+        using var r = OsaReader.Open(path, () => Pw);
+        var x = Extractor.Extract(r, t.Sub("out"), null, null, null, Ct);
+        Assert.Equal((2, 1), (x.FilesOk, x.FilesFailed)); // f0.bin and the empty file; not f1.bin
+        Assert.Contains("1 file was not extracted: its data failed authentication (damaged or changed).", x.Errors);
+        Assert.True(File.Exists(Path.Combine(t.Sub("out"), "f0.bin")));
+        Assert.False(File.Exists(Path.Combine(t.Sub("out"), "f1.bin")));
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void ABlockFrameSwappedForAPlaintextFrameIsRefusedAtOpenEvenForAListing(string kdf)
+    {
+        // (c)
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        EncryptedArchives.EditFrameHeader(b, EncryptedArchives.Frames(path)[1].Offset, fh => fh[4] = 0); // flags: not encrypted
+        File.WriteAllBytes(path, b);
+        AssertRefusedEverywhere(t, path);
+        using (TestDefaults.AsOsmiumDoes())
+            Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(path, new OsaOpenOptions { Password = () => Pw, Protection = ProtectionPolicy.AllowWeak }));
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void FrameHeadersThatDisagreeWithTheFileListAreRefusedAtOpen(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000, 3000);
+        var frames = EncryptedArchives.Frames(path);
+        var original = File.ReadAllBytes(path);
+        // two whole frames swapped: their numbers are no longer their places
+        var swapped = (byte[])original.Clone();
+        original.AsSpan((int)frames[0].Offset, (int)frames[0].Length).CopyTo(swapped.AsSpan((int)frames[1].Offset));
+        original.AsSpan((int)frames[1].Offset, (int)frames[1].Length).CopyTo(swapped.AsSpan((int)frames[0].Offset));
+        File.WriteAllBytes(path, swapped);
+        // (salvage finds both frames by their numbers, and each authenticates: it restores them, as it should)
+        AssertRefusedEverywhere(t, path, salvage: false);
+        // a frame header that claims another length, or the index flag
+        foreach (Action<byte[]> change in new Action<byte[]>[] { fh => fh[16]++, fh => fh[4] |= (byte)Osa.FrameFlagIndex })
+        {
+            var b = (byte[])original.Clone();
+            EncryptedArchives.EditFrameHeader(b, frames[2].Offset, change);
+            File.WriteAllBytes(path, b);
+            Assert.Throws<ModifiedArchiveException>(() => OsaReader.Open(path, () => Pw));
+        }
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void AttacksThatGcmCatchesAreDamageOfTheirBlocks(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf), 3000, 3000, 3000);
+        var frames = EncryptedArchives.Frames(path);
+        var original = File.ReadAllBytes(path);
+        // two bodies swapped under their own headers: the nonce and AAD carry the frame number from the index
+        var swapped = (byte[])original.Clone();
+        int body = (int)frames[0].Length - Osa.FrameHeaderSize;
+        original.AsSpan((int)frames[0].Offset + Osa.FrameHeaderSize, body).CopyTo(swapped.AsSpan((int)frames[1].Offset + Osa.FrameHeaderSize));
+        original.AsSpan((int)frames[1].Offset + Osa.FrameHeaderSize, body).CopyTo(swapped.AsSpan((int)frames[0].Offset + Osa.FrameHeaderSize));
+        File.WriteAllBytes(path, swapped);
+        using (var r = OsaReader.Open(path, () => Pw))
+        {
+            var x = Extractor.Extract(r, t.Sub("out"), null, null, null, Ct);
+            Assert.Equal((2, 2), (x.FilesOk, x.FilesFailed)); // f2.bin and the empty file
+            Assert.Contains("2 files were not extracted: their data failed authentication (damaged or changed).", x.Errors);
+        }
+        // one byte flipped where the block descriptor (with the method id) is encrypted
+        var flipped = (byte[])original.Clone();
+        flipped[frames[0].Offset + Osa.FrameHeaderSize + 1] ^= 0x01;
+        File.WriteAllBytes(path, flipped);
+        using (var r = OsaReader.Open(path, () => Pw))
+        {
+            var x = Extractor.Test(r, null, Ct);
+            Assert.Equal((3, 1), (x.FilesOk, x.FilesFailed));
+            Assert.Contains("1 file did not verify: its data failed authentication (damaged or changed).", x.Errors);
+        }
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void AHeaderByteTheFileListBindsCannotBeChanged(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf, SpareCopyPolicy.Always), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        EncryptedArchives.EditHeader(b, h => h[14] ^= 0x01); // the experimental flag (bit 16), CRC fixed
+        File.WriteAllBytes(path, b);
+        var e = Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(path, () => Pw));
+        Assert.Contains("failed authentication", e.Message);
+        Assert.IsNotAssignableFrom<ModifiedArchiveException>(e); // damage, and the spare copy cannot help: it is bound the same way
+        Assert.ThrowsAny<CorruptDataException>(() => ArchiveSources.Open(path, new ArchiveOpenOptions { Password = () => Pw }, Ct));
+    }
+
+    [Fact]
+    public void ACreatorByteOfAnEarlierArchiveIsBoundToo()
+    {
+        using var t = new TempDir();
+        string path = t.Sub("kept.osa");
+        var b = Convert.FromBase64String(KdfArchiveTests.KeptPbkdf2Archive);
+        int creator = b.AsSpan(0, 120).IndexOf("Osmium 0.2.0"u8);
+        EncryptedArchives.EditHeader(b, h => h[creator + 7] = (byte)'9');
+        File.WriteAllBytes(path, b);
+        Assert.Contains("failed authentication", Assert.ThrowsAny<CorruptDataException>(() => OsaReader.Open(path, () => "kept as bytes")).Message);
+    }
+
+    [Theory]
+    [InlineData("pbkdf2")]
+    [InlineData("argon2id")]
+    public void AHeaderThatClaimsEncryptionWithoutItsSettingsIsRefusedAndNotTakenForDamage(string kdf)
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), Options(kdf, SpareCopyPolicy.Always), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        EncryptedArchives.EditHeader(b, h => h[36] = 4); // record 1 becomes an ignorable record 4: the flag stays, the settings go
+        File.WriteAllBytes(path, b);
+        // the header copy at the end is intact, but this is no damage it may stand in for
+        Assert.Equal(M1, Assert.ThrowsAny<ModifiedArchiveException>(() => ArchiveHeader.Read(new MemoryStream(b))).Message);
+        AssertRefusedEverywhere(t, path);
+    }
+
+    [Fact]
+    public void TheSameBytesInAnUnencryptedArchiveStillOpen()
+    {
+        using var t = new TempDir();
+        string path = EncryptedArchives.WriteWithFolder(t.Sub("a.osa"), new OsaWriterOptions(), 3000, 3000);
+        var b = File.ReadAllBytes(path);
+        EncryptedArchives.EditFrameHeader(b, EncryptedArchives.Frames(path)[1].Offset, fh => fh[4] = 0x04); // a frame flag of a newer version
+        File.WriteAllBytes(path, b);
+        using var r = OsaReader.Open(path);
+        Assert.Throws<NewerVersionException>(() => r.ReadBlock(1));
+    }
+
     [Fact]
     public void TheSourceGivesTheCostQuestionToItsCaller()
     {

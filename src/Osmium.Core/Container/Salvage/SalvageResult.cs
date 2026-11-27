@@ -92,6 +92,8 @@ public sealed class SalvageFrame
     internal bool Intact { get; set; }
     /// <summary>Decoded, with every stage size and the content hash verified.</summary>
     internal bool Decoded { get; set; }
+    /// <summary>Encrypted, and its GCM tag did not check out with the archive's key.</summary>
+    internal bool FailedAuthentication { get; set; }
     internal byte[]? DescriptorBytes { get; set; }
     internal BlockDescriptor? Descriptor { get; set; }
 

@@ -68,6 +68,75 @@ internal static class EncryptedArchives
 
     public static byte[] Argon2Record(int t, int m, int p) =>
         new IO.BlobWriter().B(2).U((ulong)t).U((ulong)m).U((ulong)p).Raw(new byte[32]).B(1).Raw(new byte[16]).ToArray();
+
+    /// <summary>
+    /// Files f0.bin … of <see cref="Content"/> with the sizes given (one stored block each), plus an empty file and the
+    /// folder "docs" holding it: what a reader that refuses an archive must not write either.
+    /// </summary>
+    public static string WriteWithFolder(string path, OsaWriterOptions options, params int[] sizes)
+    {
+        using var w = new OsaWriter(path, options);
+        var t = new DateTime(2025, 1, 2, 3, 4, 6, DateTimeKind.Utc);
+        var entries = new List<ArchiveEntry>
+        {
+            new() { Path = "docs", Kind = EntryKind.Directory, ModifiedUtc = t },
+            new() { Path = "docs/empty.txt", Kind = EntryKind.File, Hash = System.IO.Hashing.XxHash128.HashToUInt128([]), ModifiedUtc = t },
+        };
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            var data = Content(i, sizes[i] - i);
+            var (desc, payload) = PipelineExecutor.Encode(PipelineSpec.Parse("store", MethodRegistry.Default), data, CodecContext.None);
+            int frame = w.WriteBlock(desc, BlockBody.Hash128(data), payload, data.Length);
+            entries.Add(new ArchiveEntry
+            {
+                Path = $"f{i}.bin", Kind = EntryKind.File, Size = data.Length, Segments = [new Segment(frame, 0, data.Length)],
+                Hash = System.IO.Hashing.XxHash128.HashToUInt128(data), ModifiedUtc = t,
+            });
+        }
+        w.Finish(entries, new Dictionary<string, byte[]> { ["profile"] = "fast"u8.ToArray() });
+        w.Commit(overwrite: true);
+        return path;
+    }
+
+    /// <summary>The offset and frame length of every block, read through the archive's index.</summary>
+    public static List<(long Offset, long Length)> Frames(string path, string password = Password)
+    {
+        using var r = OsaReader.Open(path, () => password);
+        return [.. r.Blocks.Select(b => (b.Offset, b.FrameLength))];
+    }
+
+    /// <summary>Rewrites the frame header at <paramref name="at"/> (its CRC fixed).</summary>
+    public static void EditFrameHeader(byte[] file, long at, Action<byte[]> change)
+    {
+        var fh = file.AsSpan((int)at, Osa.FrameHeaderSize).ToArray();
+        change(fh);
+        BinaryPrimitives.WriteUInt32LittleEndian(fh.AsSpan(24), Osa.Crc(fh.AsSpan(0, 24)));
+        fh.CopyTo(file, at);
+    }
+
+    /// <summary>Changes header bytes at offset 0 and fixes the header CRC.</summary>
+    public static void EditHeader(byte[] file, Action<byte[]> change)
+    {
+        int length = 40 + (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(32));
+        var h = file.AsSpan(0, length).ToArray();
+        change(h);
+        BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(length - 4), Osa.Crc(h.AsSpan(0, length - 4)));
+        h.CopyTo(file, 0);
+    }
+
+    /// <summary>
+    /// <paramref name="header"/> in place of the header of the archive <paramref name="file"/>: the footer is moved by the
+    /// difference in length and names the new header's archive id (the index places blocks after whatever header there is).
+    /// </summary>
+    public static byte[] Graft(byte[] header, byte[] file)
+    {
+        int oldLength = 40 + (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(32));
+        var b = (byte[])[.. header, .. file.AsSpan(oldLength)];
+        long offset = BinaryPrimitives.ReadInt64LittleEndian(b.AsSpan(b.Length - 32)) + header.Length - oldLength;
+        long length = BinaryPrimitives.ReadInt64LittleEndian(b.AsSpan(b.Length - 24));
+        new ArchiveFooter(offset, length, BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16))).Serialize().CopyTo(b, b.Length - 32);
+        return b;
+    }
 }
 
 public class KdfArchiveTests
@@ -221,7 +290,7 @@ public class KdfArchiveTests
     /// An archive as the writer made it before Argon2id: PBKDF2 (100,000 iterations), a Creator record in the header
     /// and none in the file list, fixed salt and archive id, two files of 40 and 41 bytes.
     /// </summary>
-    private const string KeptPbkdf2Archive =
+    internal const string KeptPbkdf2Archive =
         "T1NNQRoNCgABAAEAAQAAAGBhYmNkZWZnaGlqa2xtbm9FAAAAATUBoI0GgIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8BotqaFXh4ImTp"
         + "iel+7wmbwwIMT3NtaXVtIDAuMi4wK/GZsk9CTEsBAAAAAAAAAAAAAABbAAAAAAAAAPB13mbqmalzV27tv/RCaXQNFFsDJvcopmbTmqUQycXOop0J"
         + "aj9sSc24AgfLiGG+UGzicvt5BtPeEHJlF2I8U+TC2zqZv1XcvR2ovUeChVQDuxLbBeCzuxOrseiU0WhpT0JMSwEAAAABAAAAAAAAAFwAAAAAAAAA"

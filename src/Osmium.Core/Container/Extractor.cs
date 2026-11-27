@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Hashing;
+using Osmium.Core.Crypto;
 using Osmium.Core.Pipeline;
 
 namespace Osmium.Core.Container;
@@ -283,60 +284,92 @@ public static class Extractor
         var budget = new MemoryGate(options.MemoryBudget);
         var fileLocks = new ConcurrentDictionary<FileState, object>();
         var newerFrames = new ConcurrentDictionary<int, bool>();
+        // Encrypted archives: blocks whose GCM tag failed. Damage and a change look the same to AES-GCM, so each is damage
+        // for its own files; when every block read fails, nothing is written and the archive is refused as one that only
+        // claims to be encrypted.
+        bool encrypted = reader.Header.Encrypted;
+        var unauthenticated = new ConcurrentDictionary<int, bool>();
+        int attempted = 0;
         bool finished = false;
-        try
+        void CompleteEmptyFiles()
         {
-            // Empty files complete immediately.
             foreach (var f in files.Where(f => f.Entry.Segments.Count == 0))
             {
                 if (Complete(f, null)) ok++; else failed++;
                 filesDone++;
             }
+        }
+        try
+        {
+            // Empty files complete immediately; in an encrypted archive once a block has authenticated.
+            if (!encrypted) CompleteEmptyFiles();
 
-            Parallel.ForEach(byFrame.Keys.OrderBy(k => k),
-                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelBlocks), CancellationToken = ct },
-                frame =>
-                {
-                    var info = reader.Blocks[frame];
-                    // Every stage of the pipeline holds its whole output: reserve for the largest, which the descriptor
-                    // records (a filter that expands, or a crafted descriptor, can make it larger than the block). More
-                    // than the budget makes the block decode alone.
-                    long need = Math.Min(options.MemoryBudget, SalvageRun.DecodeCharge(info.Descriptor, info.DecodeMemory + info.RawSize * 2));
-                    options.OnReserve?.Invoke(frame, need);
-                    using var lease = budget.Acquire(need, ct);
-                    byte[]? raw = null;
-                    try
+            try
+            {
+                Parallel.ForEach(byFrame.Keys.OrderBy(k => k),
+                    new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelBlocks), CancellationToken = ct },
+                    frame =>
                     {
-                        raw = reader.ReadBlock(frame, new CodecContext { Token = ct });
-                    }
-                    catch (NewerVersionException ex)
-                    {
-                        errors.Enqueue(ex.Message); // names the block and what it needs; it is not damage
-                        newerFrames[frame] = true;
-                    }
-                    catch (Exception ex) when (ex is CorruptDataException or InvalidDataException or IOException)
-                    {
-                        errors.Enqueue($"block {frame}: {ex.Message}");
-                    }
-                    foreach (var (f, segIdx) in byFrame[frame])
-                    {
-                        var seg = f.Entry.Segments[segIdx];
-                        lock (fileLocks.GetOrAdd(f, _ => new object()))
+                        Interlocked.Increment(ref attempted);
+                        var info = reader.Blocks[frame];
+                        // Every stage of the pipeline holds its whole output: reserve for the largest, which the descriptor
+                        // records (a filter that expands, or a crafted descriptor, can make it larger than the block). More
+                        // than the budget makes the block decode alone.
+                        long need = Math.Min(options.MemoryBudget, SalvageRun.DecodeCharge(info.Descriptor, info.DecodeMemory + info.RawSize * 2));
+                        options.OnReserve?.Invoke(frame, need);
+                        using var lease = budget.Acquire(need, ct);
+                        byte[]? raw = null;
+                        try
                         {
-                            if (raw is null) f.Failed = true;
-                            else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors, root);
-                            f.Remaining--;
-                            Interlocked.Add(ref done, seg.Length);
-                            if (f.Remaining == 0)
+                            raw = reader.ReadBlock(frame, new CodecContext { Token = ct });
+                        }
+                        catch (NewerVersionException ex)
+                        {
+                            errors.Enqueue(ex.Message); // names the block and what it needs; it is not damage
+                            newerFrames[frame] = true;
+                        }
+                        catch (AuthenticationFailedException ex)
+                        {
+                            errors.Enqueue($"block {frame}: {ex.Message}");
+                            unauthenticated[frame] = true;
+                        }
+                        catch (Exception ex) when (ex is not ModifiedArchiveException && ex is CorruptDataException or InvalidDataException or IOException)
+                        {
+                            errors.Enqueue($"block {frame}: {ex.Message}");
+                        }
+                        foreach (var (f, segIdx) in byFrame[frame])
+                        {
+                            var seg = f.Entry.Segments[segIdx];
+                            lock (fileLocks.GetOrAdd(f, _ => new object()))
                             {
-                                bool good = Complete(f, null) && !f.Failed;
-                                if (good) Interlocked.Increment(ref ok); else Interlocked.Increment(ref failed);
-                                Interlocked.Increment(ref filesDone);
+                                if (raw is null) f.Failed = true;
+                                else if (!f.Failed) WriteSegment(f, segIdx, raw.AsSpan((int)seg.Offset, (int)seg.Length), test, errors, root);
+                                f.Remaining--;
+                                Interlocked.Add(ref done, seg.Length);
+                                if (f.Remaining == 0)
+                                {
+                                    bool good = Complete(f, null) && !f.Failed;
+                                    if (good) Interlocked.Increment(ref ok); else Interlocked.Increment(ref failed);
+                                    Interlocked.Increment(ref filesDone);
+                                }
                             }
                         }
-                    }
-                    progress?.Report(new ExtractProgress(Interlocked.Read(ref done), total, filesDone, files.Count, null));
-                });
+                        progress?.Report(new ExtractProgress(Interlocked.Read(ref done), total, filesDone, files.Count, null));
+                    });
+            }
+            catch (AggregateException ae) when (ae.InnerExceptions.OfType<ModifiedArchiveException>().FirstOrDefault() is { } modified)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(modified); // never damage of one block
+            }
+            if (encrypted && attempted > 0 && unauthenticated.Count == attempted) throw new ModifiedArchiveException();
+            if (encrypted) CompleteEmptyFiles();
+            if (!unauthenticated.IsEmpty)
+            {
+                int n = files.Count(f => f.Entry.Segments.Any(s => unauthenticated.ContainsKey(s.Frame)));
+                errors.Enqueue(n == 1
+                    ? $"1 file {(test ? "did not verify" : "was not extracted")}: its data failed authentication (damaged or changed)."
+                    : $"{n:N0} files {(test ? "did not verify" : "were not extracted")}: their data failed authentication (damaged or changed).");
+            }
             finished = true;
         }
         finally

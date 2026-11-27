@@ -228,7 +228,9 @@ public sealed class ArchiveHeader
                     break;
             }
         }
-        if (((flags & Osa.FlagEncrypted) != 0) != (enc is not null)) throw new CorruptDataException("Encryption flag and header disagree.");
+        // The CRC checks out, so a header that claims encryption without its settings was made that way: never damage.
+        if ((flags & Osa.FlagEncrypted) != 0 && enc is null) throw new ModifiedArchiveException();
+        if ((flags & Osa.FlagEncrypted) == 0 && enc is not null) throw new CorruptDataException("Encryption flag and header disagree.");
         var raw = new byte[36 + extLen + 4];
         all.CopyTo(raw, 0);
         rest.AsSpan((int)extLen).CopyTo(raw.AsSpan(36 + (int)extLen));

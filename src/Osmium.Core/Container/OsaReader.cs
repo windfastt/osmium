@@ -142,6 +142,9 @@ public sealed class OsaReader : IDisposable
 
             if (header.Encrypted)
             {
+                // An index frame that is not encrypted under a header that says encrypted is refused before the password
+                // is asked for (a frame header whose CRC fails is damage, left to the spare copy).
+                if (ReadFrameHeader(handle, ft.IndexOffset) is { } ih && (ih.Flags & Osa.FrameFlagEncrypted) == 0) throw new ModifiedArchiveException();
                 var enc = header.Encryption!;
                 var run = new KdfRun
                 {
@@ -175,6 +178,7 @@ public sealed class OsaReader : IDisposable
                 warnings.Add(UsedSpareIndex);
                 usedSpareIndex = true;
             }
+            if (header.Encrypted) CheckBlockFrameHeaders(handle, index);
             var spares = FindSpares(handle, index, ft, header, out bool damaged, out bool newer);
             if (damaged && !usedSpareIndex) warnings.Add(SpareDamaged);
             return new OsaReader(System.IO.Path.GetFullPath(path), handle, header, key, index, length, registry, ft, spares, warnings,
@@ -217,6 +221,36 @@ public sealed class OsaReader : IDisposable
     }
 
     internal const string IndexTooLarge = "The file list of this archive is larger than Osmium accepts (more than 256 MiB).";
+
+    /// <summary>A frame header whose marker and CRC check out: flags, number and body length.</summary>
+    private readonly record struct FrameHead(uint Flags, ulong Number, long BodyLength);
+
+    /// <summary>The frame header at <paramref name="offset"/> when its marker and CRC check out, else null (damage).</summary>
+    private static FrameHead? ReadFrameHeader(ArchiveFile handle, long offset)
+    {
+        Span<byte> fh = stackalloc byte[Osa.FrameHeaderSize];
+        if (offset < 0 || !TryRead(handle, offset, fh) || !fh[..4].SequenceEqual(Osa.FrameMagic)
+            || Osa.Crc(fh[..24]) != BinaryPrimitives.ReadUInt32LittleEndian(fh[24..])) return null;
+        return new FrameHead(BinaryPrimitives.ReadUInt32LittleEndian(fh[4..]), BinaryPrimitives.ReadUInt64LittleEndian(fh[8..]),
+            BinaryPrimitives.ReadInt64LittleEndian(fh[16..]));
+    }
+
+    /// <summary>
+    /// In an encrypted archive, the frame header of every block the authenticated index lists: one that checks out must
+    /// have the block's number, the encrypted flag, not the index flag, and the index's length; otherwise the archive
+    /// was made that way (<see cref="ModifiedArchiveException"/>), before anything is listed or written. A frame header
+    /// that does not check out is damage: that block fails when it is read, and the others are not affected.
+    /// </summary>
+    private static void CheckBlockFrameHeaders(ArchiveFile handle, ArchiveIndex index)
+    {
+        foreach (var b in index.Blocks)
+        {
+            if (ReadFrameHeader(handle, b.Offset) is not { } h) continue;
+            if (h.Number != (ulong)b.Frame || (h.Flags & Osa.FrameFlagEncrypted) == 0 || (h.Flags & Osa.FrameFlagIndex) != 0
+                || h.BodyLength != b.FrameLength - Osa.FrameHeaderSize)
+                throw new ModifiedArchiveException();
+        }
+    }
 
     /// <summary>An index frame longer than <see cref="Osa.MaxIndexFrameBytes"/> is refused before it is allocated or read
     /// (the footer that says so checks out, so this is not damage).</summary>
@@ -484,6 +518,8 @@ public sealed class OsaReader : IDisposable
         long bodyLen = BinaryPrimitives.ReadInt64LittleEndian(fh.AsSpan(16));
         string location = isIndex ? "the index" : $"block {expectedFrame}";
         if (number != expectedFrame) throw new CorruptDataException($"Expected frame {expectedFrame} but found {number}.");
+        // A frame that is not encrypted in an archive that says it is: made that way (its header CRC checks out).
+        if (header.Encrypted && (flags & Osa.FrameFlagEncrypted) == 0) throw new ModifiedArchiveException();
         if (((flags & Osa.FrameFlagEncrypted) != 0) != header.Encrypted) throw new CorruptDataException("Frame encryption flag mismatch.");
         if (((flags & Osa.FrameFlagIndex) != 0) != isIndex) throw new CorruptDataException("Frame type mismatch.");
         // The frame header CRC has been checked: a flag this version does not know was set by a newer one.
