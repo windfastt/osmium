@@ -192,11 +192,33 @@ public sealed class ZstdCodec : MethodBase
     internal static int Wlog(ParamValues p, long len, long wl) =>
         Math.Clamp(Math.Min(wl > 0 ? (int)wl : 27, CodecIo.Log2Ceil(Math.Max(1, len))), 10, 31);
 
+    /// <summary>zstd's hash and chain table sizes (log2) and strategy for levels 1–22, from its table for inputs of
+    /// unknown size or over 256 KiB.</summary>
+    private static readonly (byte Hash, byte Chain, byte Strategy)[] LevelTables =
+    [
+        (14, 13, 1), (16, 15, 1), (17, 16, 2), (18, 18, 2), (19, 18, 3), (19, 18, 4), (20, 19, 4), (20, 19, 5),
+        (21, 20, 5), (22, 21, 5), (22, 21, 5), (23, 22, 5), (22, 22, 6), (23, 22, 6), (23, 23, 6), (22, 22, 7),
+        (22, 23, 7), (22, 23, 8), (22, 24, 9), (23, 25, 9), (24, 26, 9), (25, 27, 9),
+    ];
+
+    /// <summary>
+    /// What encoding <paramref name="len"/> bytes takes besides the input. The encoder is not told the input's size,
+    /// so zstd sizes its hash and chain tables by the level alone, whatever the window (level 22 takes 640 MiB even for
+    /// a small sample); a long-distance table joins them when asked for, and on its own for the optimal strategies
+    /// (levels 16–22) once the window reaches 128 MiB. Then the encoder's copy of the window, the output while it grows
+    /// (twice the input at worst), an eighth more than the tables, and 16 MiB for the rest.
+    /// </summary>
     public override long EncodeMemory(ParamValues p, long len)
     {
         int w = Wlog(p, len, Get(p, "wlog"));
-        long level = Get(p, "level");
-        return (1L << w) * (level >= 19 ? 4 : 2) + (Get(p, "ldm") != 0 ? 1L << Math.Max(20, w - 1) : 0) + len + (64L << 20);
+        var (hash, chain, strategy) = LevelTables[Math.Clamp((int)Get(p, "level"), 1, LevelTables.Length) - 1];
+        long chosen = Get(p, "strategy");
+        if (chosen > 0) strategy = (byte)chosen;
+        // The hash and chain tables, the row match finder's tags and the optimal parser's state.
+        long tables = (4L << hash) + (4L << chain) + (1L << hash) + (1L << 20);
+        if (Get(p, "ldm") != 0 || strategy >= 7 && w >= 27) tables += 1L << Math.Max(20, w - 1);
+        long window = (1L << w) + (128L << 10);
+        return tables + tables / 8 + window + 2 * len + (16L << 20);
     }
 
     public override long DecodeMemory(ParamValues p, long len) => Math.Min(1L << Wlog(p, len, Get(p, "wlog")), len) + len + (8L << 20);
