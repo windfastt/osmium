@@ -209,10 +209,10 @@ public sealed class Planner(PlanOptions o)
                 List<ChunkInfo> chunks;
                 try
                 {
-                    (chunks, var h) = DedupScanner.Chunk(f.Src.FullPath, ct);
+                    (chunks, var h) = DedupScanner.Chunk(f.Src, ct);
                     f.Hash = h;
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException)
                 {
                     plan.Warnings.Add($"{f.Src.RelPath}: cannot read ({e.Message})");
                     continue;
@@ -245,8 +245,8 @@ public sealed class Planner(PlanOptions o)
                 foreach (int i in bySize)
                 {
                     string sha;
-                    try { sha = Convert.ToHexString(DedupScanner.Sha256File(files[i].Src.FullPath, ct)); }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+                    try { sha = Convert.ToHexString(DedupScanner.Sha256File(files[i].Src, ct)); }
+                    catch (Exception e) when (e is (IOException or UnauthorizedAccessException) and not SourceChangedException) { continue; }
                     if (bySha.TryGetValue(sha, out int first)) duplicateOf[i] = first;
                     else bySha[sha] = i;
                 }

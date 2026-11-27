@@ -55,12 +55,13 @@ public sealed record ChunkInfo(long Offset, int Length, byte[] Sha, UInt128 Xxh)
 public static class DedupScanner
 {
     /// <summary>Splits a file into content-defined chunks, hashing each (SHA-256 identity + XXH128 for re-read checks).
-    /// Also returns the XXH128 of the whole file.</summary>
-    public static (List<ChunkInfo> Chunks, UInt128 FileHash) Chunk(string path, CancellationToken ct)
+    /// Also returns the XXH128 of the whole file. Reads the file the scan saw, or throws
+    /// <see cref="SourceChangedException"/> (see <see cref="SourceIdentity.Open"/>).</summary>
+    public static (List<ChunkInfo> Chunks, UInt128 FileHash) Chunk(SourceFile src, CancellationToken ct)
     {
         var chunks = new List<ChunkInfo>();
         var fileHash = new XxHash128();
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 20, FileOptions.SequentialScan);
+        using var fs = SourceIdentity.Open(src);
         var buf = new byte[8 << 20];
         int filled = 0;
         long baseOffset = 0;
@@ -74,6 +75,7 @@ public static class DedupScanner
                 if (r <= 0) { eof = true; break; }
                 filled += r;
             }
+            if (baseOffset + filled > src.Size || eof && baseOffset + filled != src.Size) throw Changed(src);
             int pos = 0;
             while (pos < filled && (eof || filled - pos >= Cdc.Max))
             {
@@ -91,13 +93,24 @@ public static class DedupScanner
         return (chunks, fileHash.GetCurrentHashAsUInt128());
     }
 
-    public static byte[] Sha256File(string path, CancellationToken ct)
+    /// <summary>The SHA-256 of the file the scan saw, or <see cref="SourceChangedException"/> (see
+    /// <see cref="SourceIdentity.Open"/>).</summary>
+    public static byte[] Sha256File(SourceFile src, CancellationToken ct)
     {
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 20, FileOptions.SequentialScan);
+        using var fs = SourceIdentity.Open(src);
         using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buf = new byte[1 << 20];
+        long total = 0;
         int r;
-        while ((r = fs.Read(buf)) > 0) { ct.ThrowIfCancellationRequested(); sha.AppendData(buf, 0, r); }
+        while ((r = fs.Read(buf)) > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            if ((total += r) > src.Size) throw Changed(src);
+            sha.AppendData(buf, 0, r);
+        }
+        if (total != src.Size) throw Changed(src);
         return sha.GetHashAndReset();
     }
+
+    private static SourceChangedException Changed(SourceFile src) => new(src.FullPath, "changed while it was being read");
 }
